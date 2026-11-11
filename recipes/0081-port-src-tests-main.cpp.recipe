@@ -1,0 +1,29 @@
+# port/src/tests/main.cpp from Chronicle's port/src/tests/main.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/tests/main.cpp
+base port/src/tests/main.cpp
+from dc468c80b97cf1dbdddee0986c5b2d1487395f84
+to 1645b06acdead0f265a7287feab0d5b0ae2fdc2b
+@@ -3,0 +4,2
++#include "platform/input.hpp"
++#include "platform/paths.hpp"
+@@ -12,0 +15,18
++namespace {
++
++// ctest runs each case in a process of its own (gtest_discover_tests); darkcloud_tests run on its own
++// runs every case in one. Before each case this puts back what a fresh process has of the state cases
++// leave behind, so both ways agree: the path configuration (Kazarov's own cases configure theirs) and
++// the pads' scripted overrides.
++class FreshProcessState : public testing::EmptyTestEventListener {
++    void OnTestStart(const testing::TestInfo &) override {
++        PathsReset();
+~14 c15063a88dd549d9|        |
++        for (int pad = 0; pad < kInputPadCount; ++pad) {
++            InputSetOverride(pad, nullptr);
++        }
++    }
++};
++
++} // namespace
++
+@@ -19,0 +40,1
++    testing::UnitTest::GetInstance()->listeners().Append(new FreshProcessState);

@@ -1,0 +1,31 @@
+# port/src/data/data_read.cpp from Chronicle's port/src/data/data_read.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/data/data_read.cpp
+base port/src/data/data_read.cpp
+from 019ce30bd3f1935b98da815c4d0733bc30e87e1d
+to 4316e75f66216a8fb5773fb111b810ce5f764319
+@@ -828,0 +829,25
++bool DataNtscRelease() {
++    static const bool ntsc = [] {
+~790 34f8db7acce2a7b9|        |
++        if (!file) {
++            return false;
++        }
+~794 8273bf63205cd73f|        |
++        const bool                loaded = file->archived ? data_archive->Read(file->archive_index, bytes) : [&] {
+~558 ce50187152759e18|            |
+~329 a379e3b718a17224|            |
+~800 397f9287e9f980a3|            |
++        }();
++        if (!loaded) {
++            return false;
++        }
++        const std::string text(bytes.begin(), bytes.end());
++        std::size_t       key = text.find("\"release\"");
++        std::size_t       colon = key == std::string::npos ? key : text.find(':', key);
++        std::size_t       open = colon == std::string::npos ? colon : text.find('"', colon);
++        std::size_t       close = open == std::string::npos ? open : text.find('"', open + 1);
++        return close != std::string::npos && text.substr(open + 1, close - open - 1).find("NTSC") != std::string::npos;
++    }();
++    return ntsc;
++}
++

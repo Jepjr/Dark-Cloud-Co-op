@@ -1,0 +1,99 @@
+# port/src/game/battlemenu.cpp from Chronicle's port/src/game/battlemenu.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/battlemenu.cpp
+base port/src/game/battlemenu.cpp
+from 622865b951a30f0835b0cc583ed02d6cad64e80c
+to 72ed94e9831e258cce2afd627abfb180ceb03c5b
+@@ -48,0 +49,16
++void CoopWorldsTestMapCursor(int *cursor); // coop-worlds (port/src/coop/coop_worlds.cpp)
++int  CoopWorldsTestMapPick();             // coop-worlds
++namespace coop { // coop-itemsend (port/src/coop/coop_inventory.cpp): the bag screen's Select send and its help line
++bool BagScreenSendOn();
++bool BagScreenSend(dc::game::ITEM_PACK *pack, int slot);
++bool BagScreenHelp(dc::game::ClsMes &mes, int retail_id);
++int  BagScreenHelpExtraLines();
++void BagScreenSharedDraw(); // coop-sharedkeys
++constexpr int kKeysTabPage = 9; // coop-keytab (port/src/coop/coop_keytab.cpp): the board's Keys page
++int KeysTabItemAt(int cell);
++int KeysTabSavedPage(int page);
++bool MenuCharaAsks(int chara); // coop-townwheel (port/src/coop/coop_prompt.cpp): the partner's member is asked for, not taken
++void FullMenuStartsClean();    // coop-pt1109d (port/src/coop/coop_fullmenu.cpp)
++} // namespace coop
++constexpr int kCoopHelpRow = 20; // coop-itemsend: one help line's height (ClsMes line pitch), screen pixels
++
+@@ -812,0 +829,1
++    coop::FullMenuStartsClean();
+@@ -1453,1 +1470,5
+- 125c5a6823504bb7
++                                    // coop-townwheel: the other player's member is a question (asked at the load), so the party's
++                                    // member stays the player's meanwhile: the partner's pick would see it taken and move on.
++                                    if (!coop::MenuCharaAsks(chara)) {
+~1453 125c5a6823504bb7|                                        |
++                                    }
+@@ -4690,0 +4712,5
++
++    if (page > BOARD_PAGE_ATTACH) { // coop-keytab: nothing to throw from the Keys page
++        return;
++    }
++
+@@ -4745,1 +4771,1
+- 124a1d374f1eacbc
++        SetCursorChara(cursor, coop::KeysTabSavedPage(ItemMenuMode.board.page)); // coop-keytab: no Keys page in a save
+@@ -5243,1 +5269,1
+- 44c4e6c25bf2a346
++                        int count = page <= BOARD_PAGE_ATTACH ? ItemMenuMode.overflow_count[page] : 0; // coop-keytab: the Keys page has none
+@@ -5810,0 +5837,12
++                } else if (GamePad.Down(PAD_SELECT) != 0 && ItemMenuMode.mode == ITEM_MENU_BOARD && ItemMenuMode.board.page == BOARD_PAGE_ITEM && coop::BagScreenSendOn()) {
++                    // coop-itemsend: Select sends the item under the cursor to the other player's bag.
++                    if (ItemMenuMode.board.cursor_area == PERSONAL_BOARD_AREA_TRASH || IconAutoGet.IsMoveIcon() != 0 || !coop::BagScreenSend(MenuItemPackPt, ItemMenuMode.board.cursor)) {
+=1465 f4084070043a8cf4
++                    } else {
+~5841 211b46dc20817ec0|                        |
+~5120 4c3b6e306c909c0f|                            |
+~5843 710655a753e16133|                            |
++                        }
++
+=2849 c5ed4dc822762c3a
++                    }
+@@ -5969,1 +6007,2
+- 13ed1aaf6a2576f1
++                            } else if (ItemMenuMode.board.page == BOARD_PAGE_WEAPON || ItemMenuMode.board.page == BOARD_PAGE_ATTACH ||
++                                       ItemMenuMode.board.page == coop::kKeysTabPage) { // coop-keytab: the keys stay
+@@ -6142,1 +6181,3
+- e6758fb715dc0f87
++                // coop-itemsend: on the Items page Select is the send while the bags are separate (debug starts have
++                // debug mode on too), so the debug list opens from the other pages.
++                if (GamePad.Down(PAD_SELECT) && !(ItemMenuMode.mode == ITEM_MENU_BOARD && ItemMenuMode.board.page == BOARD_PAGE_ITEM && coop::BagScreenSendOn())) {
+@@ -6292,0 +6334,9
++                        case coop::kKeysTabPage: { // coop-keytab: the key's description, as on the Items page
++                            int key = coop::KeysTabItemAt(cursor);
++
++                            if (key >= ITEM_DUNGEON_START) {
++                                message = key + 0x1F4;
++                            }
++
++                            break;
++                        }
+@@ -6358,0 +6409,5
++                // coop-itemsend: the Items page's help adds "{select} Send." under retail's lines.
++                if (ItemMenuMode.mode == ITEM_MENU_BOARD && ItemMenuMode.board.page == BOARD_PAGE_ITEM && coop::BagScreenHelp(AtoraNameMes, name)) {
++                    break;
++                }
++
+@@ -6434,1 +6489,3
+- b1e1c504b6a84b2c
++        // coop-itemsend: the Send line's row more, the box growing upward (it already sits on the screen's bottom).
++        int send_rows = ItemMenuMode.mode == ITEM_MENU_BOARD && ItemMenuMode.board.page == BOARD_PAGE_ITEM ? coop::BagScreenHelpExtraLines() : 0;
++        MenuHelpWinDraw(0x36, 0x174 + shift[BtlMenuNowLang] - send_rows * kCoopHelpRow, widths[BtlMenuNowLang], heights[BtlMenuNowLang] + send_rows * kCoopHelpRow / 22.0f, 0x80);
+@@ -6437,1 +6494,1
+- 92c3af711ef88386
++        AtoraNameMes.text_y = 0x178 - send_rows * kCoopHelpRow / 2; // coop-itemsend: the three lines centred in the taller box
+@@ -6442,0 +6500,1
++    coop::BagScreenSharedDraw(); // coop-sharedkeys: the party's shared keys in the empty bottom-right corner
+@@ -7552,1 +7610,1
+- ecced8f4f70e3670
++            if (GamePad.Down(PAD_CROSS) != 0 || CoopWorldsTestMapPick()) { // coop-worlds: a test's pick
+@@ -7666,0 +7725,1
++                    CoopWorldsTestMapCursor(&MenuMove.cursor); // coop-worlds: a test's pick (DC_WORLDS_TEST_MAP_CURSOR)
+@@ -7713,1 +7772,1
+- 8e8caf17418b581c
++                    if (GamePad.Down(PAD_CROSS) != 0 || CoopWorldsTestMapPick()) { // coop-worlds: a test's pick

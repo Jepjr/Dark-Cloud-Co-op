@@ -1,0 +1,112 @@
+# port/src/game/nowload.cpp from Chronicle's port/src/game/nowload.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/nowload.cpp
+base port/src/game/nowload.cpp
+from 67c474d6a4661d6d0e417adf0a5073e7dbe1955a
+to 48b11281fbd76dedc2aa21908d26a36c34b56bd3
+@@ -5,0 +6,1
++#include <chrono>
+@@ -15,0 +17,2
++#include "coop/coop_boot.hpp" // coop-boot
++#include "coop/netplay.hpp"   // coop-boot
+@@ -22,0 +26,1
++#include "coop/netplay_test.hpp"
+@@ -61,0 +66,15
++// coop: netplay: this load is a resync's (GameTakeResyncLoad), and whether its screen runs short as --fast-load's does;
++// the ticks its area card was up, for the log.
++bool resync_load = false;
++bool quiet_load = false;
++int  card_ticks = 0;
++// coop-areacard: this load's card (coop_boot.hpp's CoopAreaCard; retail's for the logos, --fast-load and a resync), and the
++// ticks the screen ran, for the "areacard:" line.
++CoopAreaCardPlan card_plan;
++int              screen_ticks = 0;
++
++// --fast-load, or a resync's load: the screen's holds and fades run short.
++bool Quick() {
++    return GameFastLoad() || quiet_load;
++}
++
+@@ -79,0 +99,4
++// coop-boot: whether a press has ended the start-up logos, and the ticks they have shown for.
++bool boot_skipped = false;
++int  boot_ticks = 0;
++
+@@ -244,0 +268,2
++        const auto waited_from = std::chrono::steady_clock::now(); // coop-areacard: a load spinning on the card (a town's EditInit)
++
+@@ -245,0 +271,1
++        CoopAreaCardWaited(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited_from).count());
+@@ -259,0 +286,2
++        const auto waited_from = std::chrono::steady_clock::now(); // coop-areacard: a load's yield to the card's tick
++
+@@ -264,0 +293,1
++        CoopAreaCardWaited(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited_from).count());
+@@ -279,0 +309,4
++    resync_load = GameTakeResyncLoad();
++    quiet_load = resync_load && !NetplayMutated("loud_resync_load");
++    card_ticks = 0;
++
+@@ -317,0 +351,5
++        // coop-boot
++        boot_skipped = false;
++        boot_ticks = 0;
++        std::fprintf(stderr, "coop-boot: logos start at frame %lld%s\n", (long long) GameFrameCount(),
++                     NetplayOwnsPads() ? " (linked: controllers only)" : "");
+@@ -332,1 +370,8
+- 77d355f47b8cc33e
++    // coop-areacard: an area's card as the settings say (retail's unless set); the logos, --fast-load and a resync as before.
++    const bool planned = title_number != 0x321 && !Quick();
++    card_plan = planned ? CoopAreaCard() : CoopAreaCardPlan{};
++    if (!planned) {
++        card_plan.kind = title_number == 0x321 ? "logos" : resync_load ? "short (a resync's load)" : "short (--fast-load)";
++    }
++    screen_ticks = 0;
++    nl_start_cnt = planned ? card_plan.start : Quick() ? 1 : 20;
+@@ -334,1 +379,1
+- fe9443166f5fa20b
++    col_add = planned ? card_plan.fade_in : Quick() ? 64.0f : 1.0f;
+@@ -341,0 +387,1
++    CoopAreaCardOn(title_number, card_plan.kind); // coop-areacard
+@@ -346,1 +392,1
+- d7487cf5cc20af4f
++// --fast-load (a test hook) or a resync's load: the holds take two ticks.
+@@ -348,1 +394,1
+- 3e7d39f77675e53f
++    return Quick() ? 2 : ticks;
+@@ -357,0 +404,1
++    screen_ticks++; // coop-areacard
+@@ -362,0 +410,12
++            // coop-boot: Start or Cross ends the logos: the one on screen fades out at eight times
++            // its speed, with no hold, and the next one is not shown.
++            boot_ticks++;
++
++            if (!boot_skipped && CoopBootSkipPressed()) {
++                boot_skipped = true;
+~335 0dfa0a01a867af1e|                |
++                col_add = -16.0f;
++                std::fprintf(stderr, "coop-boot: logos skipped on the %s logo after %d ticks\n",
++                             logo_count == 0 ? "SCE" : "Level-5", boot_ticks);
++            }
++
+@@ -393,1 +452,1
+- 6fb9f459d246ce10
++                if (logo_count == 1 || boot_skipped) { // coop-boot: a skip ends both
+@@ -394,0 +454,3
++                    CoopAreaCardOff(screen_ticks); // coop-areacard
++                    std::fprintf(stderr, "coop-boot: logos ended after %d ticks (%s)\n", boot_ticks,
++                                 boot_skipped ? "skipped" : "shown in full");
+@@ -403,0 +466,1
++            card_ticks++;
+@@ -410,1 +473,1
+- 48f06ddfb0299d74
++                hold_count = Hold(card_plan.hold); // coop-areacard (retail's 120)
+@@ -412,1 +475,1
+- d87583ee3370f3b7
++                col_add = Quick() ? -col_add : -card_plan.fade_out; // coop-areacard (retail's: the fade in's 1, negated)
+@@ -417,0 +481,6
++                CoopAreaCardOff(screen_ticks); // coop-areacard
++
++                if (resync_load) {
++                    std::fprintf(stderr, "netplay: resync load: the area card was up %d load ticks (%s), gone %lld ms after the state came\n",
++                                 card_ticks, quiet_load ? "short" : "in full", NetplayResyncAgeMs()); // coop-mergetime
++                }

@@ -1,0 +1,15 @@
+# Made on your PC: the build, the game data from your disc, your saves.
+out/
+data/
+data.part/
+save/
+soundtrack/
+# Built on your PC (builduild.ps1) or taken from a Release: the repo is source only.
+game/
+# Written by build\BuildVersion.ps1 into the build's stage (never in src\)
+src/coop/build_version.hpp
+/Play Dark Cloud Co-op.exe
+__pycache__/
+*.stackdump
+# Development: the maintainers' own folder, never published.
+debug/

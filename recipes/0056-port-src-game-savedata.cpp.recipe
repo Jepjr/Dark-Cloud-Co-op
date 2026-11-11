@@ -1,0 +1,76 @@
+# port/src/game/savedata.cpp from Chronicle's port/src/game/savedata.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/savedata.cpp
+base port/src/game/savedata.cpp
+from 324f9eb66846c375903ad8243a3c95bbd09817b6
+to aca1df92a30c2d406ad4dfb39721bfe44e46f7f9
+@@ -244,20 +244,1
+- 178b6832584d160d
+- 07761ff8f77e3628
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 37c8118589557358
+- e3b0c44298fc1c14
+- 988da5efb381723e
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- f9f4f145ade4b3c7
+- 73058a3a141e6a24
+- e3b0c44298fc1c14
+- 8de5890c2ffa6cf3
+- c8b5bf482d9aae13
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 1ffe8c1502e1870f
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.
+@@ -273,8 +254,1
+- 914d43a9422c26ec
+- 952c6b710f419a57
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 144822ac454dc473
+- 1ffe8c1502e1870f
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.
+@@ -300,24 +274,1
+- 79e00e9b2b42cc29
+- c268808ef37dad91
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 07761ff8f77e3628
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 37c8118589557358
+- e3b0c44298fc1c14
+- 5907775dc636aaa2
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- f9f4f145ade4b3c7
+- 1c3da9d113d13fd2
+- e3b0c44298fc1c14
+- 8de5890c2ffa6cf3
+- 251f3a02328f23fc
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 1ffe8c1502e1870f
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.
+@@ -423,11 +374,1
+- fdb3184f2494dcc3
+- c268808ef37dad91
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 4a676da4a590512c
+- e3b0c44298fc1c14
+- 46e6083bb1c0ab5b
+- e3b0c44298fc1c14
+- 9c0df6185ca5bf03
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.

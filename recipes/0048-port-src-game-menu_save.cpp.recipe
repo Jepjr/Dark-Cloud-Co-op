@@ -1,0 +1,19 @@
+# port/src/game/menu_save.cpp from Chronicle's port/src/game/menu_save.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_save.cpp
+base port/src/game/menu_save.cpp
+from 0ad9b3a4b7d2038a06468b503e0e1c2e071c2070
+to e32fba8de9e04191f41a16bc4d0d715a94bc4562
+@@ -956,0 +957,8
+=1565 5c19ecd9ea55999f
++
++// coop-worldkeys (port/src/coop/coop_inventory.cpp, global scope)
++dc::game::ITEM_PACK *CoopEventItemPack(dc::game::ITEM_PACK *pack);
++void                 CoopEventItemTaken(int slot);
++
+=38 7a2f03f556986854
++
+@@ -957,0 +966,2
++    pack = CoopEventItemPack(pack); // coop-worldkeys: the pack with the world's key ring in it
++
+@@ -1263,0 +1274,1
++                            CoopEventItemTaken(pack_index); // coop-worldkeys: out of the pack or ring it came from

@@ -1,0 +1,31 @@
+# port/src/game/actionseq.cpp from Chronicle's port/src/game/actionseq.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/actionseq.cpp
+base port/src/game/actionseq.cpp
+from 7387fc6799a22bf6f6a7c798e66cf1c5619dda94
+to e27f252b198bc5d68cd57dceb3223e027606f7b7
+@@ -9,0 +10,2
++int CoopTownEventMotion(dc::game::CCharacter *character, int motion, bool *over); // coop-roomevent, coop-xiaopose (port/src/coop/coop_town.cpp)
++
+@@ -534,2 +536,20
+- 0f63c410cedbeb4e
+- f524ea5195f0f7c5
++            // coop-xiaopose: player 2's body in her room event plays its own motion for the one the script asks (Toan's);
++            // one it has not got is over at once, else a sequence waiting for its end waited for good.
++            bool      over = false;
++            const int motion = CoopTownEventMotion(character, queued_motion->arguments.animation.id, &over);
++
++            if (motion != queued_motion->arguments.animation.id) {
++                character->SetMotion(motion, 0);
++                character->SetMotionSpeed(-1.0f);
++            } else {
+~534 0f63c410cedbeb4e|                |
+~535 f524ea5195f0f7c5|                |
++            }
++
++            if (over) {
+~329 dcd476895df0af3b|                |
++
+~105 fbe47b5afbb341f3|                |
+~32 774af235f411d56b|                    |
++                }
++            }

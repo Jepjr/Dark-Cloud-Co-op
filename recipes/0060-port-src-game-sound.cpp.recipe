@@ -1,0 +1,279 @@
+# port/src/game/sound.cpp from Chronicle's port/src/game/sound.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/sound.cpp
+base port/src/game/sound.cpp
+from 431f31fb5fc6b9bd7fe10fe729632ea8259067b5
+to c444a4266cd4461ec9c6fcbafc66c7b9565ec8d3
+@@ -17,0 +18,1
++#include "data/data_read.hpp" // Jep (co-op): DataFileSize
+@@ -20,0 +22,2
++#include "coop/coop_audio.hpp" // Jep (co-op): audio
++
+@@ -58,0 +62,32
++// Jep (co-op): audio
++// The volume the game last set on each port, which the game reads back (Fade), and the volume co-op
++// plays a music port at instead on this copy (-1 for none): CoopAudio's per-copy battle music.
++// Nothing the game reads comes from the override, so the copies' game state stays alike.
++int   g_game_volume[audio::kPorts] = {};
++int   g_volume_override[audio::kPorts] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
++float g_volume_scale[audio::kPorts] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
++                                       1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
++
++// The battle sequence co-op started on the ambient port when the game had not (-1 for none).
++int g_coop_ambient_seq = -1;
++
++audio::Mixer &Player();
++
++int PlayedVolume(int port) {
++    if (g_volume_override[port] >= 0) {
++        return g_volume_override[port];
++    }
++    if (g_volume_scale[port] != 1.0f) {
++        return std::clamp(static_cast<int>(static_cast<float>(g_game_volume[port]) * g_volume_scale[port] + 0.5f), 0, 127);
++    }
++    return g_game_volume[port];
++}
++
++void SetPortVolume(int port, int volume) {
++    if (port < 0 || port >= audio::kPorts) {
++        return;
++    }
++    g_game_volume[port] = volume;
++    Player().SetVolume(port, PlayedVolume(port));
++}
++
+@@ -177,1 +212,1
+- b0355ab86e5ba869
++    SetPortVolume(port, 0);
+@@ -313,0 +349,9
++    // coop: audio: the battle sequence this copy already plays for its own player goes on as it is.
++    if (port == MIDI_PORT_AMBIENT && g_coop_ambient_seq >= 0) {
++        const bool same = g_coop_ambient_seq == seq_no && Player().IsPlaying(port);
++        g_coop_ambient_seq = -1;
++        if (same) {
++            SetPortVolume(port, volume != nullptr ? *volume : state.sequence[seq_no]->volume);
++            return;
++        }
++    }
+@@ -320,1 +364,1
+- 7e52e6c928d2af5c
++    SetPortVolume(port, volume != nullptr ? *volume : state.sequence[seq_no]->volume); // Jep (co-op): audio
+@@ -611,1 +655,1
+- 18f16a3def60fa2c
++            fade.volume = g_game_volume[port];
+@@ -617,0 +662,1
++    CoopAudioStep(); // Jep (co-op): audio
+@@ -646,0 +692,3
++    if (port == MIDI_PORT_AMBIENT) {
++        g_coop_ambient_seq = -1; // coop: audio
++    }
+@@ -651,1 +699,4
+- 0703176192d9caed
++    if (port < 0 || port >= audio::kPorts) { // Jep (co-op): audio: the volume the game set, not the one played
++        return;
++    }
++    if (g_game_volume[port] != volume) {
+@@ -654,1 +705,1
+- 34982e7ae32280e0
++    SetPortVolume(port, volume);
+@@ -708,0 +760,201
++// Jep (co-op): audio
++// What coop_audio.cpp plays through the mixer for this copy alone. None of it touches the game's
++// sound state (midi_state, the tables, the volumes the game reads back).
++
++void SoundCoopMusicVolume(int port, int volume) {
++    if (port < 0 || port >= audio::kPorts || g_volume_override[port] == volume) {
++        return;
++    }
++    g_volume_override[port] = volume;
++    Player().SetVolume(port, PlayedVolume(port));
++}
++
++void SoundCoopMusicScale(int port, float scale) {
++    if (port < 0 || port >= audio::kPorts || g_volume_scale[port] == scale) {
++        return;
++    }
++    g_volume_scale[port] = scale;
++    Player().SetVolume(port, PlayedVolume(port));
++}
++
++bool SoundCoopPlaying(int port) {
++    return port >= 0 && port < audio::kPorts && Player().IsPlaying(port);
++}
++
++int SoundCoopPlayedVolume(int port) {
++    return port >= 0 && port < audio::kPorts ? Player().Volume(port) : -1;
++}
++
++int SoundCoopSequenceVolume(int port, int seq_no) {
+=302 ba73b06dc59e3031
++    if (slot < 0 || seq_no < 0 || seq_no >= midi_state.port[slot].sequence_count) {
++        return -1;
++    }
++    return midi_state.port[slot].sequence[seq_no]->volume;
++}
++
++bool SoundCoopStartBattle(int seq_no) {
++    if (Player().IsPlaying(MIDI_PORT_AMBIENT)) {
++        return true;
++    }
++    const int slot = SequenceSlot(MIDI_PORT_AMBIENT);
+=160 09e049a05af4f23e
++    if (seq_no < 0 || seq_no >= state.sequence_count || g_slot_sequences[slot][seq_no] == nullptr) {
++        return false;
++    }
++    Player().SetSequence(MIDI_PORT_AMBIENT, g_slot_sequences[slot][seq_no]);
++    Player().SetStream(MIDI_PORT_AMBIENT, audio::SoundtrackFor(SequenceName(*state.sequence[seq_no])));
++    Player().Rewind(MIDI_PORT_AMBIENT, 0);
++    Player().Play(MIDI_PORT_AMBIENT);
++    g_coop_ambient_seq = seq_no;
++    return true;
++}
++
++void SoundCoopStopBattle() {
++    if (g_coop_ambient_seq >= 0) {
++        g_coop_ambient_seq = -1;
+=195 cfc61720a0a76912
++    }
++}
++
++namespace {
++
++// The partner's voice set, bound to a port of its own that nothing of the game's plays on.
++std::shared_ptr<audio::Bank> g_partner_voice;
++// coop-atlaopen: player 2's special set (sound/special/spN.snd: her chest's and Atla's presentation sounds), on a port of
++// its own too, so the game's special set (MIDI_PORT_SE_SPECIAL, player 1's presentations) is never swapped under him.
++std::shared_ptr<audio::Bank> g_partner_special;
++int                          g_partner_special_set = -1;
++
++// The first bank (kind 0: any; else that slot letter) of a sound pack (path), as its list (list_name) names them, bound to
++// port; nullptr when there is none. pack is the caller's buffer: the bank's data stays in it.
++std::shared_ptr<audio::Bank> LoadCoopBank(const char *path, const char *list_name, char kind, int port,
++                                          std::vector<unsigned int> &pack) {
++    const std::uintmax_t size = data::DataFileSize(path);
++    if (size == 0) {
++        std::printf("coop-audio: no %s\n", path);
++        return nullptr;
++    }
++    // LoadFile2 zeroes the rest of the file's last 2048-byte sector, and the localizer notes the
++    // buffer as a pack's, so the buffer is whole sectors and stays where it is: one of 256 KiB (the
++    // voice sets are at most 130 KB, the special sets 121 KB).
++    if ((size + 2047) / 2048 * 2048 > pack.size() * 4) {
++        std::printf("coop-audio: %s is too big (%ju bytes)\n", path, size);
++        return nullptr;
++    }
++    int read = 0;
++    if (!LoadFile2(const_cast<char *>(path), pack.data(), &read, 0)) {
++        return nullptr;
++    }
++
++    int         list_size = 0;
++    const char *list = reinterpret_cast<const char *>(GetPackFile(pack.data(), const_cast<char *>(list_name), &list_size));
++    if (list == nullptr) {
++        std::printf("coop-audio: %s not in %s\n", list_name, path);
++        return nullptr;
++    }
++    const std::string text(list, strnlen(list, list_size));
+=376 a989d5d8c4dd100c
+=377 8bfce881e925ee57
+=378 0a461a706c1ae186
+=379 a493d275a381f7b5
+=380 0a3a4fb7e3764023
++        }
+=382 3e658303c94cd32d
+=383 90730db1761b2e60
++        char name_hd[10] = {};
++        std::strncpy(name_hd, line.c_str(), 9);
++        if (std::strlen(name_hd) < 9 || std::strncmp(&name_hd[6], ".hd", 3) != 0 || (kind != 0 && name_hd[5] != kind)) {
++            continue;
++        }
++        char name_bd[10] = {};
++        std::memcpy(name_bd, name_hd, 7);
++        std::strcpy(&name_bd[7], "bd");
+=409 2879517144695a0a
+=410 06406075edca6b39
++        const auto *hd = reinterpret_cast<const std::uint8_t *>(GetPackFile(pack.data(), name_hd, &hd_size));
++        const auto *bd = reinterpret_cast<const std::uint8_t *>(GetPackFile(pack.data(), name_bd, &bd_size));
++        if (hd == nullptr || bd == nullptr || hd_size == 0 || bd_size == 0) {
++            continue;
++        }
++        auto bank = audio::Bank::Create({hd, static_cast<std::size_t>(hd_size)}, {bd, static_cast<std::size_t>(bd_size)});
++        if (bank == nullptr) {
++            continue;
++        }
+=256 914eb11f8b56fa19
++        Player().BindBank(port, bank);
++        Player().SetAttribute(port, 0x3090);
++        Player().SetVolume(port, 0x100);
++        std::printf("coop-audio: %s (%s, %zu programs) on port %d\n", path, name_hd, bank->Header().programs.size(), port);
++        return bank;
++    }
++    std::printf("coop-audio: no bank in %s\n", path);
++    return nullptr;
++}
++
++} // namespace
++
++bool SoundCoopLoadVoice(int set_no) {
++    char path[64];
++    char list_name[32];
++    std::snprintf(path, sizeof(path), "sound/voice/voice%d.snd", set_no);
++    std::snprintf(list_name, sizeof(list_name), "voice%d.txt", set_no);
++
++    static std::vector<unsigned int> pack(256 * 1024 / 4, 0u);
++    auto                             bank = LoadCoopBank(path, list_name, 0, kCoopVoicePort, pack);
++    if (bank == nullptr) {
++        return false;
++    }
++    g_partner_voice = bank;
++    return true;
++}
++
++bool SoundCoopLoadSpecial(int set_no) {
++    if (g_partner_special != nullptr && g_partner_special_set == set_no) {
++        return true;
++    }
++    char path[64];
++    char list_name[32];
++    std::snprintf(path, sizeof(path), "sound/special/sp%d.snd", set_no);
++    std::snprintf(list_name, sizeof(list_name), "sp%d.txt", set_no);
++
++    // (Its own buffer: the voice bank's data stays in the voice one.)
++    static std::vector<unsigned int> pack(256 * 1024 / 4, 0u);
++    g_partner_special = nullptr;
++    g_partner_special_set = -1;
++    auto bank = LoadCoopBank(path, list_name, 'q', kCoopSpecialPort, pack);
++    if (bank == nullptr) {
++        return false;
++    }
++    g_partner_special = bank;
++    g_partner_special_set = set_no;
++    return true;
++}
++
++bool SoundCoopSpecial(int bank, int program, int volume) {
++    if (g_partner_special == nullptr) {
++        return false;
++    }
++    // As SndSPSePlay's, centred, queued with the game's effects.
++    g_effect_queue.push_back({kCoopSpecialPort, false, static_cast<std::uint32_t>(((bank & 0x7F) << 8) | 0xC0), {}});
++    g_effect_queue.push_back({kCoopSpecialPort, true, 0, {0xF9, 0, 0, static_cast<std::uint8_t>(volume), 0}});
++    g_effect_queue.push_back({kCoopSpecialPort, true, 0, {0xF9, 1, 0, 0x40, 0}});
++    g_effect_queue.push_back({kCoopSpecialPort, true, 0, {0xFD, 0x10, 0, static_cast<std::uint8_t>(program), 0, 0x7F, 0}});
++    return true;
++}
++
++int SoundCoopEffectVolume(int se_no) {
++    return se_no >= 0 && se_no < se_inf_tbl.count ? se_inf_tbl.entry[se_no].volume : -1;
++}
++
++void SoundCoopVoice(int bank, int program, int pan, int volume) {
++    if (g_partner_voice == nullptr) {
++        return;
++    }
++    // Queued with the game's effects, so it sounds on the same Step as they do.
++    g_effect_queue.push_back({kCoopVoicePort, false, static_cast<std::uint32_t>(((bank & 0x7F) << 8) | 0xC0), {}});
++    g_effect_queue.push_back({kCoopVoicePort, true, 0, {0xF9, 0, 0, static_cast<std::uint8_t>(volume), 0}});
++    g_effect_queue.push_back({kCoopVoicePort, true, 0, {0xF9, 1, 0, static_cast<std::uint8_t>(pan), 0}});
++    g_effect_queue.push_back({kCoopVoicePort, true, 0, {0xFD, 0x10, 0, static_cast<std::uint8_t>(program), 0, 0x7F, 0}});
++}
++

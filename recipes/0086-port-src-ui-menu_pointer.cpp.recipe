@@ -1,0 +1,89 @@
+# port/src/ui/menu_pointer.cpp from Chronicle's port/src/ui/menu_pointer.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/ui/menu_pointer.cpp
+base port/src/ui/menu_pointer.cpp
+from abc0ee2a49f5060a19844de801ebd9782723e3b1
+to 7e815cbc74694edc6fdb5c5840981720e2a1bddb
+@@ -3,0 +4,3
++#include <cstdio>
++
++#include <SDL3/SDL.h>
+@@ -6,0 +10,3
++#include "coop/coop.hpp" // Jep (co-op)
++#include "coop/copies.hpp"
++#include "coop/netplay.hpp"
+@@ -7,0 +14,1
++#include "platform/mouse.hpp"
+@@ -31,2 +38,1
+- 69badfcf1596841f
+- b97035b422e439dd
++bool Held(const InputPadState &pad) {
+@@ -41,0 +48,20
++// coop: the pad the game's menus read hands them back too, not only controller 1: one client plays the controller
++// last pressed (netplay.cpp ActivePad), and a copy bound to a controller (input.controller) reads that one. Jep's PC
++// lists two Xbox pads, the first not his, so the hand never went back to his pad after the mouse (2026-10-24).
++// Returns 1 when controller 1 hands back, 2 when the menus' own pad does, 0 for none.
++// DC_MENU_POINTER_MUTATE=first_pad (the test's twin): controller 1 only, as before.
++int PadHeld() {
++    if (Held(InputGetPad(0))) {
++        return 1;
++    }
++    if (TestEnvIs("DC_MENU_POINTER_MUTATE", "first_pad")) {
++        return 0;
++    }
++    InputPadState menu;
++    if (NetplayPad(0, menu)) {
++        return Held(menu) ? 2 : 0;
++    }
++    const int bound = CopiesPadSource(0);
++    return bound != 0 && Held(InputGetPad(bound)) ? 2 : 0;
++}
++
+@@ -60,0 +87,33
++// coop: where the system cursor is, in 640x480 units, while the mouse is not captured (linked and online copies never
++// capture it): the hand then sits under the cursor Jep sees instead of drifting from where the menu put it (2026-10-21).
++// A captured mouse, or no window (a scripted run), keeps the counted motion. Test hook DC_MENU_POINTER_WINDOW=w,h,x,y:
++// a window of w by h with the cursor at x,y; DC_MENU_POINTER_MUTATE=relative (the test's twin): counted motion only.
++bool CursorUnits(float &units_x, float &units_y) {
++    float       cursor_x = 0.0f;
++    float       cursor_y = 0.0f;
++    int         width = 0;
++    int         height = 0;
++    const char *fake = TestEnv("DC_MENU_POINTER_WINDOW");
++
++    if (TestEnvIs("DC_MENU_POINTER_MUTATE", "relative")) {
++        return false;
++    }
++    if (fake != nullptr) {
++        if (std::sscanf(fake, "%d,%d,%f,%f", &width, &height, &cursor_x, &cursor_y) != 4) {
++            return false;
++        }
++    } else {
++        if (MouseCaptured() || !WindowSize(width, height)) {
++            return false;
++        }
++        SDL_GetMouseState(&cursor_x, &cursor_y);
++    }
++    gfx::LogicalMapping mapping = gfx::GetUiMapping(gfx::kMainTarget);
++    if (width <= 0 || height <= 0 || mapping.scale_x <= 0.0f || mapping.scale_y <= 0.0f) {
++        return false;
++    }
++    units_x = (cursor_x * static_cast<float>(mapping.pixel_width) / static_cast<float>(width) - mapping.offset_x) / mapping.scale_x;
++    units_y = (cursor_y * static_cast<float>(mapping.pixel_height) / static_cast<float>(height) - mapping.offset_y) / mapping.scale_y;
++    return true;
++}
++
+@@ -103,1 +162,4
+- db592dde2240e570
++    if (const int pad = PadHeld(); pad != 0) {
++        if (pointing && CoopDebug()) {
++            std::fprintf(stderr, "menu-pointer: back to the pad (%s)\n", pad == 1 ? "controller 1" : "the menus' own pad"); // coop: tests
++        }
+@@ -106,1 +168,7
+- 69fd43e008bceb78
++    float cursor_x = 0.0f;
++    float cursor_y = 0.0f;
++    if (take.moved && CursorUnits(cursor_x, cursor_y)) {
+~108 b1cd0de4c8b82222|        |
++        x = std::clamp(cursor_x, 0.0f, 639.0f);
++        y = std::clamp(cursor_y, 0.0f, 479.0f);
++    } else if (take.moved) {

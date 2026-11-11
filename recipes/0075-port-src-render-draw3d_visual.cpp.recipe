@@ -1,0 +1,16 @@
+# port/src/render/draw3d_visual.cpp from Chronicle's port/src/render/draw3d_visual.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/draw3d_visual.cpp
+base port/src/render/draw3d_visual.cpp
+from bee702b52e65c4a7b5875a877688ddaf3bbe428d
+to beb45935948df8645f6bca202bf5bd46572cf53b
+@@ -75,0 +76,10
++// Jep (co-op), coop-toanvis: the tag check and the mesh release for Draw3DEnsureVisual (game/visualvu1.cpp), which
++// builds a stale block's record again from the model the block names.
++bool Draw3DBlockTagged(const unsigned int *block) {
++    return block[8] == kBlockTag;
++}
++
++void Draw3DReleaseVisual(Draw3DVisual &visual) {
++    Release(visual);
++}
++

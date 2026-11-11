@@ -1,0 +1,143 @@
+# port/src/title/title_menu.cpp from Chronicle's port/src/title/title_menu.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/title/title_menu.cpp
+base port/src/title/title_menu.cpp
+from 4e9a34f18ff2fb9f10ab5e68d09e8567c5865fb0
+to 2f30d26357a5963c4c58322ef586278ba2f1a219
+@@ -9,0 +10,1
++#include "coop/coop.hpp" // Jep (co-op): TestEnvIs, the layout's test switches
+@@ -15,0 +17,1
++#include "title/title_mpmenu.hpp" // Jep (co-op): the Multi-player row (TITLE_MENU_MULTIPLAYER, TitleMpShown)
+@@ -26,0 +29,1
++    int         select;
+@@ -32,1 +35,2
+- 1d5c0efe38197161
++// copies), then Exit. Jep (co-op): co-op's MULTIPLAYER between CONTINUE and OPTION, shown only while
++// co-op offers it (TitleMpShown).
+@@ -34,4 +38,5
+- dfb7c16556b69654
+- 0dd64eeeed12cb46
+- 34de94cb4d4f9e61
+- d3f63440760f3732
++    Row{.select = TITLE_MENU_NEW_GAME,    .key = "title.menu.start",       .english = "START"       },
++    Row{.select = TITLE_MENU_LOAD,        .key = "title.menu.continue",    .english = "CONTINUE"    },
++    Row{.select = TITLE_MENU_MULTIPLAYER, .key = "title.menu.multiplayer", .english = "MULTIPLAYER" },
++    Row{.select = TITLE_MENU_OPTION,      .key = "title.menu.option",      .english = "OPTION"      },
++    Row{.select = kExitRow,               .key = "title.menu.exit",        .english = "EXIT"        },
+@@ -39,1 +44,2
+- ead9e12f5ebdd575
++static_assert(kRows.size() == kMaxRows);
++constexpr int kMultiplayerEntry = 2;
+@@ -48,0 +55,8
++// Jep (co-op): five rows from 284 would reach 413, into the trademark lines. They start at 274, where
++// co-op's four painted rows started (clear of the logo on every PC it was played on), 26 apart: the
++// last row's capitals end at 395, their halo at 398, and each row keeps 9 clear between its letters
++// and the next row's. The screen is 640x480 logical units at every aspect and interface size, so the
++// rows stand the same on all of them.
++constexpr int kFiveFirstTextTop = 274;
++constexpr int kFiveRowStride = 26;
++
+@@ -118,0 +133,23
++// The table's entry shown on a row: without the Multi-player row, OPTION and EXIT move up one.
++const Row &EntryAt(int row) {
++    row = std::clamp(row, 0, RowCount() - 1);
++    if (RowCount() < kMaxRows && row >= kMultiplayerEntry) {
++        ++row;
++    }
++    return kRows[row];
++}
++
++// Jep (co-op): whether the rows take the five rows' places. DC_TITLE_MP_MUTATE=old_pitch (mp-title-row's
++// twin): five rows on the four rows' places, the last one in the trademark lines.
++bool FivePlaces() {
++    return RowCount() == kMaxRows && !TestEnvIs("DC_TITLE_MP_MUTATE", "old_pitch");
++}
++
++int FirstTop() {
++    return FivePlaces() ? kFiveFirstTextTop : kFirstTextTop;
++}
++
++int Stride() {
++    return FivePlaces() ? kFiveRowStride : kRowStride;
++}
++
+@@ -120,0 +158,31
++int RowCount() {
++    // Jep (co-op): DC_TITLE_MP_MUTATE=no_menu_row (mp-title-row's twin): the menu without the Multi-player row, as the
++    // repin's BANDAID left it.
++    return TitleMpShown() && !TestEnvIs("DC_TITLE_MP_MUTATE", "no_menu_row") ? kMaxRows : kMaxRows - 1;
++}
++
++int RowOf(int select) {
++    for (int row = 0; row < RowCount(); ++row) {
++        if (EntryAt(row).select == select) {
++            return row;
++        }
++    }
++    return -1;
++}
++
++int SelectAt(int row) {
++    return EntryAt(row).select;
++}
++
++const char *RowEnglish(int row) {
++    return EntryAt(row).english;
++}
++
++int TextTop(int row) {
++    return FirstTop() + row * Stride();
++}
++
++float RowsBottom() {
++    return static_cast<float>(TextTop(RowCount() - 1)) + kCapHeight + kHaloReach;
++}
++
+@@ -122,1 +190,1
+- 5fbc199ca9b06a6b
++    return static_cast<float>(TextTop(row)) - kHandAboveText;
+@@ -126,2 +194,6
+- b9140cf63be1db49
+- 37de468578d27cac
++    // Jep (co-op): DC_TITLE_MP_MUTATE=old_hit (mp-title-row -Case pointer's twin): the pointer's rows
++    // kept on the four rows' places while five are drawn.
++    const bool four_places = !FivePlaces() || TestEnvIs("DC_TITLE_MP_MUTATE", "old_hit");
++    const int  stride = four_places ? kRowStride : kFiveRowStride;
++    const auto top = static_cast<float>((four_places ? kFirstTextTop : kFiveFirstTextTop) - kRowAboveText);
++    if (x < kRowLeft || x >= kRowLeft + kRowWidth || y < top || y >= top + static_cast<float>(RowCount() * stride)) {
+@@ -130,1 +202,1
+- a5de7d6b75671dfe
++    return static_cast<int>((y - top) / static_cast<float>(stride));
+@@ -154,0 +227,8
++    for (int row = 0; row < RowCount(); ++row) {
++        const Row &entry = EntryAt(row);
++        const bool chosen = entry.select == selected;
++        DrawRow(row, LocalizeText(entry.key, entry.english), chosen, chosen ? selected_alpha : other_alpha);
++    }
++}
++
++void DrawRow(int row, const std::string &text, bool chosen, int alpha) {
+@@ -168,14 +248,10
+- 4a216630162f553f
+- 0c1e143e0c5f1056
+- 0c85fd0cabff9f5e
+- 00b5a0de5b301302
+- 90c2d3c892eb05fa
+- 99fcd3094dbbd223
+- f866599f2d7e57f0
+- c30411990a47d728
+- 607e9c986e37d5ed
+- b66d5fa0c198bbd3
+- 475057fbe75176ca
+- b7cb2a837846b179
+- 1bee3ce40efaf99e
+- 28d86778615f6af4
+~170 0c85fd0cabff9f5e|    |
+~171 00b5a0de5b301302|    |
+~172 90c2d3c892eb05fa|    |
+~173 99fcd3094dbbd223|    |
+~174 f866599f2d7e57f0|    |
+~175 c30411990a47d728|    |
++    ui::Label label(text, style);
++    label.Draw(kTextLeft + static_cast<int>(std::lround(BearingFromS(text))), TextTop(row) - cap_offset,
+~179 b7cb2a837846b179|               |
++               chosen ? alpha : std::min(alpha * 2 * kOtherRowsShare / kOtherRowsOf, 0x80));

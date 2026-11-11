@@ -1,0 +1,24 @@
+# tools/kazarov/include/platform/arena.hpp from Kazarov 611182d6 to 4719c578 (build\kazarov-recipes.ps1). Kazarov's lines appear only as hashes.
+target tools/kazarov/include/platform/arena.hpp
+base tools/kazarov/include/platform/arena.hpp
+from a78be3f4f4c1a47cac3df6f5df34d3aaef95323e
+to 3c980901c2aff6db6a8d817941e94110ad1f4bea
+@@ -19,0 +20,18
++// Pinned layout (snapshots between two copies of one executable): from now on each owner's block is mapped at an
++// address fixed by the owner's offset from `image` (a 256 MiB slot picked by a hash of it) (the executable's load address), so two copies loaded at the same
++// image address put every arena at the same address whatever order they carved them in. A block whose address is
++// taken is mapped anywhere and counted in ArenaUnpinned. 0 turns it off.
++void        ArenaPinLayout(std::uintptr_t image);
++std::size_t ArenaUnpinned();
++// coop-cand57 (Jep): two owners whose offsets hash to one slot (a layout accident: train 56's MapModelBuffer and
++// MasekiModelBuffer) no longer leave the second unpinned. Each owner has a fixed list of candidate slots (probe 0 is the
++// hashed one); ArenaPinPlan gives an owner its probe ahead of any carve (the build's darkcloud.pinplan, worked out from the
++// link map, so the answer does not hang on which owner carves first), and an owner not in the plan whose slot is held
++// takes its next free candidate (up to ArenaPinProbes of them; 1: none, the old fallback, a test's twin).
++void        ArenaPinPlan(std::uintptr_t offset, int probe);
++void        ArenaPinProbes(int count);
++std::size_t ArenaProbed(); // blocks pinned at a probe other than their planned one (each said on stderr)
++
++// Every live block: its owner, its first usable byte (the lead included) and its usable size.
++void ArenaForEach(void (*visit)(const void *owner, unsigned char *start, std::size_t size, void *context), void *context);
++

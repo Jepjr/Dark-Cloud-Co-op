@@ -1,0 +1,12 @@
+# port/src/game/dataread.cpp from Chronicle's port/src/game/dataread.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dataread.cpp
+base port/src/game/dataread.cpp
+from 370281e3fc9368763f1ead1ed900483c300ba48d
+to a5209fba5b19335a0b7c5374d83d0b90f660231a
+@@ -108,0 +109,6
++// coop-invcrash: the read slots, which coop_fullmenu keeps per menu with the menu's other globals, so a second menu's
++// read (its StartReadBG clears every slot) neither ends nor stands in for the first's.
++void ReadBGRegions(void (*add)(void *at, std::size_t size)) {
++    add(bg_read_info.data(), sizeof bg_read_info);
++}
++

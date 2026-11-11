@@ -1,0 +1,10 @@
+# port/src/localize/localize_texture.hpp from Chronicle's port/src/localize/localize_texture.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/localize/localize_texture.hpp
+base port/src/localize/localize_texture.hpp
+from 503ed565dbe1099fc7b9f5971de4906041476956
+to 169ec9f08bb108a094d9ff74d9335965f51bf3a3
+@@ -46,0 +47,4
++/// Jep (co-op): the title menu's word picture ("start3") as the game decoded it,
++/// straight-alpha RGBA, or null before it is loaded (the only one kept: the title's Multi-player rows cut letters from it).
++const std::vector<uint8_t> *LocalizeTextureKept(std::string_view name, unsigned &width, unsigned &height);
++

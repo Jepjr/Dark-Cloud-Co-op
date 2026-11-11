@@ -1,0 +1,12 @@
+# tools/kazarov/src/cpp/platform/input.cpp from Chronicle's tools/kazarov/src/cpp/platform/input.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target tools/kazarov/src/cpp/platform/input.cpp
+base tools/kazarov/src/cpp/platform/input.cpp
+from 3562cb805aa1467ddffcc83b4c86ebbeb9f8cf26
+to ed778dc7603940dc997906f3dcfbdf7202e7ac3e
+@@ -185,1 +185,2
+- c525849e06ec3311
++// used, and false again once any open gamepad is (not only the first: a player may play controller 2),
++// and the make of the first gamepad once one is open.
+@@ -1081,1 +1082,1
+- f62c9d807e951f64
++        if (g_slots[pad].gamepad != nullptr && (state.buttons != 0 || Deflected(state.left_x) || Deflected(state.left_y) || Deflected(state.right_x) || Deflected(state.right_y))) {

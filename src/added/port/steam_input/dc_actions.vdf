@@ -1,0 +1,78 @@
+"Action Manifest"
+{
+	"configurations"
+	{
+		"controller_xboxone"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_xbox360"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_ps4"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_ps5"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_switch_pro"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_generic"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_steamcontroller_gordon"		{ "0" { "path" "dc_gamepad.vdf" } }
+		"controller_neptune"		{ "0" { "path" "dc_gamepad.vdf" } }
+	}
+	"actions"
+	{
+		"InGame"
+		{
+			"title"		"#Set_InGame"
+			"StickPadGyro"
+			{
+				"move"
+				{
+					"title"		"#Action_Move"
+					"input_mode"		"joystick_move"
+				}
+				"camera"
+				{
+					"title"		"#Action_Camera"
+					"input_mode"		"joystick_move"
+				}
+			}
+			"Button"
+			{
+				"cross"		"#Action_Cross"
+				"circle"		"#Action_Circle"
+				"square"		"#Action_Square"
+				"triangle"		"#Action_Triangle"
+				"l1"		"#Action_L1"
+				"r1"		"#Action_R1"
+				"l2"		"#Action_L2"
+				"r2"		"#Action_R2"
+				"l3"		"#Action_L3"
+				"r3"		"#Action_R3"
+				"start"		"#Action_Start"
+				"select"		"#Action_Select"
+				"up"		"#Action_Up"
+				"down"		"#Action_Down"
+				"left"		"#Action_Left"
+				"right"		"#Action_Right"
+			}
+		}
+	}
+	"localization"
+	{
+		"english"
+		{
+			"Set_InGame"		"Dark Cloud"
+			"Action_Move"		"Move"
+			"Action_Camera"		"Camera"
+			"Action_Cross"		"Cross"
+			"Action_Circle"		"Circle"
+			"Action_Square"		"Square"
+			"Action_Triangle"		"Triangle"
+			"Action_L1"		"L1"
+			"Action_R1"		"R1"
+			"Action_L2"		"L2"
+			"Action_R2"		"R2"
+			"Action_L3"		"L3"
+			"Action_R3"		"R3"
+			"Action_Start"		"Start"
+			"Action_Select"		"Select"
+			"Action_Up"		"D-pad up"
+			"Action_Down"		"D-pad down"
+			"Action_Left"		"D-pad left"
+			"Action_Right"		"D-pad right"
+		}
+	}
+}

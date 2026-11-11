@@ -1,0 +1,20 @@
+# port/src/game/menu_dungeon.cpp from Chronicle's port/src/game/menu_dungeon.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_dungeon.cpp
+base port/src/game/menu_dungeon.cpp
+from 99d3c0cb3f72a6dfe648e6d7df30d3ae555f9545
+to 791f921ab36eb8d469b9369d889f466785f90aad
+@@ -52,0 +53,4
++void CoopCharaWheelMark(int chara, float x, float y, int alpha); // coop (port/src/coop/coop_hud.cpp)
++bool CoopKnockoutEndsForPartner(); // coop-kojoin (port/src/coop/coop_combat.cpp)
++void CoopEntranceDraw();           // coop-gatepopup2 (port/src/coop/coop_useprompt.cpp)
++
+@@ -467,0 +472,1
++    CoopEntranceDraw(); // coop-gatepopup2: a call's boxes and the notice over the floor menu (no floor HUD here)
+@@ -1778,0 +1784,5
++    // coop-kojoin: P2 came to the floor of a knocked-out P1: his knockout menu closes as a cancel does, and he lies down.
++    if (ChangeMenu.mode == 1 && CoopKnockoutEndsForPartner()) {
++        return 1;
++    }
++
+@@ -2087,0 +2098,1
++            CoopCharaWheelMark(chara, x, y, alpha); // coop: whose member it is (port/src/coop/coop_hud.cpp)

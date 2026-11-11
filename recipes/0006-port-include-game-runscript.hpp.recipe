@@ -1,0 +1,15 @@
+# port/include/game/runscript.hpp from Chronicle's port/include/game/runscript.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/runscript.hpp
+base port/include/game/runscript.hpp
+from 06d1e88effc64c315fdaad4f48c976004c1a55f9
+to b9e00c6c9f26a081fbfd47f3ee562bacad762ef7
+@@ -301,0 +302,9
++// coop: how many calls to external function ext_id program no of a loaded script (and the functions it calls)
++// makes, read from its code without running it; the first argument of each (when a constant, else -1)
++// goes to firsts, up to max. Used for the town events' _SSET_GAME_FLAG (700): an event that can set a
++// story flag.
++int ScriptExtCalls(const RS_PROG_HEADER *prog, int no, int ext_id, int *firsts, int max);
++
++// coop: the program numbers a loaded script has, in its table's order, up to max; returns how many it has.
++int ScriptPrograms(const RS_PROG_HEADER *prog, int *nos, int max);
++

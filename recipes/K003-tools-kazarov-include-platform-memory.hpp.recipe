@@ -1,0 +1,8 @@
+# tools/kazarov/include/platform/memory.hpp from Kazarov 611182d6 to 4719c578 (build\kazarov-recipes.ps1). Kazarov's lines appear only as hashes.
+target tools/kazarov/include/platform/memory.hpp
+base tools/kazarov/include/platform/memory.hpp
+from c9f0e6627f1c38050fee1ff33471365487345f93
+to 3c2e739d3c12455f2769058c136a65c6b0385c43
+@@ -20,0 +21,2
++// The same, mapped exactly at `at` (page aligned); an empty ArenaMemory (map null) when that range is taken.
++ArenaMemory ArenaMemoryMapAt(void *at, std::size_t bytes, std::size_t lead = 0);

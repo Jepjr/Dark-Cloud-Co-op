@@ -1,0 +1,33 @@
+# port/src/render/draw3d.hpp from Chronicle's port/src/render/draw3d.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/draw3d.hpp
+base port/src/render/draw3d.hpp
+from 03cc13a7f23921fb2eac13e57b44c93c29a1ac1b
+to 2a68114d93ebc52602259d87c89dc3e240f0ba78
+@@ -14,0 +15,1
++class CVisualVu1;
+@@ -255,0 +257,3
++    const void *source = nullptr; // Jep (co-op), coop-toanvis: the model it was built from and its header's print
++    uint32_t    source_print = 0; // (Draw3DEnsureVisual)
++    uint32_t    state_epoch = 0;  // coop-pond: the state set it was last remade after (RemakeAfterStateSet)
+@@ -262,0 +267,8
++// Jep (co-op): which of a remakeable model's two blocks (CVisualMDTVu1::vu_data_buffer) it is remade into and
++// drawn from. Retail used one per display buffer (DBuffID), since the DMA still read the last
++// frame's while the next was built; the port's renderer records what it needs, so one block will
++// do, and one block is one mesh: the renderer pairs a skinned body with the tick before only when
++// its mesh is the same (a body on alternating meshes stood a tick ahead of its interpolated hands,
++// feet and hair). DC_COOP_MUTATE=mdt_double_buffer keeps the two (the interpolation test's twin).
++int Draw3DModelBuffer();
++
+@@ -274,0 +287,12
++// Jep (co-op), coop-toanvis: block's record, built again from the model the block names when the record is missing or
++// was built from another model (a co-op state set copied another copy's models over this one's; the records are not in
++// it). Draw3DStaleVisuals: such blocks seen so far, rebuilt or not; Draw3DRebuiltVisuals: those built again.
++Draw3DVisual *Draw3DEnsureVisual(game::CVisualVu1 *owner, unsigned int *block);
++// coop-pond: a co-op state set was applied: each remakeable record is remade once from its model as it is now
++// (Draw3DEnsureVisual); Draw3DRemadeAfterStateSets: those remade so far.
++void Draw3DStateSetApplied();
++int  Draw3DRemadeAfterStateSets();
++int  Draw3DStaleVisuals();
++int  Draw3DRebuiltVisuals();
++void Draw3DResetForJob(); // coop-warmreset: a warm pair's job: the stale counts and their said lines from none
++

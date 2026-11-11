@@ -1,0 +1,675 @@
+# port/src/game/edit_in.cpp from Chronicle's port/src/game/edit_in.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/edit_in.cpp
+base port/src/game/edit_in.cpp
+from be08e56b263225baf469f5c95f5b205a5d38d1fd
+to 01dd3d4641a9f5a1f1aa8563dce71b9aa447ae18
+@@ -59,0 +60,7
++#include "coop/coop_worlds.hpp" // coop-worlds: the story guard
++#include "coop/coop_actor.hpp"  // opt8: the player table (kMaxPlayers)
++#include "coop/coop_town.hpp"   // coop-p2skin: her skin indoors; coop-inbuild: player 2's character indoors
++#include "coop/coop_townmenu.hpp" // coop-inbuild: her own menu indoors
++#include "coop/coop_audio.hpp" // coop-menuse
++#include "coop/netplay.hpp"    // coop-scenejoin: the link tick on the scene's line
++#include "coop/coop.hpp"       // coop-housecrash: TestEnv
+@@ -171,0 +179,4
++// coop-scenejoin: the room's event under way is a story scene (CoopWorldsSceneEvent: its number, else 0). A static of this
++// file, so the state set carries it to a copy that merges into the scene.
++int coop_scene_event;
++
+@@ -236,0 +248,4
++int EdInSceneEvent() {
++    return coop_scene_event;
++}
++
+@@ -390,1 +405,1
+- 72eae531acd0f039
++    if (start_event_no <= 0 && !CoopWorldsHoldStoryEvent(EdEventData, event_no)) { // coop-worlds: story waits for Toan
+@@ -524,1 +539,2
+- 9af73ae65539365b
++    // coop-p2scene: a story arrival (the mayor's first visit) waits for Toan on player 2's copy apart.
++    start_event_no = CoopWorldsHoldArrivalEvent(EdEventData, EdInteriorStartEvent) ? -1 : EdInteriorStartEvent;
+@@ -536,0 +553,1
++    CoopWorldsInteriorStarted(); // coop-housemerge: the host's checkpoint at a building's start, a joiner's catch-up there
+@@ -539,0 +557,92
++// coop-stage4 4c: a retail menu goes on as a local one over a merge: the room's back in its walk under it.
++void EdInMenuToWalk() {
+=502 c35d8c2853e0239c
++    CoopTownNoteRoomMode(static_cast<int>(GameMode));
++}
++
++// coop-pt1109f: her talk beside the walk goes on as the room's own at a split
++void EdInToTalk() {
+~634 a9508fdd9a158a59|    |
++    CoopTownNoteRoomMode(static_cast<int>(GameMode));
++}
++
++// opt8: retail's talk mode's first-person look (its talk mode's case): the game's player's view turns to the villager it talks to
++// before the talk steps; true when it may step (at once outside the first-person view). For his talk from its slot.
++static bool EdInTalkLookReady() {
+=1978 59216c055e9ba64b
+~716 8223a2a8a0df0fd9|    |
++
++    if (EdCheckViewMode() == 0 || talker == nullptr) {
++        return true;
++    }
++    float distance = EdIn_Chara->GetDistance(*talker);
+~718 253e20508b1cb193|    |
++    float pitch = -atan2f(-EdIn_Chara->body_height + (1.3f + talker->body_height + direction[1]), distance);
++    float yaw = atan2f(direction[0], direction[2]);
++    float view_h = AngleInterpolate(EdAGetViewAngleH(), yaw, 0.05f, INTERPOLATE_STEP);
++    float view_v = AngleInterpolate(EdAGetViewAngleV(), pitch, 0.03f, INTERPOLATE_STEP);
+~725 e1b8ccac4bb705f4|    |
+~726 cd4d3144c845d295|    |
++
++    if ((view_h - yaw < 0.0f ? -(view_h - yaw) : view_h - yaw) < 0.001f && (view_v - pitch < 0.0f ? -(view_v - pitch) : view_v - pitch) < 0.001f) {
+~729 5ffc1a5f75753d87|        |
++        return true;
++    }
++    return false;
++}
++
++namespace {
++
++// coop-roommenu: under player 1's menu with player 2 in the room, Toan stands and breathes (as in his talk) and the room's
++// people step on as in its walk. True when it stepped them (the room runs aside).
++bool CoopRoomMenuStep() {
++    if (!CoopTownRoomRunsAside()) {
++        return false;
++    }
++
+~704 84f1af88f2b806f0|    |
+~613 fe2b6f6081adf403|    |
+~658 48e89d016cfd88dc|    |
+~659 63223280fb03fb61|    |
+~662 57d155026c1a93a2|    |
++
+=466 3253a6f237be6bd7
+~599 5600505fa711b584|        |
+~600 8093d705c9165d11|        |
+~601 56f3b414c3050431|        |
++    }
++
++    return true;
++}
++
++// coop-housecrash test hook (DC_COOP_TEST_ROOM_CAM_SHIFT=BYTES[:R]): the copy of role R (2 unless said) runs SetCameraPos
++// BYTES deeper in its stack, as another PC's stack lies, so a stack address it keeps differs from the other copy's. The
++// switch is read each call: a pointer kept in this file's statics would cross to the other copy with the state set too.
++// (The fix it tests is upstream's own since 90a03500: active_camera is kept by its place in the list.)
++void CoopRoomCameraStep(CFrame *frame) {
++    if (const char *shift = TestEnv("DC_COOP_TEST_ROOM_CAM_SHIFT"); shift != nullptr) {
++        char      *rest  = nullptr;
++        const long bytes = std::strtol(shift, &rest, 0);
++        const int  role  = rest != nullptr && *rest == ':' ? std::atoi(rest + 1) : 2;
++
++        if (bytes > 0 && NetplayRole() == role) {
++            static bool said = false;
++
++            if (!said) {
++                said = true;
++                std::fprintf(stderr, "edit_in: test: the room camera steps %ld bytes deeper on this copy (player %d)\n", bytes, role);
++            }
++
++            volatile char *pad = static_cast<volatile char *>(__builtin_alloca(static_cast<size_t>(bytes)));
++            pad[bytes - 1]     = 0;
++            SetCameraPos(frame, &EdIn_MainCamera, EdIn_Chara);
++            pad[0] = 0;
++            return;
++        }
++    }
++
++    SetCameraPos(frame, &EdIn_MainCamera, EdIn_Chara);
++}
++
++} // namespace
++
+@@ -547,4 +656,3
+- 810987a185c713b3
+- 11c8a039689a55c3
+- d625d7ab43bcf189
+- 0115d62c08780ac0
++    // coop-worlds: a test's copy inside a building leaves it by its door (DC_WORLDS_TEST_LEAVE_BUILDING).
++    if (CoopWorldsTestLeaveBuilding()) {
++        return 1;
+@@ -553,1 +661,6
+- 5b6c22d3b5a19e4a
++    CoopTownInteriorStep(); // coop-p2skin: player 2's copy apart draws her member in Toan's place indoors too
++
++    // coop-closetglow: her message (her closet's got-item box) leaves Toan's walk his (CoopTownRoomKeyMode)
++    EdSetKeyMode(CoopTownRoomKeyMode(EdSystemMesCheck() != 0, EdCheckItemOver() != 0));
++
++    if (EdPadDown(0x800, 4) && !CoopTalkHoldsWalker()) { // opt8: no pause through his talk (retail's talk mode opens none)
+@@ -584,2 +697,29
+- a955f9a7f18324a3
+- 7d2bf982d3417bba
++    // coop-roomevent: through her room event Toan walks on, his camera held to the room's markers as he walks.
++    if (fix_camera != 0 && camera_num > 0 && (GameMode == EdInMode::WALK || CoopTownHerRoomEventOn())) {
++        CoopRoomCameraStep(static_cast<CFrame *>(InteriorParts[0].frame[0]));
++    }
++
++    // coop-inbuild: player 2's character indoors, as outside: her walk, her own camera and her own door, from the room's
++    // mode as this tick starts. She walks on through Toan's talks, events, menu and pause, and stands only while his door
++    // takes him out. True when her door takes this copy out now.
++    // (coop-pt1106-batch: and walks on while his door opens together, CoopWorldsDoorWindowBy)
++    if (CoopTownInteriorStep(InteriorParts.data(), parts_num, &EdIn_MainCamera, camera_num > 0, static_cast<int>(GameMode),
++                             (GameMode != EdInMode::DOOR_OPEN || CoopWorldsDoorWindowBy() == 1) && GameMode != EdInMode::LEAVE)) {
++        return 1;
++    }
++
++    CoopP2TownMenuTick(); // coop-inbuild: player 2's own menu indoors too
++
++    // coop-roommenu: whether the room runs under player 1's menu, from her step just taken (the room's first step above hides
++    // her till her own step shows her); under it, with player 2 in the room, the room's animations and water go on.
++    CoopTownRoomMenuNote();
++    if (CoopTownRoomRunsAside() && GameMode != EdInMode::PAUSE) {
++        OBJ_ANIME_SEQ *anime = EdInInfo->obj_anime;
++
++        for (int i = 0; i < obj_anime_num; i++, anime++) {
++            if (anime->completion_flag <= 0 || EdGetMapFlag(anime->completion_flag) == 0) {
+~576 d3739d8692770489|                |
++            }
++        }
++
++        StepWater();
+@@ -589,0 +730,3
++    // opt8: together, a talk on the room's talk mode moves into its player's slot and the room walks (one talk path for every player).
++    CoopTalkIntoSlots();
++
+@@ -592,1 +735,1
+- a1761d87099b1a63
++            if (EdIn_loop_counter > 0 && !CoopTalkHoldsWalker()) { // opt8: the game's player stands through its own talk (its slot's step stands it)
+@@ -613,1 +756,11
+- fe2b6f6081adf403
++
++            // coop-roomevent: her room event (her body its main character): Toan walks on with his own camera; nothing of his
++            // starts till it is over (MoveCharacter).
++            const bool hers = CoopTownHerRoomEventOn();
++
++            if (hers) {
+=593 af455bf95838fb4b
++            } else {
+~613 fe2b6f6081adf403|                |
++            }
++
+@@ -614,0 +768,1
++            CoopTownHerRoomEventStepIn(); // coop-roomevent: her pad and bag the game's for its step
+@@ -615,0 +770,1
++            CoopTownHerRoomEventStepOut();
+@@ -617,1 +772,7
+- 4151c43150ffd501
++            if (result != 0 && hers) {
++                // coop-roomevent: hers is over; it takes nobody out, and his camera stays his. coop-hertalk: her villager's
++                // talk script's talk return starts her talk, beside the room's walk (the room stays his to walk).
++                CoopTownHerTalkFromEvent(result);
+=618 742f81f9e319e345
+=619 a4bd14fd21501d1f
++            } else if (result != 0) {
+@@ -651,0 +813,5
++
++            if (result != 0 && hers && !CoopTownHerTalkOn()) {
++                CoopTownHerRoomEventEnd(result); // coop-roomevent: Toan the event's main character again, her walk on
++            }
++
+@@ -680,0 +847,11
++
++                // coop-pt1106-batch: his door opened together: the split now, her copy staying inside as hers (her fade in).
++                if (CoopWorldsDoorWindowBy() == 1) {
++                    CoopWorldsDoorWindowEnd();
++
++                    if (!CoopWorldsLeaveBuildingBy(1)) {
+~502 c35d8c2853e0239c|                        |
++                        EdFadeIn(1, 0.0f, 0.0f, 0.0f);
+~704 84f1af88f2b806f0|                        |
++                    }
++                }
+@@ -731,1 +908,1
+- 67bbaf7214eedf08
++                const int result = CoopTownTestTalkShop(EdTalkMode(EdIn_Chara, nullptr, EdCheckViewMode(), &event_no)); // coop-p1parts: test hook
+@@ -752,0 +930,5
++            // coop-roommenu: Toan stands and breathes, the room's people go on (not held on their frame).
++            if (CoopRoomMenuStep()) {
++                break;
++            }
++
+@@ -767,1 +949,26
+- c40c4cf338971e91
++            CoopRoomMenuStep(); // coop-roommenu
++            CoopTownNoteRoomMode(static_cast<int>(GameMode)); // coop-roommenu: the room's mode is this file's own
++            CoopTownMenuStepBegin(); // coop-inbuild: his menu drawn out of sight on her copy, as in town
++            int menu_done;
++            if (CoopTownP1MenuLive()) { // coop-roommenu: the battle menu without its draw (after the room's frame), as in town
++                menu_done = !BattleMenuCursor() || CoopTownRoomMenuTestClose();
++
++                if (menu_done != 0) {
++                    EdClearItemOverFlag();
++                }
++            } else {
++                menu_done = EdMenuMode();
++            }
++            CoopTownMenuStepEnd();
++
++            // coop-roommenu: the menu's draw left the menu's projection (MenuWorldTrans, 800): her copy draws the room under
++            // it with the room's own (its script's), as the tick began.
++            if (CoopTownRoomMenuProjection()) {
+~557 ab493e05c7ebef11|                |
+~489 c54eb199f98db04d|                    |
++                } else {
+~560 8d474c051eeec0dd|                    |
++                }
++            }
++
++            if (menu_done != 0) {
+@@ -794,0 +1002,30
++    // coop-hertalk: her talk steps beside the room's walk or his menu (with her body, her pad, her view), so his walk, his
++    // doors and his menu go on through it. coop-talks2: and beside his own talk or scripted event (her talk's state and window
++    // are her own, swapped in around this step). opt8: every player's talk, one step from its slot: the game's player's too
++    // (retail's talk mode's step: its first-person look turned to the villager first, its result rule).
++    if (GameMode == EdInMode::WALK || GameMode == EdInMode::TALK || GameMode == EdInMode::EVENT || GameMode == EdInMode::MENU_INIT ||
++        GameMode == EdInMode::MENU) {
++        for (int k = 0; k < coop::kMaxPlayers; k++) {
++            if (!CoopTalkOn(k) || (k == 0 && !EdInTalkLookReady())) {
++                continue;
++            }
++            int       choice = 0;
++            const int result = CoopTalkStep(k, EdIn_Chara, &EdIn_MainCamera, nullptr, k == 0 ? EdCheckViewMode() : 0, &choice);
++
++            if (result == 0) {
++                continue;
++            }
++            const int retail = CoopTalkOver(k, result, choice);
++
++            if (retail == 2) {
+~735 9133d8cbbd7e5f66|                |
++            }
++            if (retail == 3) {
+~739 5c53d54e2e4ff128|                |
++            }
++            if (retail == 4 && choice > 0) {
++                RunEvent(choice, EdIn_NowCamera);
++            }
++        }
++    }
++
+@@ -795,0 +1033,5
++
++    // coop-roomevent: his camera follows him on through her event.
++    if (CoopTownHerRoomEventOn() && EdIn_NowCamera != &EdIn_MainCamera) {
++        EdIn_MainCamera.Step(1);
++    }
+@@ -811,1 +1053,12
+- ef8de551661b9359
++    // coop-inbuild: player 2's copy draws the room from her own camera (the drawing only; the shared view and random state
++    // back after the frame).
++    CoopTownView(view, eye, true);
+=803 19b140bf8f10950c
++
++    // coop-inbuild: her copy draws the room under his menu (she walks on through it). coop-roommenu: both copies, his live.
++    CoopTownNoteRoomMode(static_cast<int>(GameMode));
++    CoopTownP1MenuNoteFrame();
++    const bool room_drawn = GameMode != EdInMode::MENU || CoopTownDrawsRoomUnderMenu() || CoopTownP1MenuLive();
++
++    CoopTownRoomMenuDrawn(room_drawn, MGGetProjection(), EdInInfo->projection); // coop-roommenu: the test's trace
++    if (room_drawn) {
+@@ -817,1 +1070,9
+- f1deb709914a3252
++    CoopP2TownMenuDraw(); // coop-inbuild: player 2's own menu (her copy; the other out of sight)
++    CoopTownViewEnd(EdIn_NowCamera); // coop-inbuild
++    CoopTownP1MenuDraw(); // coop-roommenu: player 1's menu over the live room (his copy; the other out of sight)
++
++    CoopTownMenuStepBegin(); // coop-inbuild: his menu's opening, out of sight on her copy
++    const bool menu_ready = GameMode == EdInMode::MENU_INIT && EdInitModeFinish(EdIn_NowCamera, TexManager.GetTexture("frame_image", -1)) != 0;
++    CoopTownMenuStepEnd();
++
++    if (menu_ready) {
+@@ -823,1 +1084,11
+- aa67a7c749a492c9
++    // coop-roommenu: test hook (DC_COOP_TEST_ROOM_MENU): his battle menu opens, as from his Triangle.
++    if (GameMode == EdInMode::WALK && CoopTownRoomMenuTestOpen()) {
++        EdIn_goto_menu = ED_MENU_BATTLE;
++    }
++    if (GameMode == EdInMode::WALK && CoopTownRoomShopTestOpen()) { // coop-stage4 r6: test hook, a keeper's shop as its talk opens it
+~735 9133d8cbbd7e5f66|        |
++    }
++
++    // coop-inbuild: as in town, his waits while player 2's own is opening (CoopP2TownMenuBlocksP1).
++    if (GameMode == EdInMode::WALK && !CoopP2TownMenuBlocksP1() &&
++        ((EdPadDown(0x10, 1) != 0 && EdIn_loop_counter >= 2 && !CoopTalkHoldsWalker()) || EdIn_goto_menu != 0 || (SystemMesCheck() == 0 && EdCheckItemOver() != 0))) { // opt8: no menu through his talk
+@@ -832,0 +1104,1
++            coop::SoundOwner sound(1); // coop-menuse: his room's menu opening sounds on his copy
+@@ -834,1 +1106,4
+- cb6db11ee237f120
++            CoopTownNoteMenu(menu); // coop-inbuild
++            if (!CoopTownP1MenuOpensLocal(menu)) { // coop-stage4 4b: linked, his battle menu is his copy's own; the room walks on
+~834 cb6db11ee237f120|                |
++            }
+@@ -837,0 +1113,6
++    // coop-stage4 4b: his local menu's way out of the room, on every copy on its close command's tick (as retail's close).
++    if (GameMode == EdInMode::WALK && CoopTownP1MenuTakeRoomOut()) {
+~772 f55e99f617fa3977|        |
++        return 1;
++    }
++
+@@ -859,0 +1141,47
++    // coop-heldscene: a story arrival her copy held plays for player 1 once he is in the room with her (after her merge).
++    // (another event starting this step: not a free step, -1)
++    if (const int again = CoopWorldsArrivalAgain(EdEventData, EdInteriorStartEvent,
++                                                 start_event_no <= 0 && start_system_event <= 0 ? static_cast<int>(GameMode) : -1);
++        again > 0) {
++        start_event_no = again;
++    }
++
++    // coop-p2collide: her Cross at a pickup of the room (the mayor's closet), together: it starts as Toan's would.
++    // coop-talks2: her talk starts beside his talk or menu too (not over his scripted event: the room has one script engine).
++    // coop-pt1108d: or his walk only queued the event point he stands at (the closet, its prompt over his head), whose script waits for his Cross: not a start, her Cross goes on.
++    const bool his_queue = start_event_no > 0 && CoopTownRoomEventQueued(start_event_no);
++    const bool her_free = (start_event_no <= 0 || his_queue) && start_system_event <= 0 &&
++                          (GameMode == EdInMode::WALK || GameMode == EdInMode::TALK || GameMode == EdInMode::MENU_INIT || GameMode == EdInMode::MENU);
++    int her_event = her_free ? CoopTownHerRoomEvent(EdEventData, static_cast<int>(GameMode)) : -1;
++
++    // coop-talks2: a villager's talk of hers starts beside the room, in her own talk state: its talk script set up at once (as
++    // a talk's goes to the talk mode in its first step); one that runs on in steps is not hers beside the room (cleared, said).
++    if (her_event > 0 && CoopTownHerTalkPending()) {
++        CoopTownHerTalkStartIn();
++        const int  runs = EdEventInit(her_event, &EdNPCBuffer, EdEventData);
++        const bool talks = runs == 0 && EdEventInfo.return_code == ED_EVENT_RETURN_TALK;
++
++        if (talks) {
+=867 b2fa832d393b6427
++        } else if (runs != 0) {
+~842 374da9d4283fe081|            |
++        }
++
++        CoopTownHerTalkStartOut(talks, runs);
++        her_event = -1;
++    }
++
++    if (her_event > 0) {
++        if (his_queue) {
++            start_event_no = -1; // (coop-pt1108d: her pickup takes his queued event's place; his walk queues it again)
++        }
++        RunEvent(her_event, CoopTownHerRoomEventCamera(&EdIn_MainCamera)); // coop-roomevent: from her own camera
++    }
++
++    // coop-roomevent: her event starts as hers (her body its main character, her pad and bag the game's for its start).
++    const bool her_in = her_event > 0 && start_event_no == her_event && CoopTownHerRoomEventIn(her_event);
++
++    if (GameMode != EdInMode::EVENT) {
++        coop_scene_event = 0; // coop-scenejoin
++    }
++
+@@ -860,0 +1189,3
++        // coop-scenejoin: asked before its first step, which may write its story flag
++        const int scene = start_system_event <= 0 && CoopWorldsSceneEvent(EdEventData, start_event_no) ? start_event_no : 0;
++
+@@ -868,0 +1200,4
++            coop_scene_event = scene;
++            if (scene > 0) {
++                std::fprintf(stderr, "coop-town: story scene %d starts in %s (link tick %lld)\n", scene, EdInteriorName, (long long) NetplayLinkTick());
++            }
+@@ -880,0 +1216,4
++    if (her_in) {
++        CoopTownHerRoomEventInitOut(GameMode == EdInMode::EVENT, GameMode == EdInMode::TALK); // coop-roomevent
++    }
++
+@@ -964,0 +1304,3
++    // coop-roomevent: her event's pictures and item out of sight on his copy.
++    const bool her_event_hidden = GameMode == EdInMode::EVENT && CoopTownRoomEventHiddenBegin();
++
+@@ -972,0 +1315,2
++    CoopTownRoomEventHiddenEnd(her_event_hidden, false);
++
+@@ -978,1 +1322,1
+- 89b4d9644391e621
++    if (CoopTownEyeOnThisScreen()) { // coop-pt1108f
+@@ -991,1 +1335,1
+- 078b9e77275076b3
++        event = (ED_EVENT_INFO *) CoopTownRoomEventForToan(&EdEventInfo); // coop-roomevent: Toan is not her event's player
+@@ -995,1 +1339,18
+- 947859b99d221dda
++    // coop-p2skin: player 2's copy apart draws her in Toan's place, so Toan himself is not drawn (as outside).
++    if (CoopTownSkinsToan()) {
++        ED_EVENT_INFO unseen;
++
++        if (event != nullptr) {
++            unseen = *event;
++            unseen.player_draw = 0;
++            unseen.player_shadow_draw = 0;
++            event = &unseen;
++        }
++
++        EdDrawCharacter(EdIn_Chara, 0, 10, EdVillager, marks, 1, event);
++    } else {
+~995 947859b99d221dda|        |
++    }
++
++    CoopTownInteriorDrawn(CoopTownSkinsToan());
++    CoopTownDraw(); // coop-p2skin: her member, when drawn in his place; coop-inbuild: her character beside him, together
+@@ -1030,0 +1392,3
++    // coop-roomevent: her event's sprites and windows out of sight on his copy.
++    const bool her_windows_hidden = GameMode == EdInMode::EVENT && CoopTownRoomEventHiddenBegin();
++
+@@ -1035,0 +1400,1
++        // (opt8: together a talk draws from its slot, below; the room's own talk mode is a talk apart)
+@@ -1044,0 +1410,13
++    CoopTownRoomEventHiddenEnd(her_windows_hidden, false); // coop-roomevent
++
++    // coop-talks2: her talk's window, her own, swapped in to draw (out of sight on his copy; it steps as it draws). opt8: every
++    // player's talk window from its slot, on every copy, shown on its own player's copy alone.
++    for (int k = 0; k < coop::kMaxPlayers; k++) {
++        if (CoopTalkOn(k)) {
++            const bool hidden = CoopTalkDrawBegin(k);
+~1036 338c048eaf6bed4b|            |
+~1037 f97ec5773a4029ea|            |
++            CoopTalkDrawEnd(k, hidden);
++        }
++    }
++
+@@ -1115,0 +1494,2
++    // coop-roomevent: her event's fade out of sight on his copy (till it has cleared after her event).
++    const bool her_fade_hidden = CoopTownRoomFadeHiddenBegin();
+@@ -1116,0 +1497,1
++    CoopTownRoomEventHiddenEnd(her_fade_hidden, true);
+@@ -1230,0 +1612,6
++    // coop-roomevent: through her room event he only walks: his events, talks and doors wait (one event in the room at a time).
++    // (coop-talks2: not through her talk: it has its own talk state and window, beside his)
++    if (CoopTownHerRoomEventOn()) {
++        return;
++    }
++
+@@ -1241,1 +1628,2
+- eb049e4e93e22d10
++    // (coop-pt1106-batch: not while a door of hers opens together, CoopWorldsDoorWindowBy)
++    if (EdMoveCharaInfo.acted == 0 && EdPadDown(0x40, 1) != 0 && CoopWorldsDoorWindowBy() == 0) {
+@@ -1270,0 +1659,11
++
++            // coop-inbuild: linked and together, player 2 away from this door stays inside: her copy does not go out
++            // (CoopWorldsLeaveBuildingBy splits the pair there; its player now stands where she stood).
++            // coop-pt1106-batch (Jep's 2026-11-06 playtest, item 4: "when either player leaves the mayor's house, they vanish at
++            // once on the other player's screen instead of playing the door-opening animation first"): together, his door
++            // opens on both copies (she walks on, its fade out of sight on hers) and the copies split as it ends (below).
++            if (!CoopWorldsDoorWindowStart(1) && !CoopWorldsLeaveBuildingBy(1)) {
+=618 742f81f9e319e345
++                EdFadeIn(1, 0.0f, 0.0f, 0.0f);
+~704 84f1af88f2b806f0|                |
++            }
+@@ -1473,0 +1873,180
++// coop-inbuild: the interior's camera markers as SetCameraPos reads them (up to eight, in its order), for player 2's own
++// camera indoors; SetCameraPos's own state (active_camera, camera_change_count) is left alone.
++int InteriorCameras(INTERIOR_CAMERA *cameras) {
++    EPARTS_FUNC_DATA *point = func_point;
++    sceVu0FMATRIX     matrix;
++    int               count = 0;
++
++    for (int i = 0; i < func_num && count < 8; i++, point++) {
++        if (point->kind != EPARTS_FUNC_CAMERA) {
++            continue;
++        }
++
++        INTERIOR_CAMERA *entry = &cameras[count++];
++        auto            *owner = reinterpret_cast<CFrame *>(point->parts);
++
+~1395 73d029a51220f44a|        |
+~1397 ad01810f66a57d2a|        |
+~1398 a29e6c164f8a05f8|        |
+~1399 d9754a7debcf9382|        |
++
+~1401 c3e6ad984735da7b|        |
+~1402 6f67766d49704bd6|            |
++
+~1404 258ad5dff0603463|            |
+~1405 9b34ca1e04b49ae3|                |
++            }
++        }
++
+~1409 010c3ec5f6ad9b9f|        |
+~1410 a13dd4b45315861a|        |
++    }
++
++    return count;
++}
++
++} // namespace
++
++int EdInCameraMarkerAt(const float *pos, int eye_of, float *eye) {
++    static INTERIOR_CAMERA cameras[8];
++    const int              count = fix_camera != 0 ? InteriorCameras(cameras) : 0;
++    int                    inside = -1;
++
+=1426 7a19ead9926fb03c
++        if (cameras[i].link_id == 0) {
++            inside = i;
++            continue;
++        }
++
++        sceVu0FVECTOR position = {pos[0], pos[1], pos[2], 1.0f};
+~1377 8ec07a8a5c1557ce|        |
++
++        sceVu0ApplyMatrix(local, cameras[i].frame.GetInverseMatrix(), position);
++
++        if (!(local[0] < cameras[i].min[0]) && !(local[1] < cameras[i].min[1]) && !(local[2] < cameras[i].min[2]) && local[0] <= cameras[i].max[0] &&
++            local[1] <= cameras[i].max[1] && local[2] <= cameras[i].max[2]) {
++            inside = i;
++            break;
++        }
++    }
++
++    // The eye of marker eye_of (the one her camera holds to), else of the one she stands in.
++    const int shown = eye_of >= 0 && eye_of < count ? eye_of : inside;
++
++    if (shown >= 0 && eye != nullptr) {
++        sceVu0FVECTOR at = {0.0f, 0.0f, 0.0f, 1.0f};
++
++        cameras[shown].frame.GetWorldPosition(at, at);
++        sceVu0CopyVector(eye, at);
++    }
++
++    return inside;
++}
++
++// coop-doorflash: SetCameraPos's hold let go, so its next step takes the marker of the box the player stands in at once
++// (as the room's events leave it when they end).
++void EdInCameraRetake() {
+=521 52c97f64d855ff23
++}
++
++int EdInDoorAt(const float *pos, const float *rot) {
++    EPARTS_FUNC_DATA *point = func_point;
++    sceVu0FVECTOR     world;
++    sceVu0FVECTOR     at = {pos[0], pos[1], pos[2], 1.0f};
++
++    // SearchMapJump's test, from player 2's character (EdInteriorJumpID, which it leaves on the last door, untouched).
++    for (int i = 0; i < func_num; i++, point++) {
+=1321 e5376d11c9eb2d5e
+=1323 f247777858de3aba
++            reinterpret_cast<CFrame *>(point->parts)->GetWorldPosition(world, point->position);
++
++            if (DistVector(at, world) < 10.0f && AngleCmp(rot[1], point->rotation[1], 0.87f) == 0) {
++                return point->link_id;
++            }
++        }
++    }
++
++    return -1;
++}
++
++bool EdInDoorPose(float *pos, float *rot) {
++    EPARTS_FUNC_DATA *point = func_point;
++
++    // The room's first door, where SearchMapJump finds it and the way one faces to take it (the inbuild tests' warp).
++    for (int i = 0; i < func_num; i++, point++) {
+=1321 e5376d11c9eb2d5e
+=1323 f247777858de3aba
++            reinterpret_cast<CFrame *>(point->parts)->GetWorldPosition(pos, point->position);
++            *rot = point->rotation[1];
++            return true;
++        }
++    }
++
++    return false;
++}
++
++// coop-p2doors: DC_COOP_DEBUG, every door of the room once (where SearchMapJump finds it, its facing and link).
++void EdInDoorsLog() {
++    EPARTS_FUNC_DATA *point = func_point;
++    sceVu0FVECTOR     world;
++
++    for (int i = 0; i < func_num; i++, point++) {
+=1321 e5376d11c9eb2d5e
+=1323 f247777858de3aba
++            reinterpret_cast<CFrame *>(point->parts)->GetWorldPosition(world, point->position);
++            std::printf("coop-debug: room %s door %d at (%.1f %.1f %.1f) facing %.2f, link %d\n", EdInteriorName, i, world[0], world[1], world[2],
++                        point->rotation[1], point->link_id);
++        }
++    }
++
++    std::fflush(stdout);
++}
++
++// coop-housefade (Jep's 2026-11-02 playtest: "if p1 and p2 are both in the house, p2 won't play the door opening animation when
++// leaving"): player 2's copy going out by her door opens it as MoveCharacter opens Toan's: the player at the door's place and
++// facing, its open motion, the fade out and the door's sound, then out (ED_IN_MODE_LEAVE). Her skin stands in his place.
++void EdInOpenDoorBy(int link_id) {
+=387 040cf71419fea68c
+=2057 fee09c464872f4d4
++    int           motion = 0;
++
+=563 babb6cc5df4b06d6
+~1245 c9f3c70a04b8f588|    |
+=519 c87c7f66b49d7fe8
+~1256 5197ace629e14bbb|    |
++    GetDoorPos(link_id, position, rotation, &EdInteriorDoorSound, &motion);
+~1262 14ed43131e8a28cb|    |
+~1263 a69ece84a191a2ee|    |
+~1264 4522bce286f55686|    |
+~660 50621a0250677b46|    |
+~661 ab74a172bf1309b0|    |
+~658 48e89d016cfd88dc|    |
+=507 b74ec039113f4442
++    EdInteriorJumpID = link_id;
+~1269 726dab40b79a8e61|    |
+~1270 5b51f365df0d52df|    |
++}
++
++// coop-pt1106-batch: where one stands and faces to open the room's door link_id, its open motion and its sound (her door
++// opening together on both copies, CoopTownInteriorStep).
++int EdInDoorOpenPose(int link_id, float *position, float *rotation, int *sound) {
+~1255 b887ae26562eb377|    |
++
++    GetDoorPos(link_id, position, rotation, sound, &motion);
++    return motion;
++}
++
++void EdInLeaveByDoor(int link_id) {
++    // As the door's own way out (ED_IN_MODE_LEAVE): the town puts the player at that door outside.
++    EdInteriorJumpID = link_id;
+~687 6afe787bbae11e8c|    |
++
+~689 7f7d5534e5f64b02|    |
+~690 f2a21cb8b63bec75|        |
++    } else {
+~692 fc1031e7fb0e9f69|        |
++    }
++}
++
++namespace {
++

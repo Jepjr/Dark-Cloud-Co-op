@@ -1,0 +1,1076 @@
+# port/src/game/editloop.cpp from Chronicle's port/src/game/editloop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/editloop.cpp
+base port/src/game/editloop.cpp
+from 12cad0dd1306df365ece7c7fb15f367c6264a824
+to 46319105d02e312250298599e85146d0662cbfe2
+@@ -64,0 +65,1
++#include "main.hpp" // coop-worlds: NextMapNo
+@@ -90,0 +92,22
++#include "coop/coop_menu.hpp" // coop-menus
++#include "coop/coop.hpp"
++#include "coop/coop_worlds.hpp" // coop-worlds
++#include "coop/coop_georama.hpp" // coop: georama
++#include "coop/netplay.hpp" // coop: netplay (the join notice)
++#include "coop/coop_actor.hpp" // opt8: the player table (kMaxPlayers)
++#include "coop/coop_town.hpp" // coop-town
++#include "coop/coop_audio.hpp" // coop-menuse
++#include "coop/coop_townmenu.hpp" // coop-town: each player's own menu
++
++// coop hooks (src/coop defines them at global scope)
++bool CoopWorldsTakeInterior(const char *name); // coop-worlds (port/src/coop/coop_worlds.cpp)
++void CoopWorldsStayInTown();
++void CoopTownDrawPartnerMark(dc::game::CFrame *mark); // coop-p2marks (port/src/coop/coop_town.cpp)
++bool CoopTownTalkTarget(int villager);      // coop-playfix (port/src/coop/coop_town.cpp)
++bool CoopTownDayChangeHeld();               // coop-pt1109c (port/src/coop/coop_town.cpp)
++bool CoopTownClockRunsInTalk();             // coop-pt1109c
++bool CoopTownDayChangeOwe(int from, int to); // coop-pt1109c
++bool CoopTownDayChangeOwedNow();            // coop-pt1109c
++bool CoopTownEyeOnThisScreen();             // coop-pt1108f (port/src/coop/coop_town.cpp)
++int  CoopTownOwnTownEvent(); // coop-pt1108f (port/src/coop/coop_town.cpp)
++bool CoopTownOwnEventClockShort(); // coop-scriptmenus: its twin's clock (port/src/coop/coop_town.cpp)
+@@ -93,0 +117,2
++extern int SystemMesWait; // sysmes.cpp (coop-town: the help bar left out, other messages kept)
++
+@@ -503,0 +529,5
++// coop-worlds: the event the player last queued by walking or talking (the story guard's to check), else -1.
++int player_event_no = -1;
++
++int her_town_event = -1; // coop-pt1106-batch: her own town event asked for this tick (editloop's step; a static: its goto)
++
+@@ -551,0 +582,403
++// coop-dungeonp2: the fixed map parts an event's script moves (its object handles: Norune's cave gate swinging open as
++// Toan walks in), as they stood when the event started. Player 2's copy staying in town when the script's own jump
++// takes player 1 away puts them back: the jump would have reloaded the town, so the event never closes them (Jep:
++// "the dungeon's outside door stayed open" on her screen). DC_WORLDS_MUTATE=keep_gate_open (twin) leaves them.
++static bool g_event_parts_kept = false; // reset each tick the town is not in an event
++
++struct EventFrameKeep {
++    CFrame       *frame;
++    sceVu0FMATRIX local;
++    sceVu0FVECTOR scale;
+=508 040cf71419fea68c
++    sceVu0FVECTOR rotation;
++    int           no_rotation;
++    int           rot_type;
++    int           srt;
++};
++
++static std::vector<EventFrameKeep> g_event_frames;
++
++static void KeepEventFrame(CFrame *frame, int depth) {
++    for (; frame != NULL; frame = depth > 0 ? frame->brother : NULL) {
++        EventFrameKeep keep{frame};
++
++        std::memcpy(keep.local, frame->local, sizeof keep.local);
++        sceVu0CopyVector(keep.scale, frame->scale);
++        sceVu0CopyVector(keep.position, frame->position);
++        sceVu0CopyVector(keep.rotation, frame->rotation);
++        keep.no_rotation = frame->no_rotation;
++        keep.rot_type = frame->rot_type;
++        keep.srt = frame->srt;
++        g_event_frames.push_back(keep);
++
++        // The named frames a script turns (a gate's two doors) are children of the part's frames.
++        if (depth < 8) {
++            KeepEventFrame(frame->child, depth + 1);
++        }
++    }
++}
++
++// Every part the event's object handles can take: the town's fixed parts, its placed (Georama) parts, such as
++// Norune's cave entrance, and the interior's parts, each frame with its children.
++static void KeepEventParts() {
++    g_event_frames.clear();
++
++    const struct {
++        CMapParts *parts;
++        int        count;
++    } lists[3] = {{EdEventInfo.fixed_parts, EdEventInfo.fixed_parts_count},
++                  {EdEventInfo.edit_parts, EdEventInfo.edit_parts_count},
++                  // coop-inbuild: the interior's only while inside one: out of it, EditInInit's pointer is left on parts whose
++                  // frames the town's load reused (player 1's copy read them in the town's next event and crashed).
++                  {EdInteriorFlag != 0 ? EdEventInfo.interior_parts : NULL, EdEventInfo.interior_parts_count}};
++
++    for (const auto &list : lists) {
++        for (int i = 0; list.parts != NULL && i < list.count; i++) {
++            CMapParts *part = &list.parts[i];
++            CFrame    *frames[9] = {part->frame[0],     part->frame[1],     part->frame[2],      part->frame[3],      part->GetCollisionFrame(),
++                                    part->shadow_frame, part->shade_frame, part->camera_frame, part->ripple_frame};
++
++            for (CFrame *frame : frames) {
++                KeepEventFrame(frame, 0);
++            }
++        }
++    }
++}
++
++// coop-p2entry: where Toan stood as the event began, and which way he faced (her door event walks him into it).
++static sceVu0FVECTOR g_event_toan_pos;
++static sceVu0FVECTOR g_event_toan_rot;
++static bool          g_event_toan_kept = false;
++
++static void KeepEventToan() {
++    g_event_toan_kept = Chara != NULL;
++
++    if (g_event_toan_kept) {
++        Chara->GetPosition(g_event_toan_pos);
++        Chara->GetRotation(g_event_toan_rot);
++    }
++}
++
++// coop-p2entry: player 1's copy staying in town after player 2's partner took an event's way into a dungeon (Norune's
++// cave door): Toan back where he stood as it began, facing away from the door, the town's camera behind him again (Jep's
++// 2026-10-25 playtest: "P1 is standing behind the door and has to go into georama mode to get back").
++// DC_WORLDS_MUTATE=event_not_undone (twin): Toan left where the event walked him.
++static void RestoreEventToan() {
++    if (!g_event_toan_kept || Chara == NULL || Chara->frame == NULL || !CoopWorldsUndoTownEvent()) {
++        return;
++    }
++
++    sceVu0FVECTOR door;
++    Chara->GetPosition(door);
++
++    const float dx = g_event_toan_pos[0] - door[0];
++    const float dz = g_event_toan_pos[2] - door[2];
++    const float yaw = dx * dx + dz * dz > 1.0f ? atan2f(dx, dz) : g_event_toan_rot[1];
++    float       angle = yaw - PI_SHORT;
++
++    if (angle < -PI_SHORT) {
++        angle += TWO_PI_SHORT;
++    }
++
++    Chara->SetPosition(g_event_toan_pos);
++    Chara->frame->SetPosition(g_event_toan_pos);
++    Chara->SetRotation(0.0f, yaw, 0.0f);
++    Chara->Step();
+~1393 3402a9a46b14e838|    |
+~1394 05a3769ea1cbdd58|    |
++    MainCamera.SetFollow(g_event_toan_pos[0], g_event_toan_pos[1] + Chara->body_height - 3.0f, g_event_toan_pos[2]);
+=1139 87be3cef5e4109d7
++    NowCamera = (CCamera *) &MainCamera;
++    std::fprintf(stderr, "worlds: staying: Toan put back where he stood (%.0f %.0f %.0f) from the door (%.0f %.0f %.0f), facing away (yaw %.2f)\n",
++                 g_event_toan_pos[0], g_event_toan_pos[1], g_event_toan_pos[2], door[0], door[1], door[2], yaw);
++}
++
++static void RestoreEventParts() {
++    int moved = 0;
++
++    for (const EventFrameKeep &keep : g_event_frames) {
++        CFrame *frame = keep.frame;
++
++        moved += std::memcmp(keep.position, frame->position, sizeof keep.position) != 0 ||
++                 std::memcmp(keep.rotation, frame->rotation, sizeof keep.rotation) != 0 || keep.rot_type != frame->rot_type ||
++                 std::memcmp(keep.local, frame->local, sizeof keep.local) != 0;
++
++        if (CoopWorldsMutated("keep_gate_open")) {
++            continue;
++        }
++
++        frame->SetScale((float *) keep.scale);
++        frame->SetPosition((float *) keep.position);
++        frame->SetRotation(keep.rotation[0], keep.rotation[1], keep.rotation[2]);
++        std::memcpy(frame->local, keep.local, sizeof keep.local);
++        frame->no_rotation = keep.no_rotation;
++        frame->rot_type = keep.rot_type;
++        frame->srt = keep.srt;
++        frame->world_valid = 0;
++    }
++
++    std::fprintf(stderr, "worlds: staying: the town event's parts %s (%zu frames, %d had moved)\n",
++                 CoopWorldsMutated("keep_gate_open") ? "left as the event moved them" : "put back", g_event_frames.size(), moved);
++}
++
++// The town's map menu leaves for map (another town, or a dungeon at 200 on). coop-worlds: linked, player 2's
++// copy stays in town instead, and the copies are apart from here.
++static void TownMapJump(int map) {
++    if (!CoopWorldsTakeExit(map)) {
++        CoopWorldsStayInTown();
++        return;
++    }
++
++    MapJump(map, -1);
++    EdEventInfo.integer_arguments[0] = map;
+~1724 ae02253ba08e5175|    |
++}
++
++// coop-worlds: DC_WORLDS_TEST_GATE_SCAN=1: once, the town's ground on a 20-unit grid, each event polygon (a ground
++// kind above 0, the event walking onto it starts) logged once per kind with a point inside it, for the gate test's warp.
++static void TownGroundEventScan() {
++    static const bool scan = TestEnvInt("DC_WORLDS_TEST_GATE_SCAN", 0) != 0;
++    static bool       done = false;
++
++    if (!scan || done || pEditGround == NULL) {
++        return;
++    }
++
++    done = true;
++    static CCPoly polys[512];
++    struct Seen {
++        int   points;
++        float min[3], max[3], normal[3];
++    };
++    static Seen seen[512];
++
++    for (int x = -6000; x <= 6000; x += 20) {
++        for (int z = -6000; z <= 6000; z += 20) {
++            int count = pEditGround->PickUpPoly(polys, (float) x, 0.0f, (float) z);
++
++            for (int i = 0; i < count && i < 512; i++) {
++                int kind = polys[i].attr.ground_kind;
++
++                if (kind <= 0 || kind >= 512) {
++                    continue;
++                }
++
++                Seen &s = seen[kind];
++
++                for (int v = 0; v < 3; v++) {
++                    for (int k = 0; k < 3; k++) {
++                        float c = polys[i].vertex[v][k];
++
++                        s.min[k] = s.points == 0 && v == 0 ? c : std::min(s.min[k], c);
++                        s.max[k] = s.points == 0 && v == 0 ? c : std::max(s.max[k], c);
++                    }
++                }
++
++                for (int k = 0; k < 3; k++) {
++                    s.normal[k] = polys[i].normal[k];
++                }
++
++                s.points++;
++            }
++        }
++    }
++
++    for (int kind = 1; kind < 512; kind++) {
++        const Seen &s = seen[kind];
++
++        if (s.points > 0) {
++            std::fprintf(stderr, "worlds: test: ground event %d: %d grid hits, x %.0f..%.0f y %.0f..%.0f z %.0f..%.0f, normal (%.2f %.2f %.2f)\n",
++                         kind, s.points, s.min[0], s.max[0], s.min[1], s.max[1], s.min[2], s.max[2], s.normal[0], s.normal[1], s.normal[2]);
++        }
++    }
++
++    std::fflush(stderr);
++}
++
++// coop-worlds: player 2's own door (Jep's 2026-10-21 rule: she can use doors too). Linked and together, her partner
++// within a door's trigger range and her Cross (the agreed pad, so both copies on the same tick): she goes in and the
++// copies split (GotoInterior's hook), player 1's copy staying outside. Not a door its story still holds
++// (minimum_progress) nor the cave's. DC_WORLDS_MUTATE=no_partner_door (twin): her Cross opens nothing, as before.
++static void PartnerDoor() {
++    static bool   cross_was = false;
++    InputPadState pad;
+=3664 0b6f5aa5e99beb30
++    sceVu0FVECTOR rot;
++
++    const bool linked = NetplayPad(1, pad);
++    const bool cross = linked && (pad.buttons & kInputCross) != 0;
++    const bool pressed = cross && !cross_was;
++
++    cross_was = cross;
++
++    if (!pressed || !CoopWorldsPartnerMayStart(nullptr, -1) || CoopWorldsMutatedDoor() || !CoopTownPartnerPose(pos, rot) || EditMapInfo == NULL) {
++        return;
++    }
++
++    // The game's own search for the event in reach, from where she stands and the way she faces (as Toan's walk).
++    ED_EVENT_PARAM param;
++    const int      found = EdGetEvent(EditMapInfo->work.events.points, EditMapInfo->event_count, &param, pos, rot, NowTime);
++
++    if (CoopDebug()) {
++        std::fprintf(stderr, "worlds: player 2's Cross at (%.0f %.0f %.0f) facing %.2f: event %d kind %d\n", pos[0], pos[1], pos[2], rot[1], found,
++                     found != 0 ? (int) param.kind : -1);
++    }
++
++    if (found == 0 || param.kind != ED_EVENT_POINT_DOOR || param.point == NULL) {
++        return;
++    }
++
++    // The cave's door (Norune's "dungeon" door): Toan's walk runs its event 130 while he stands in reach, and the event
++    // goes on (its world map, then its _MAP_JUMP) on the tick his Cross is down. Hers starts it the same way: her Cross
++    // on the game pad's first port for this tick, the event hers (CoopWorldsTownEventBy), so her pad answers its world
++    // map and the split sends her copy into the cave (Jep's 2026-10-24 playtest: "xiao still cant enter it, even while
++    // toan is in town"). DC_WORLDS_MUTATE=no_partner_cave (twin): her Cross at it does nothing, as before.
++    // coop-menucross: with the door still shut its event only shows "A big key hole" to whoever pressed, so hers is her own
++    // note on her copy (CoopTownHerCaveDoorShut), and nothing stops (no split under his menu either).
++    if (strcmp(param.point->destination, "dungeon") == 0) {
++        if (CoopWorldsMutated("no_partner_cave") || CoopTownHerCaveDoorShut() || !CoopTownHerDoorTakesOver(true) || RunEvent(130, NowCamera) == 0) {
++            return;
++        }
++
++        PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1]
++
++        data[0].input.status.button |= kInputCross;
++        data[2].input.status.button &= ~kInputCross;
++        CoopWorldsTownEventBy(2);
++        return;
++    }
++
++    if (param.point->minimum_progress > 0) {
++        return;
++    }
++
++    if (!CoopTownHerDoorTakesOver(false)) { // coop-localfix: her door under his menu or pause
++        return;
++    }
++    CoopWorldsTownEventBy(2);
++    GotoInterior(param.point->destination, param.parts_no, param.point->side, &param, -1);
++}
++
++// coop-doorprompt: a player's cave key at Norune's cave door (their own picker, coop_town's CoopTownCaveKeyUsed), both
++// copies on the same tick: the pair splits first, so the door's event 130 (the door opening, its fade and its jump into
++// the cave) runs on the user's copy alone, as a Cross at the opened door does; the other copy plays on in town, no fade.
++// Her copy going in starts it from where she stands (its Toan is hers from the split).
++// coop-doorfix (Jep's 2026-10-30 Local playtest: "Toan vanished from P2's screen instantly"): together, the key (or a Cross at
++// the opened door) first walks its user in beside the game on both copies (coop_town's CoopTownCaveEntry: the door opens,
++// the user walks in, their screen fades); the pair splits as that walk ends (walked), and the user's copy takes the jump the
++// door's event ends with (_MAP_JUMP(201): map 200), black from there. Apart, the door's event runs on the user's copy as before.
++static void CaveDoorKey() {
++    bool       walked = false;
++    const int  user = CoopTownCaveKeyUsed(&walked);
++    const bool together = CoopWorldsLinkedTogether();
++
++    if (user == 0 || !CoopWorldsSplitForEvent(user)) {
++        return;
++    }
++
++    if (user == 2 && together) {
++        float at[3] = {};
++
++        coop::TownPlacePlayerAtPartner(at);
++    }
++
++    if (walked) {
++        EdFadeOut(1, 0.0f, 0.0f, 0.0f);
++        MapJump(200, -1);
++        EdEventInfo.integer_arguments[0] = 200;
+~1724 ae02253ba08e5175|        |
++        std::fprintf(stderr, "worlds: player %d goes in by the cave door on this copy alone (walked in beside the game, the jump)\n", user);
++        return;
++    }
++
++    if (RunEvent(130, NowCamera) == 0 && start_event_no != 130) {
++        return;
++    }
++
++    PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1]
++
++    data[0].input.status.button |= kInputCross;
++    data[2].input.status.button &= ~kInputCross;
++    std::fprintf(stderr, "worlds: player %d goes in by the cave door on this copy alone\n", user);
++}
++// The town's door and map event points once (DC_WORLDS_TEST_GATE_SCAN), for the door tests' warps.
++static void TownDoorScan() {
++    static bool done = false;
++
++    if (done || EditMapInfo == NULL || TestEnvInt("DC_WORLDS_TEST_GATE_SCAN", 0) == 0) {
++        return;
++    }
++
++    done = true;
++    ED_EVENT_POINT *points = EditMapInfo->work.events.points;
++
++    for (int i = 0; points != NULL && i < EditMapInfo->event_count; i++) {
++        if (points[i].event_type == ED_EVENT_POINT_EVENT) {
++            // A map event's point (a talk or look prompt), as EdGetEvent places it.
+~1878 e397de23c8ed2d3a|            |
++            sceVu0FVECTOR turn;
++            sceVu0CopyVector(at, points[i].position);
++            sceVu0CopyVector(turn, points[i].rotation);
++            CMapObject *part = points[i].parts_no >= 0 ? pEditGround->GetPartsObject(points[i].parts_no) : points[i].map_object;
++
++            if (part != NULL) {
++                GetPosRot(part, at, turn);
++            }
++
++            std::fprintf(stderr, "worlds: test: event point %d: map_no %d linked %d in part %d: town (%.0f %.0f %.0f) facing %.2f, range %.0f, enabled %d\n", i,
++                         points[i].map_no, points[i].linked_value, points[i].parts_no, at[0], at[1], at[2], turn[1], points[i].trigger_range[0],
++                         points[i].enabled);
++        }
++        if (points[i].event_type == ED_EVENT_POINT_DOOR) {
++            // Where it is in the town, as EdGetEvent places it: by its part's object or its own map object.
+~1878 e397de23c8ed2d3a|            |
++            sceVu0FVECTOR turn;
++            sceVu0CopyVector(at, points[i].position);
++            sceVu0CopyVector(turn, points[i].rotation);
++            CMapObject *part = points[i].parts_no >= 0 ? pEditGround->GetPartsObject(points[i].parts_no) : points[i].map_object;
++
++            if (part != NULL) {
++                GetPosRot(part, at, turn);
++            }
++
++            std::fprintf(stderr, "worlds: test: door %d to %s in part %d%s: town (%.0f %.0f %.0f) facing %.2f, range %.0f, progress %d enabled %d\n", i,
++                         points[i].destination, points[i].parts_no, part != NULL ? "" : " (no object: not in town)", at[0], at[1], at[2], turn[1],
++                         points[i].trigger_range[0], points[i].minimum_progress, points[i].enabled);
++        }
++    }
++
++    std::fflush(stderr);
++}
++
++// coop-worlds: live sync while apart. The town's Georama lives in its working state (pEditGround, EditPartsInfo) and
++// reaches the save data only as the town is left (EditSave); the sync reads and writes the save's, so the town's
++// working Georama goes into it before each look, and a plot the other copy changed in this town comes back into it.
++void CoopTownGeoramaToSave() {
++    if (MapNo >= 0 && MapNo < TOWN_COUNT && pEditGround != NULL && SaveData != NULL) { // called in a town only
+=578 1a78f8fff0f35d4a
+=579 7a0bb9dc065506ac
++    }
++}
++
++void CoopTownGeoramaPlotFromSave(int town, int plot) {
++    if (NowEditMap != town || SaveData == NULL) { // called in a town only
++        return;
++    }
++
++    SV_EDIT_PARTS_INFO *saved = SaveData->GetEditPartsInfo(town, plot);
++    EDITPARTS_INFO     *live = EditPartsInfo.GetPartsInfo(plot);
++
++    if (saved == NULL || live == NULL) {
++        return;
++    }
++
++    live->obtained = saved->obtained;
++    live->completion_flags = saved->completion_flags;
++    live->placed = saved->placed;
++    live->stock = saved->stock;
++
++    for (int element = 0; element < 6; element++) {
++        live->elements[element].enabled = saved->element_enabled[element];
++    }
++}
++
+@@ -1291,0 +1725,1
++    bool close_frame = false; // coop-menuflash: his live menu's close tick draws the town only
+@@ -1295,1 +1729,4
+- 20552943e23759e9
++    if (GameMode != ED_MODE_EVENT && !CoopTalkHoldsWalker() && EdPadDown(0x800, 4) != 0) { // opt8: nor through his talk from its slot
+=1296 bafba1edc5a43133
++    }
++    if (CoopTownSplitForTest()) { // coop-town: test hook (DC_COOP_TOWN_SPLIT)
+@@ -1304,1 +1741,1
+- b3db3d316b4692ba
++        if (CoopTownEyeOnThisScreen()) {
+@@ -1329,0 +1767,3
++    // opt8: together, a talk on the town's talk mode moves into its player's slot and the town walks (one talk path for every player).
++    CoopTalkIntoSlots();
++
+@@ -1336,0 +1777,10
++        // coop-worlds: an interior event's own jump into a dungeon (its script's _MAP_JUMP): linked, player 2's
++        // copy stays in the building, and the copies are apart.
++        if (interior_result == 0x63 && NextMapNo >= 200 && NextMapNo < 300 && !CoopWorldsTakeScriptExit(NextMapNo)) {
++            NextMapNo = -1;
+~1249 efe7cf1b7a1d4fed|            |
++            interior_result = 0;
+~1565 12462d91154958be|            |
++            std::fprintf(stderr, "worlds: stays in the building %s\n", EdInteriorName);
++        }
++
+@@ -1517,0 +1968,6
++    CoopGeoramaP1StepBegin(); // coop-town: no part on player 2
++
++    if (mode != ED_MODE_EVENT) {
++        g_event_parts_kept = false; // coop-dungeonp2: the next event keeps its parts afresh
++    }
++
+@@ -1541,0 +1998,1
++                int queued = start_event_no; // coop-worlds: an event walking or talking queues is the player's
+@@ -1542,0 +2000,68
++                CoopTownStep(); // coop-town: player 2 in town
++                TownGroundEventScan(); // coop-worlds: the gate test's map of the town's event polygons
++                TownDoorScan();
++                PartnerDoor(); // coop-worlds: player 2's own door
++                CaveDoorKey(); // coop-doorprompt: a player's cave key at the cave door
++
++                // coop-worlds: after a merge inside a building, both copies go back in (the merge's load is the town's).
++                if (int building = CoopWorldsReenterBuilding(); building > 0 && EditMapInfo != NULL) {
++                    ED_EVENT_POINT *points = EditMapInfo->work.events.points;
++
++                    for (int i = 0; points != NULL && i < EditMapInfo->event_count; i++) {
++                        if (points[i].event_type == ED_EVENT_POINT_DOOR && CoopWorldsInteriorId(points[i].destination) == building) {
++                            GotoInterior(points[i].destination, points[i].parts_no, 0, NULL, -1);
++                            break;
++                        }
++                    }
++                }
++
++                // coop-worlds: a test puts player 2's partner onto the entrance (DC_WORLDS_TEST_PARTNER_WARP).
++                if (float partner_to[4]; CoopWorldsTestPartnerWarp(partner_to)) {
++                    CoopTownPlacePartnerForTest(partner_to);
++                }
++
++                // coop-worlds: player 2's partner stepped onto a town exit (Norune's entrance): she takes it, as Toan's
++                // walking onto it would; both copies, on the same tick.
++                if (int partner_event = CoopTownPartnerGroundEvent();
++                    partner_event > 0 && start_event_no <= 0 && CoopWorldsPartnerMayStart(EdEventData, partner_event)) {
++                    if (RunEvent(partner_event, NowCamera) != 0) {
++                        CoopWorldsTownEventBy(2);
++                    }
++                }
++
++                // coop-worlds: the gate test puts Toan onto the town's entrance (DC_WORLDS_TEST_GATE_WARP).
++                if (sceVu0FVECTOR to; CoopWorldsTestGateWarp(to) && Chara != NULL && Chara->frame != NULL) {
++                    Chara->SetPosition(to);
++                    Chara->frame->SetPosition(to);
++                    if (const float yaw = CoopWorldsTestGateYaw(); !std::isnan(yaw)) {
++                        Chara->SetRotation(0.0f, yaw, 0.0f);
++                    }
++                    Chara->Step();
++                }
++
++                // coop-worlds: DC_COOP_DEBUG, an apart copy's Toan once a second (its own player's walking).
++                if (static int apart_ticks = 0; CoopDebug() && CoopWorldsApart() && Chara != NULL && ++apart_ticks % 60 == 0) {
+~1878 e397de23c8ed2d3a|                    |
+~1888 d242e977d2acb92b|                    |
++                    const InputPadState raw = InputGetPad(0);
++                    std::fprintf(stderr, "worlds: apart in town: Toan at (%.0f %.0f %.0f), pad 1 %04x stick %d %d, game mode %d; game pad %04x stick %d %d (lxf %d) key_lock %d\n", at[0], at[1], at[2],
++                                 (unsigned) raw.buttons, raw.left_x, raw.left_y, GameMode, GamePad.GetPadOn() & 0xFFFF,
++                                 GamePad.GetLX(), GamePad.GetLY(), (int) (GamePad.GetLXf() * 100.0f), (int) key_lock);
++                    const auto &mi = ((CMainChara *) Chara)->move_info;
++                    std::fprintf(stderr, "worlds: apart in town: landed %d ground kind %d area %d ground y %.0f\n", (int) mi.landed,
++                                 (int) mi.ground_poly.attr.ground_kind, (int) mi.ground_poly.attr.area_kind, mi.ground_poly.vertex[0][1]);
++                }
++
++                // coop-worlds: a test's way out through the town's dungeon gate (DC_WORLDS_EXIT_AT).
++                if (CoopWorldsTestTownExit()) {
++                    goto_dungeon = 1;
++                }
++
++                // coop-worlds: a test's town event on an apart copy (DC_WORLDS_TEST_EVENT), for the story guard.
++                if (int test_event = CoopWorldsTestTownEvent(EdEventData); test_event > 0) {
++                    RunEvent(test_event, &MainCamera);
++                }
++
++                if (start_event_no > 0 && start_event_no != queued) {
++                    player_event_no = start_event_no;
++                }
+@@ -1574,0 +2100,19
++
++            // coop-pt1106-batch: one player's own town event (Norune's fishing board): the other walks on beside it. Through his,
++            // she walks as in his talk; through hers, Toan walks with his own camera, his Cross starting nothing (no door, talk
++            // or event of his till hers ends: the town has one script engine), and her body is the event's.
++            if (CoopTownWalksThroughOwnEvent(2)) {
++                CoopTownStep();
++            } else if (CoopTownWalksThroughOwnEvent(1)) {
++                const int held = start_event_no;
++                const int held_system = start_system_event;
++
++                CoopTownHisWalkInHerEventIn();
++                MainMode();
++                CoopTownHisWalkInHerEventOut();
++                start_event_no = held;
++                start_system_event = held_system;
+=3716 1e47a960a09f9267
++                CoopTownStep(); // (her pose from the event's body)
++            }
++
+@@ -1576,1 +2120,38
+- 34a0f4242e8a18a4
++            {
++                int next_was = NextMapNo;
++                int start_was = StartEventNo;
++
++                // coop-dungeonp2: the parts as they stood when this event began (its first tick in event mode).
++                if (!g_event_parts_kept) {
++                    g_event_parts_kept = true;
++                    KeepEventParts();
++                    KeepEventToan(); // coop-p2entry
++                }
++
++                // coop-pt1106-batch: her own town event: her pad the game's for its step, his camera kept his at its end.
++                const bool her_own = CoopTownOwnTownEvent() == 2;
++
++                if (her_own) {
++                    EdEventInfo.reset_camera_angle = 0;
++                }
++                CoopTownHerRoomEventStepIn();
++                EventMode();
++                CoopTownHerRoomEventStepOut();
++                if (her_own && GameMode != ED_MODE_EVENT) {
++                    CoopTownHerRoomEventEnd(1);
++                }
++
++                // coop-worlds: the event's own jump into a dungeon (its script's _MAP_JUMP; the town's other way
++                // out besides goto_dungeon): linked, player 2's copy stays in town, and the copies are apart.
++                if (exit_loop != 0 && EdEventInfo.return_code == ED_EVENT_RETURN_MAP_JUMP && NextMapNo != next_was &&
++                    !CoopWorldsTakeScriptExit(NextMapNo)) {
++                    exit_loop = 0;
++                    NextMapNo = next_was;
++                    StartEventNo = start_was;
+~1126 cf793b8c47a3b81a|                    |
+=1605 71d5346125502edb
++                    RestoreEventParts(); // coop-dungeonp2
++                    RestoreEventToan();  // coop-p2entry
++                    CoopWorldsStayInTown();
++                }
++            }
+@@ -1586,1 +2167,7
+- b2fc8856a3c52467
++            {
++                int queued = start_event_no; // coop-worlds: a talk's event is the player's
++                TalkMode();
++                if (start_event_no > 0 && start_event_no != queued) {
++                    player_event_no = start_event_no;
++                }
++            }
+@@ -1625,0 +2213,1
++            CoopTownDoorOpenStep(); // coop-p2doors: her skin opens the door she took, not Toan
+@@ -1688,1 +2276,1
+- 52e255cdfba73bbd
++            if (CoopP1PartsMenuStep() != 0) { // coop-p1parts: linked, on his copy alone, shut on every copy by its command
+@@ -1700,1 +2288,3
+- 94f217f9ddc0d64e
++                        if (!CoopWorldsGeoramaEventRefused(EditMenuStatus.event_no + 0xC8)) { // coop-doorgate: its story needs both players
+~1700 94f217f9ddc0d64e|                            |
++                        }
+@@ -1706,0 +2297,4
++                if (CoopP1PartsMenuCloseFrame()) { // coop-pt1108: linked, this return drew nothing: both copies showed a frame of the clear colour
++                    close_frame = true;
++                    goto town_frame;
++                }
+@@ -1716,1 +2310,17
+- c40c4cf338971e91
++            CoopTownMenuStepBegin(); // coop-town: player 2's copy steps player 1's menu out of sight
++            int menu_done;
++            if (CoopTownP1MenuLive()) { // coop-menuanim: EdMenuMode's battle menu without its draw (after the town's frame)
++                menu_done = !BattleMenuCursor();
++
++                if (menu_done != 0) {
++                    EdClearItemOverFlag();
++                }
++            } else {
++                menu_done = EdMenuMode();
++            }
++            CoopTownMenuStepEnd();
++
++            if (menu_done != 0) {
++                const bool live = CoopTownP1MenuLive(); // coop-menuflash
++                bool       jumped = false;
++
+@@ -1722,3 +2332,1
+- 91a6c3cafa0ec697
+- a01eb1058055250f
+- ae02253ba08e5175
++                    TownMapJump(MenuMapJumpMode); // coop-worlds
+@@ -1725,0 +2334,1
++                    jumped = true;
+@@ -1728,0 +2338,6
++                // coop-menuflash: his menu over the live town drew nothing on its close tick (this return comes before the
++                // draw), so both copies showed a frame of the clear colour. The town draws this tick, the step as before.
++                if (live && !jumped && CoopTownMenuCloseFrame()) {
++                    close_frame = true;
++                    goto town_frame;
++                }
+@@ -1795,1 +2410,3
+- 4b4784369b40baa5
++            if (!CoopTownMenuOpenKeepsClock()) { // coop-clockblink
+~699 c0f1ce5027848bcb|                |
++            }
+@@ -1808,0 +2426,102
++    CoopGeoramaP1StepEnd(); // coop-town
++    CoopTownStepAside(); // coop-town: player 2 walks on through player 1's pause and Georama
++    if (CoopTownHerDoorAside()) {
++        PartnerDoor(); // coop-localfix: and her doors open under his menu or pause
++    }
++    // coop-menuanim: and the town goes on with her under his menu or pause, as the walk steps it but for Toan.
++    if (CoopTownWorldRunsAside()) { // (coop-pt1109b: her talk holds the villagers, below)
+~1523 446ea0a1e31beedc|        |
++
++        if (CoopTownVillagersHeld()) { // (opt8: every player in a talk or a menu)
++        } else if (MapNo < 10) {
+=3994 c3c25570f22fe1ed
++        } else {
+=3996 8d6d74b1a5744515
++        }
++    }
++    CoopTownWorldAsideTrace();
++    CoopP2GeoramaTick(); // coop-town: player 2's own Georama
++    CoopP2TownMenuTick(); // coop-town: player 2's own menu
++
++    // coop-machotalk: her talk outdoors, as in a room (edit_in's coop-talks2): her Cross at a villager in reach starts it beside
++    // his walk, talk or menu (not over his scripted event: the town has one script engine), in her own talk state, its talk
++    // script set up at once; it then steps beside the town's mode with her body, her pad, her view.
++    CoopTownTownTalkTick();
++    her_town_event = -1; // coop-pt1106-batch: her own town event asked for this tick
++    {
++        // (coop-pt1106-batch: or Toan's walk only queued a map event he stands at, whose script waits for his Cross: hers may take it)
++        const bool town_free = (start_event_no <= 0 || CoopTownMapEventQueued(start_event_no)) && start_system_event <= 0 &&
++                               (GameMode == ED_MODE_WALK || GameMode == ED_MODE_TALK || GameMode == ED_MODE_MENU_INIT || GameMode == ED_MODE_MENU);
++        // (coop-pt1106-batch: in the town's walk, -2: one of the town's map events of her own too, Norune's fishing board)
++        const int  her_talk = town_free ? CoopTownHerRoomEvent(EdEventData, GameMode == ED_MODE_WALK ? -2 : -1) : -1;
++
++        if (her_talk > 0 && CoopTownHerTalkPending()) {
++            CoopTownHerTalkStartIn();
++            const int  runs = EdEventInit(her_talk, &EdWorkBuffer, (char *) EdEventData);
++            const bool talks = runs == 0 && EdEventInfo.return_code == ED_EVENT_RETURN_TALK;
++
++            if (talks) {
+=2128 6d21f32458134543
++            } else if (runs != 0) {
+~2092 374da9d4283fe081|                |
++            }
++
++            CoopTownHerTalkStartOut(talks, runs);
++        } else if (her_talk > 0 && start_event_no > 0 && CoopTownMapEventQueued(start_event_no)) {
++            // coop-pt1106-batch: Toan in reach of it too (his walk queues it each tick): her Cross takes it, her pad in for its
++            // start below; his own Cross on the same tick keeps it his (CoopTownMapEventQueued says so)
++            start_event_no = her_talk;
++            her_town_event = her_talk;
++        } else if (her_talk > 0 && RunEvent(her_talk, NULL) != 0) {
++            her_town_event = her_talk; // coop-pt1106-batch: her own town event starts below, as hers
++        }
++
++        // opt8: every player's talk, one step from its slot: the game's player's too, retail's TalkMode (its stand, TalkCamera and the
++        // view on it, its result rule), the town walking.
++        if (GameMode == ED_MODE_WALK || GameMode == ED_MODE_TALK || GameMode == ED_MODE_MENU_INIT || GameMode == ED_MODE_MENU) {
++            for (int k = 0; k < coop::kMaxPlayers; k++) {
++                if (!CoopTalkOn(k)) {
++                    continue;
++                }
++                int       choice = 0;
++                const int result = CoopTalkStep(k, Chara, &MainCamera, &TalkCamera, 0, &choice);
++
++                if (k == 0 && CoopTalkOn(0)) {
++                    NowCamera = (CCamera *) &TalkCamera; // (retail's talk mode: the town seen from its talk camera)
++                }
++                if (k == 0) {
++                    TalkCamera.Step(1);
++                    CoopTalkCameraTrace(MainCamera.GetAngle(), MainCamera.GetDistance(), result != 0); // opt8: his town camera through his talk
++                }
++                if (result == 0) {
++                    continue;
++                }
++                const int retail = CoopTalkOver(k, result, choice);
++
++                if (retail == 2) {
+~3638 236adcb31f765655|                    |
++                }
++                if (retail == 3) {
+~3642 1424dee04b87cc3c|                    |
++                }
++                if (retail == 4 && choice > 0) {
++                    RunEvent(choice, NowCamera);
++                }
++                if (k == 0) {
++                    NowCamera = (CCamera *) &MainCamera;
++                }
++            }
++        }
++    }
++
++    // coop-worlds: her menu's way out of town (its "go to the dungeon"), on the first tick the town walks: hers, so her
++    // copy leaves and his stays.
++    if (int map = GameMode == ED_MODE_WALK ? CoopP2TownMenuTakeJump() : -1; map >= 0) {
++        CoopWorldsTownEventBy(2);
++        TownMapJump(map);
++    }
++    // coop-stage4 4b: his local menu's way out of town, on every copy on its close command's tick (retail's close's TownMapJump).
++    if (int map = GameMode == ED_MODE_WALK ? CoopTownP1MenuTakeJump() : -1; map >= 0) {
++        TownMapJump(map);
++    }
++
+@@ -1811,0 +2531,1
++town_frame: // coop-menuflash
+@@ -1814,0 +2535,1
++    CoopP2DrawEditorBegin(); // coop-town: her editor for her copy's frame
+@@ -1816,0 +2538,1
++    CoopTownView(view, eye, GameMode == ED_MODE_WALK); // coop-town: player 2's copy looks at player 2
+@@ -1819,5 +2541,8
+- 6786dfb8fdaef2cd
+- 20f2356ec2a9f9a1
+- 9782aba3e2ff562f
+- 77885ad5ce27a0ac
+- ebd9132a4a8bdf6d
++    // coop-town: player 2's copy draws player 1's Georama as walking; the mode and the draw flags back after.
++    const int town_mode = GameMode;
++    const int town_flags[5] = {depth_of_field, edit_mode_lighting, draw_sky, edit_mode_draw, edit_mode_grd_draw};
++
++    // The town's culling, as the town's mode has it (both copies alike: the next tick reads it).
++    auto town_clip = [&]() {
++        if (town_mode != ED_MODE_GEORAMA && town_mode != ED_MODE_GEORAMA_MENU_INIT && town_mode != ED_MODE_RETURN_MENU_GEORAMA) {
++            pEditGround->EditAreaClip(NowCamera, move_count > 0 ? -1.0f : 20000.0f);
+@@ -1824,0 +2550,8
++    };
++
++    GameMode = CoopTownDrawnMode(town_mode);
++
++    if (GameMode == town_mode) {
++        town_clip();
+~2169 1ecd3b865607418f|    |
++        pEditGround->EditAreaClip(static_cast<CCamera *>(&EditCamera), -1.0f); // her own Georama's view, for its frame only
+@@ -1826,0 +2560,2
++    CoopP2TownFrameBegin(); // coop-town: her parts menu is her screen, the town's frame drawn where nobody sees it
++
+@@ -1866,0 +2602,21
++    CoopP2TownFrameEnd();
++
++    if (GameMode != town_mode) {
+=2715 8e2952336442d5e6
++            GameMode = town_mode;
++            town_clip(); // the culling back as the other copy has it
++        }
++
++        GameMode = town_mode;
++        depth_of_field = town_flags[0];
++        edit_mode_lighting = town_flags[1];
++        draw_sky = town_flags[2];
++        edit_mode_draw = town_flags[3];
++        edit_mode_grd_draw = town_flags[4];
++    }
++
++    CoopP2DrawEditorEnd(); // coop-town: player 1's editor back before the tick's view is put back
++    CoopTownViewEnd(); // coop-town: the shared view and random state back after player 2's view
++    if (close_frame) {
++        return 0; // coop-menuflash: the close tick's step ended at the menu, as before
++    }
+@@ -1877,1 +2633,2
+- 1a823046e044c78f
++    if ((EdDebugMoveFlag > 0 || MapNo < TOWN_COUNT) && EdPadDown(0x100, 2) != 0 && EdCheckViewMode() == 0 && change_time_event == 0 &&
++        !CoopP2GeoramaHoldsP1() && !CoopTalkHoldsWalker()) { // opt8: no Georama through his talk // coop-town: each has an editor of their own
+@@ -1937,1 +2694,1
+- 4e2f841b346fd29d
++            CoopGeoramaLeaveVillagers(&at); // coop-pt1109c: retail's EdInitVilagerPosition for those a new part blocks
+@@ -1964,1 +2721,1
+- 2ebee95292049540
++        if ((EdPadDown(0x10, 2) != 0 || EdPadDown(0x20, 2) != 0) && !CoopP2MenuHoldsParts() && EdInitMenu(ED_MENU_EDIT) != 0) { // coop-town: one parts menu at a time (coop-p1parts: unless both local)
+@@ -1971,1 +2728,4
+- 41158c2cd0e35ccd
++    // coop-town: his waits while her Georama's parts menu is open, and her own menu's first half second (coop-townmenus).
++    // (coop-stage4: not a menu of his that runs local, each on its own copy: CoopP2MenuHoldsP1)
++    if (GameMode == ED_MODE_WALK && !CoopP2TownMenuBlocksP1() && !CoopP2MenuHoldsP1(goto_menu != 0 ? goto_menu : ED_MENU_BATTLE) &&
++        ((EdPadDown(0x10, 1) != 0 && !CoopTalkHoldsWalker()) || goto_menu != 0 || (SystemMesCheck() == 0 && EdCheckItemOver() != 0))) { // opt8: no menu through his talk
+@@ -1979,0 +2740,2
++            CoopTownNoteMenu(menu_no); // coop-town
++            coop::SoundOwner sound(1); // coop-menuse: his walk's menu opening sounds on his copy
+@@ -1988,1 +2750,3
+- 8ba4f586c9c9cd3e
++            if (!CoopTownP1MenuOpensLocal(menu_no)) { // coop-stage4 4b: linked, his battle menu is his copy's own; the town walks on
+~1988 8ba4f586c9c9cd3e|                |
++            }
+@@ -2084,1 +2848,1
+- fccaab13ef593115
++    if (change_time_event != 0 && move_count <= 0 && !CoopTownDayChangeHeld() && RunEvent(0x84, NowCamera) != 0) { // coop-pt1109c: not under a talk
+@@ -2085,0 +2850,1
++        CoopTownDayChangeStarted();
+@@ -2131,0 +2897,6
++        } else if (start_event_no == player_event_no && CoopWorldsHoldStoryEvent(EdEventData, start_event_no)) {
++            // coop-worlds: a story event player 2 walked or talked into while apart waits for Toan; back to walking.
+=1409 50e84f2ab86aa4bb
++        } else if (!CoopWorldsDungeonEventAlone(EdEventData, start_event_no)) {
++            // coop-exitscene: a way into the dungeon begun together: the pair has split, the other copy runs it; this one walks on.
+=1409 50e84f2ab86aa4bb
+@@ -2132,0 +2904,14
++            // coop-pt1106-batch: her own town event (her Cross, above): her body its main character, her pad its start's, from her
++            // camera.
++            const bool her_in = her_town_event > 0 && start_event_no == her_town_event && CoopTownHerRoomEventIn(her_town_event);
++
++            if (her_in) {
++                CCamera *her_camera = CoopTownHerRoomEventCamera(&MainCamera);
++
++                her_camera->GetPos(camera_pos);
++                her_camera->GetRef(camera_ref);
+~2122 646ebbded2a0525d|                |
+~2123 d88fc5dc7b6729a4|                |
+~2124 03353b4c2382c16d|                |
++            }
++
+@@ -2137,0 +2923,5
++                CoopTownTownEventStarts(start_event_no); // coop-pt1106-batch: whose own it is, if either's
++            }
++
++            if (her_in) {
++                CoopTownHerRoomEventInitOut(GameMode == ED_MODE_EVENT, false);
+@@ -2149,0 +2940,1
++        player_event_no = -1;
+@@ -2181,4 +2972,10
+- ad843df9e36d830e
+- 97900ed944415b92
+- 9b1b426ec525be7c
+- 194e381c7070fefc
++        // coop-worlds: linked, player 2's copy stays in town, and the copies are apart from here.
++        if (CoopWorldsTakeExit(NowEditMap + 0xC8)) {
+~2181 ad843df9e36d830e|            |
+~2182 97900ed944415b92|            |
+~2183 9b1b426ec525be7c|            |
++            end_code = 1;
++        } else {
+~1212 db74e1560114f8c9|            |
++            CoopWorldsStayInTown();
++        }
+@@ -2195,0 +2993,5
++    // coop-worlds: a test holds the leaving copy in town a while after the split (DC_WORLDS_TEST_HOLD_EXIT).
++    if ((exit_loop != 0 || end_counter == 1) && CoopWorldsTestHoldExit()) {
++        return 0;
++    }
++
+@@ -2322,2 +3124,4
+- 3719a862488d6d43
+- 103ac424f02dae47
++    if (EdDrawOffFlag == 0) { // (coop-scriptmenus: set by a script's menu on its opener's copy alone)
++        // coop-town: not on player 2's copy; coop-menuanim: nor while the town runs under his pause.
++        if ((EdPauseFlag != 0 || GameMode == ED_MODE_RETURN_MENU_WALK || GameMode == ED_MODE_RETURN_MENU_GEORAMA) && !CoopTownHidesPause() &&
++            !CoopTownWorldRunsAside()) {
+@@ -2339,1 +3143,1
+- 32e2c1cd53861e24
++                EdDrawSky(NowTime, SkyFrame, SunFrame, SkyBackFrame, CoopTownSkyCamera(NowCamera), EditMapInfo->sky_follow); // coop-town: her sky round her eye
+@@ -2364,0 +3169,1
++                CoopGeoramaDrawOtherCursor(1); // coop-town: the other builder's hand and part
+@@ -2380,0 +3186,1
++                CoopGeoramaDrawOtherCursor(2); // coop-town
+@@ -2506,1 +3312,1
+- 9702203265ac0dfa
++                if (GameMode == ED_MODE_TALK || EdSystemMesCheck() != 0 || CoopTalkShadowsOff()) { // opt8: a talker's own screen, as retail's talk mode
+@@ -2510,1 +3316,2
+- 6ff1041ca0761685
++                // coop-pt1108f: his first-person look hides him on his own screen, not on hers (the mode is shared).
++                if (CoopTownEyeOnThisScreen()) {
+@@ -2523,1 +3330,1
+- cb0ab71db344ae75
++                    event = (ED_EVENT_INFO *) CoopTownRoomEventForToan(&EdEventInfo); // coop-pt1106-batch: Toan is not her event's player
+@@ -2580,1 +3387,16
+- 862ca4ed2469d344
++                // coop-worlds: player 2's copy apart draws her in Toan's place, so Toan himself is not drawn.
++                if (CoopTownSkinsToan()) {
++                    ED_EVENT_INFO unseen;
++
++                    if (event != nullptr) {
++                        unseen = *event;
++                        unseen.player_draw = 0;
++                        unseen.player_shadow_draw = 0;
++                        event = &unseen;
++                    }
++
++                    EdDrawCharacter(Chara, 0, 0xA, EdVillager, marks, shadow_on, event);
++                } else {
++                    EdDrawCharacter(Chara, CoopTownHidesToan() ? 0 : detail, 0xA, EdVillager, marks, shadow_on, event); // coop-town: Toan out while he builds
++                }
++                CoopTownDraw(); // coop-town: player 2 in town
+@@ -2583,0 +3406,6
++
+~1592 3ab02d2aa7565284|            |
+~1793 54f782cd10bcdd43|            |
+~1801 3ca0e4d1535452ac|            |
++                CoopGeoramaDrawWalker(); // coop-town: the other player walking, seen from the Georama
++                break;
+@@ -2693,0 +3522,3
++        // coop-pt1106-batch: one player's own town event's pictures out of sight on the other's copy.
++        const bool own_event_pictures_hidden = GameMode == ED_MODE_EVENT && CoopTownOwnEventHiddenBegin(false);
++
+@@ -2710,0 +3542,2
++        CoopTownHisTalkHiddenEnd(own_event_pictures_hidden);
++
+@@ -2711,0 +3545,1
++            const bool hud_hidden = CoopTalkHudHiddenBegin(); // opt8: none on a talker's own screen (drawn, out of sight: the draw steps)
+@@ -2712,0 +3547,1
++            CoopTalkHudHiddenEnd(hud_hidden);
+@@ -2714,0 +3550,7
++        coop::MenuDraw(); // coop-menus: player 2's overlay in town
++        CoopTownP1MenuDraw(); // coop-menuanim: player 1's menu over the live town (his copy; the other out of sight)
++        CoopP2TownMenuDraw(); // coop-town: player 2's own menu (her copy; the other out of sight)
++        NetplayDrawNotice(); // "<name> has joined" (coop: netplay)
++
++        CoopGeoramaDrawOtherHand(); // coop-town: the other builder's hand
++
+@@ -2716,0 +3559,1
++            CoopGeoramaDraw(); // coop: georama
+@@ -2725,2 +3568,4
+- e0d8200057ce41c1
+- b275471ba5cc341a
++            if (GameMode != ED_MODE_EVENT) { // (coop-pt1106-batch: an event's, below; opt8: together a talk draws from its slot)
+~2717 e0d8200057ce41c1|                |
+~2726 b275471ba5cc341a|                |
++            }
+@@ -2728,0 +3574,4
++                // coop-pt1106-batch: one player's own town event's windows out of sight on the other's copy (they step as they draw).
++                const bool own_event_hidden = CoopTownOwnEventHiddenBegin(true);
+~2717 e0d8200057ce41c1|                |
+~2726 b275471ba5cc341a|                |
+@@ -2730,0 +3580,12
++                CoopTownHisTalkHiddenEnd(own_event_hidden);
++            }
++        }
++
++        // coop-machotalk: her talk's window, her own, swapped in to draw (out of sight on his copy; it steps as it draws). opt8: every
++        // player's talk window from its slot, on every copy, shown on its own player's copy alone.
++        for (int k = 0; k < coop::kMaxPlayers; k++) {
++            if (CoopTalkOn(k)) {
++                const bool hidden = CoopTalkDrawBegin(k);
+~2717 e0d8200057ce41c1|                |
+~2726 b275471ba5cc341a|                |
++                CoopTalkDrawEnd(k, hidden);
+@@ -2741,1 +3602,7
+- 5f91197bd4ade999
++
++        if (!CoopTownHidesBuildHelp()) {
+~2741 5f91197bd4ade999|            |
++        } else if (SystemMesWait <= 0) {
++            SystemMesDraw(); // coop-town: the other player's Georama help bar left out, the other messages (a key item's) kept
++            CoopTownTraceSystemMes();
++        }
+@@ -2771,0 +3639,2
++        // coop-pt1106-batch: one player's own town event's fade out of sight on the other's copy.
++        const bool own_event_fade_hidden = GameMode == ED_MODE_EVENT && CoopTownOwnEventHiddenBegin(false);
+@@ -2772,0 +3642,1
++        CoopTownHisTalkHiddenEnd(own_event_fade_hidden);
+@@ -2885,1 +3755,4
+- fae42edd0ca2c2f8
++            // coop-playfix: the talk target this screen's own player has (hers on her screen together).
++            const bool target = CoopTownTalkTarget(i);
++
++            if (EdInteriorFlag == 0 && EdVillager[i].CheckDraw() == 0 && !target) {
+@@ -2893,1 +3766,1
+- 2ea0c6e26334cd32
++            } else if (EdVillager[i].CheckDraw() != 0 && target && !CoopTownEyeOnThisScreen()) {
+@@ -2928,0 +3802,2
++    CoopTownDrawPartnerMark(CharaCursor2); // coop-p2marks: hers over her at the cave door
++
+@@ -3276,1 +4151,1
+- 11e6ba3e64b14bb8
++            (GameMode == ED_MODE_RETURN_MENU_WALK || GameMode == ED_MODE_RETURN_MENU_GEORAMA || EdPauseFlag != 0) && !CoopTownHidesPause()) { // coop-town
+@@ -3302,1 +4177,1
+- 4eead965c42e73ea
++    if ((draw_clock != 0 || CoopTownOwnEventIsOthers()) && EditMapInfo->time_stop == 0) { // coop-pt1108f: nor the clock
+@@ -3460,1 +4335,1
+- 6f4b7fa727889c21
++    if (change_time_event != 0 && !CoopTownDayChangeHeld()) { // coop-pt1109c: a talk's clock runs on
+@@ -3464,1 +4339,4
+- 2407ca5d7acaf998
++    // coop-pt1108f, coop-scriptmenus: one player's own town event (the sign, its script's menus) stops nothing for the others: the clock runs on as in a talk,
++    // a period's change owed till it ends (CoopTownClockRunsInTalk). Its twin ownevent_clock_short: short of the hour, as coop-pt1108f had it.
++    // opt8: a talk together is the walk's mode now; the clock holds while every player is in a talk or a menu (CoopTalkWorldHeld, Jep 11-09).
++    if (time_flag != 0 && ((GameMode == ED_MODE_WALK && !CoopTalkWorldHeld()) || CoopTownClockRunsInTalk() || (CoopTownOwnEventClockShort() && EdGetTime(SaveData->GetNowTime() + time_step) == EdGetTime(SaveData->GetNowTime())))) { // coop-pt1109c, coop-pt1108f
+@@ -3508,1 +4386,3
+- 3d0a3c3bb0a8604f
++            if (!CoopTownDayChangeOwe(old_hour, new_hour)) { // coop-pt1109c: not under a talk; it waits
+~3508 3d0a3c3bb0a8604f|                |
++            }
+@@ -3513,0 +4394,4
++    if (CoopTownDayChangeOwedNow()) { // coop-pt1109c: nobody's talking now
+~3508 3d0a3c3bb0a8604f|        |
++    }
++
+@@ -3782,0 +4667,6
++    // coop-worlds: linked, the copy of the player who did not open the door stays outside.
++    if (!CoopWorldsTakeInterior(name)) {
++        CoopWorldsStayInTown();
++        return 0;
++    }
++
+@@ -3915,1 +4805,7
+- 9640250cbadac735
++    // opt8: the game's player stands through its own talk (from its slot, the town walking): no walk, no Cross, nothing started,
++    // as retail's talk mode does not move it.
++    const bool  walks = !CoopTalkHoldsWalker();
++
++    if (walks) {
++        EdMoveChara();
++    }
+@@ -3917,1 +4813,2
+- 280e0036538eacbf
++    if (!walks) {
++    } else if (EdMoveCharaInfo.system_event_no > 0) {
+@@ -3992,1 +4889,2
+- 3dbb235e322de900
++    // opt8: held only while every player talks or is in a menu (Jep 11-09)
++    if (GameMode == ED_MODE_WALK && !CoopTownVillagersHeld()) {

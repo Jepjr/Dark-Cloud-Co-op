@@ -1,0 +1,303 @@
+# port/src/platform/config.cpp from Chronicle's port/src/platform/config.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/platform/config.cpp
+base port/src/platform/config.cpp
+from fbd5a5d2deac52be74e863cbc3f25544260ee075
+to e08548fc332aebe1b65dff5c964e7fbb02467a36
+@@ -10,0 +11,1
++#include <cstdlib>
+@@ -26,0 +28,4
++// coop: g_config without the session's settings (ConfigSetSession): what config.json holds.
++Config                        g_base;
++ConfigSessionApply            g_session_apply = nullptr;
++ConfigSessionRestore          g_session_restore = nullptr;
+@@ -433,0 +439,166
++    if (name == "game.coop") {
++        return ReadBool(value, config.coop);
++    }
++    if (name == "input.controller") {
++        if (!value.is_number_integer() || value.get<std::int64_t>() < 0 || value.get<std::int64_t>() > 2) {
++            return false;
++        }
++        config.controller = value.get<int>();
++        return true;
++    }
++    if (name == "game.netplay" || name == "game.netplay_port" || name == "game.netplay_delay") {
+=565 f5a323a5684567c2
++            return false;
++        }
++        std::int64_t number = value.get<std::int64_t>();
++        if (name == "game.netplay" && (number < 0 || number > 3)) { // 3: one client (netplay.cpp)
++            return false;
++        }
++        if (name == "game.netplay_port" && (number < 1 || number > 65000)) {
++            return false;
++        }
++        if (name == "game.netplay_delay" && (number < 0 || number > 30)) {
++            return false;
++        }
++        (name == "game.netplay" ? config.netplay : name == "game.netplay_port" ? config.netplay_port : config.netplay_delay) = (int) number;
++        return true;
++    }
++    if (name == "game.netplay_controller_only") {
++        return ReadBool(value, config.netplay_controller_only);
++    }
++    if (name == "game.netplay_wan_lookup") {
++        return ReadBool(value, config.netplay_wan_lookup);
++    }
++    if (name == "game.netplay_upnp") { // coop-upnp
++        return ReadBool(value, config.netplay_upnp);
++    }
++    if (name == "game.netplay_keyboard") {
++        return ReadBool(value, config.netplay_keyboard);
++    }
++    if (name == "game.netplay_catchup") {
++        return ReadBool(value, config.netplay_catchup);
++    }
++    if (name == "game.area_card") { // coop-areacard
+=480 c59a50d9338ee680
++            return false;
++        }
++        const std::string kind = Lower(value.get<std::string>());
++        if (kind != "retail" && kind != "short" && kind != "custom") {
++            return false;
++        }
++        config.area_card = kind;
++        return true;
++    }
++    if (name == "game.area_card_start" || name == "game.area_card_fade_in" || name == "game.area_card_hold" || name == "game.area_card_fade_out") {
++        int ticks = 0;
++        if (!ReadNumber(value, ticks) || ticks < 0 || ticks > 1200) {
++            return false;
++        }
++        (name == "game.area_card_start" ? config.area_card_start : name == "game.area_card_fade_in" ? config.area_card_fade_in
++         : name == "game.area_card_hold"  ? config.area_card_hold
++                                          : config.area_card_fade_out) = ticks;
++        return true;
++    }
++    if (name == "game.area_card_speed") {
++        float speed = 0.0f;
++        if (!ReadNumber(value, speed) || speed < 0.1f || speed > 100.0f) {
++            return false;
++        }
++        config.area_card_speed = speed;
++        return true;
++    }
++    if (name == "game.area_card_coop_only") {
++        return ReadBool(value, config.area_card_coop_only);
++    }
++    if (name == "game.netplay_snapshot") { // coop-snapshot
++        return ReadBool(value, config.netplay_snapshot);
++    }
++    if (name == "game.netplay_steam_rate") { // coop-steamrate: KB/s, or text with its unit; 0 / "auto" paces
++        double kbs = -1.0;
++        if (value.is_number()) {
++            kbs = value.get<double>();
++        } else if (value.is_string()) {
++            std::string text = Lower(value.get<std::string>());
++            char       *end = nullptr;
++            if (text == "auto") {
++                kbs = 0.0;
++            } else {
++                kbs = std::strtod(text.c_str(), &end);
++                std::string unit = end != nullptr ? std::string(end) : std::string();
++                unit.erase(std::remove(unit.begin(), unit.end(), ' '), unit.end());
++                if (unit == "mb/s" || unit == "mb") {
++                    kbs *= 1024.0;
++                } else if (unit != "kb/s" && unit != "kb" && unit != "") {
++                    return false;
++                }
++            }
++        } else {
++            return false;
++        }
++        if (kbs != 0.0 && (kbs < 64.0 || kbs > 1024.0 * 1024.0)) {
++            return false;
++        }
++        config.netplay_steam_rate = (int) kbs;
++        return true;
++    }
++    // coop: cameras
++    if (name == "game.coop_independent_cameras") {
++        bool on = false;
++        if (!ReadBool(value, on)) {
++            return false;
++        }
++        config.coop_independent_cameras = on;
++        return true;
++    }
++    // coop-inventory
++    if (name == "game.coop_own_bags") {
++        return ReadBool(value, config.coop_own_bags);
++    }
++    // coop-menus
++    if (name == "game.coop_menus") {
++        return ReadBool(value, config.coop_menus);
++    }
++    if (name == "game.coop_menu_panel") {
++        return ReadBool(value, config.coop_menu_panel);
++    }
++    if (name == "game.coop_story_gather") { // coop-floorgate
++        return ReadBool(value, config.coop_story_gather);
++    }
++    if (name == "game.coop_gate_picker") { // coop-gateflow
++        return ReadBool(value, config.coop_gate_picker);
++    }
++    if (name == "game.write_log") { // release2
++        return ReadBool(value, config.write_log);
++    }
++    if (name == "game.netplay_peer") {
+=480 c59a50d9338ee680
++            return false;
++        }
++        config.netplay_peer = value.get<std::string>();
++        return true;
++    }
++    if (name == "game.lobby_local" || name == "game.netplay_last_code" || name == "game.netplay_player_id") { // coop-lobby
+=480 c59a50d9338ee680
++            return false;
++        }
++        (name == "game.lobby_local" ? config.lobby_local : name == "game.netplay_last_code" ? config.netplay_last_code : config.netplay_player_id) =
++            value.get<std::string>();
++        return true;
++    }
++    if (name == "game.lobby_show_ip") { // coop-consent
++        return ReadBool(value, config.lobby_show_ip);
++    }
++    if (name == "game.window_title") {
+=480 c59a50d9338ee680
++            return false;
++        }
++        config.window_title = value.get<std::string>();
++        return true;
++    }
++    if (name == "video.window_left" || name == "video.window_top") {
++        if (!value.is_number_integer() || value.get<std::int64_t>() < -1 || value.get<std::int64_t>() > 100000) {
++            return false;
++        }
++        (name == "video.window_left" ? config.window_left : config.window_top) = value.get<int>();
++        return true;
++    }
+@@ -738,0 +910,81
++    root["game"]["coop"] = config.coop;
++    root["game"]["window_title"] = config.window_title;
++    root["game"]["netplay"] = config.netplay;
++    root["game"]["netplay_peer"] = config.netplay_peer;
++    root["game"]["netplay_port"] = config.netplay_port;
++    root["game"]["netplay_delay"] = config.netplay_delay;
++    root["game"]["netplay_controller_only"] = config.netplay_controller_only;
++    if (!config.netplay_wan_lookup) {
++        root["game"]["netplay_wan_lookup"] = false;
++    }
++    if (!config.netplay_upnp) { // coop-upnp
++        root["game"]["netplay_upnp"] = false;
++    }
++    if (config.lobby_local != "combined") { // coop-lobby
++        root["game"]["lobby_local"] = config.lobby_local;
++    }
++    if (!config.netplay_last_code.empty()) {
++        root["game"]["netplay_last_code"] = config.netplay_last_code;
++    }
++    if (!config.netplay_player_id.empty()) {
++        root["game"]["netplay_player_id"] = config.netplay_player_id;
++    }
++    if (config.lobby_show_ip) {
++        root["game"]["lobby_show_ip"] = true;
++    }
++    if (config.netplay_keyboard) {
++        root["game"]["netplay_keyboard"] = true;
++    }
++    if (config.netplay_catchup) {
++        root["game"]["netplay_catchup"] = true;
++    }
++    // coop-areacard: written only when set, so a file that never had them stays as it was
++    if (config.area_card != "retail") {
++        root["game"]["area_card"] = config.area_card;
++    }
++    if (config.area_card_start != 20) {
++        root["game"]["area_card_start"] = config.area_card_start;
++    }
++    if (config.area_card_fade_in != 128) {
++        root["game"]["area_card_fade_in"] = config.area_card_fade_in;
++    }
++    if (config.area_card_hold != 120) {
++        root["game"]["area_card_hold"] = config.area_card_hold;
++    }
++    if (config.area_card_fade_out != 128) {
++        root["game"]["area_card_fade_out"] = config.area_card_fade_out;
++    }
++    if (config.area_card_speed != 1.0f) {
++        root["game"]["area_card_speed"] = config.area_card_speed;
++    }
++    if (!config.area_card_coop_only) {
++        root["game"]["area_card_coop_only"] = false;
++    }
++    if (config.netplay_snapshot) { // coop-snapshot
++        root["game"]["netplay_snapshot"] = true;
++    }
++    if (config.netplay_steam_rate > 0) { // coop-steamrate: written only when set, in MB/s where it is whole ones
++        root["game"]["netplay_steam_rate"] = config.netplay_steam_rate % 1024 == 0 ? std::to_string(config.netplay_steam_rate / 1024) + " MB/s"
++                                                                                   : std::to_string(config.netplay_steam_rate) + " KB/s";
++    }
++    // coop: cameras
++    if (config.coop_independent_cameras.has_value()) {
++        root["game"]["coop_independent_cameras"] = *config.coop_independent_cameras;
++    }
++    root["game"]["coop_own_bags"] = config.coop_own_bags; // coop-inventory
++    root["game"]["coop_menus"] = config.coop_menus;       // coop-menus
++    if (config.coop_menu_panel) {
++        root["game"]["coop_menu_panel"] = true; // written only when set, so the files that never had it stay as they are
++    }
++    if (!config.coop_story_gather) {
++        root["game"]["coop_story_gather"] = false; // coop-floorgate: written only when off
++    }
++    if (!config.coop_gate_picker) {
++        root["game"]["coop_gate_picker"] = false; // coop-gateflow: written only when off
++    }
++    if (!config.write_log) {
++        root["game"]["write_log"] = false; // release2: written only when off (the launcher reads it)
++    }
++    root["input"]["controller"] = config.controller;
++    root["video"]["window_left"] = config.window_left;
++    root["video"]["window_top"] = config.window_top;
+@@ -809,1 +1061,1
+- 9ba46fbde9c84e2c
++    g_saved = WriteReplacing(path, ConfigSerialize(g_session_apply != nullptr ? g_base : g_config));
+@@ -819,1 +1071,1
+- 36ef88f509c359dc
++        g_config = g_base = Config{};
+@@ -828,0 +1081,1
++    g_base = g_config;
+@@ -863,0 +1117,10
++    // A session's keys keep their saved values in config.json; the running settings keep the session's.
++    if (g_session_apply != nullptr) {
++        Config base = after;
++
++        g_session_restore(base, g_base);
++        g_base = base;
++        g_session_apply(after);
++    } else {
++        g_base = after;
++    }
+@@ -876,0 +1140,22
++void ConfigSetSession(ConfigSessionApply apply, ConfigSessionRestore restore) {
++    if (g_session_apply == nullptr) {
++        g_base = g_config;
++    }
++    g_session_apply = apply;
++    g_session_restore = restore;
++
++    Config after = g_base;
++
++    if (apply != nullptr) {
++        apply(after);
++    }
+=861 aa4bd6a946602a30
++        return;
++    }
+=864 ab74fa684935b956
+=866 5bde234b7edc3c66
+=867 93a59ba696a08f26
+=868 c5c98b40b3c6ec72
++    }
++}
++

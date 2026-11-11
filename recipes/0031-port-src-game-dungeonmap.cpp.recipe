@@ -1,0 +1,126 @@
+# port/src/game/dungeonmap.cpp from Chronicle's port/src/game/dungeonmap.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dungeonmap.cpp
+base port/src/game/dungeonmap.cpp
+from d84b3a671223705472239a7a06597bf57ff515d4
+to 3bb5b93b78f6c23c6003816131c3a6609122ff27
+@@ -8,0 +9,1
++#include <cstdint>
+@@ -9,0 +11,1
++#include <cstring>
+@@ -32,0 +35,3
++#include "coop/coop.hpp"     // coop: minimap (the partner's arrow, the tests' reports)
++#include "render/draw2d.hpp" // coop: minimap (TurnedSprite's colour)
++
+@@ -591,2 +596,20
+- 4d0a444267f253f7
+- 5ead8e33df3eabc7
++namespace {
++
++// coop: minimap
++// A player's arrow at x, y (the pivot, where the player stands) facing angle. Player 1's keeps retail's arrow;
++// player 2's takes another colour over a dot of it on either copy (CoopMiniMapArrowColour; coop-uinotice, Jep's
++// 2026-10-30 "fixed colours per player"), so each player is one colour on both screens.
++void DrawArrow(CTexture *symbol_texture, int x, int y, float angle, bool other) {
++    u_char red = 0x80, green = 0x80, blue = 0x80;
++
++    if (CoopMiniMapArrowColour(other, &red, &green, &blue)) {
++        set2DSprite(Vif1Packet, symbol_texture, CRect_i_(x - 3, y - 3, 6, 6), CRect_i_(88, 96, 12, 12), red, green, blue, 0x80);
++    }
++
++    render::draw2d::TurnedSprite(symbol_texture, CRect_i_(x, y, 12, 12), CRect_i_(88, 96, 12, 12), 7, 7, angle, 1.0f, red, green,
++                                 blue);
++}
++
++} // namespace
++
++void CDungeonMap::DrawMiniMap(float *pos, float angle) {    int           status;
+@@ -642,0 +666,23
++    // coop: gaps2 (the co-op partner's place and heading on this frame's map; own: the partner is this copy's player)
++    float      partner_pos[4] = {};
++    float      partner_yaw = 0.0f;
++    bool       partner_own = false;
++    const bool partner_mark = CoopMiniMapPartner(partner_pos, &partner_yaw, &partner_own);
++
++    // coop-minimapfill: the seen cells and where retail's tiles for them go, and the alpha they take (the test's frame
++    // check). DC_COOP_MUTATE=mapfill (its twin) draws them see-through (CoopMiniMapFillAlpha).
++    blue = static_cast<unsigned char>(CoopMiniMapFillAlpha(blue));
++    {
++        int seen[400 * 2];
++        int seen_count = 0;
++
++        for (int cell = 0; cell < 400; cell++) {
++            if (this->mask[cell] != 0 && this->cells[cell].parts_no != MAP_PARTS_NONE) {
++                seen[seen_count * 2] = (cell % 20) * 16 + 380;
++                seen[seen_count * 2 + 1] = (cell / 20) * 16 + 64;
++                seen_count++;
++            }
++        }
++        CoopMiniMapTiles(blue, seen, seen_count);
++    }
++
+@@ -688,1 +734,21
+- 5d6a1379423c1dc5
++    // coop: gaps2, minimap
++    // The co-op partner's arrow beside the player's, at its place and heading: the other copy's player is drawn first
++    // in its own colour (DrawArrow), this copy's own on top, as retail's (retail: one set2DSprite of player_dst).
++    {
++        int arrows[2][2] = {{-1, -1}, {-1, -1}};
++
++        for (int pass = 0; pass < 2; pass++) {
++            const bool partner = (pass == 0) != partner_own;
++            int        x, y;
++
++            if (partner && partner_mark) {
++                x = static_cast<int>(partner_pos[0] * 0.1f + 380.0f + 8.0f);
++                y = static_cast<int>(partner_pos[2] * 0.1f + 64.0f + 8.0f);
++                DrawArrow(symbol_texture, x, y, partner_yaw, pass == 0);
++            } else if (!partner) {
++                x = player_dst.x;
++                y = player_dst.y;
++                DrawArrow(symbol_texture, x, y, angle, pass == 0);
++            } else {
++                continue;
++            }
+@@ -689,0 +756,6
++            arrows[pass][0] = x;
++            arrows[pass][1] = y;
++        }
++
++        CoopMiniMapArrows(arrows[1][0], arrows[1][1], arrows[0][0], arrows[0][1]);
++    }
+@@ -1338,0 +1411,10
++// coop: netplay
++// The map builder's grid with a guard of 20 cells either side. Retail reads the row above row 0 and the row
++// below row 19 (setStair, setUnderDungeonStart) and writes a stair above a corridor in row 0, so it reaches past
++// buildMapDat into whatever the linker put beside it; in the port that is unrelated globals, which differ
++// between a copy that has played a while and one that has not, and two linked copies then build the same floor
++// differently. The guards (the linker orders .data$ sections by name) take those reads and writes instead, and
++// a resync clears them on both copies (PortBuildMapGuardsClear), so both build alike from then on.
++// Jep (co-op): a deliberate divergence from upstream, which places buildMapDat between scanRoomInfoWork and buildMapWork so the
++// strays land where retail had them (Jep kept the guards, 2026-11-10): docs\upstream-divergences.md, "floor builder".
++__attribute__((section(".data$dcbuildmap_a"), used)) BUILD_MAP_INFO g_build_map_before[20] = {};
+@@ -1340,1 +1422,23
+- 07d46e2e11ec22c0
++BUILD_MAP_INFO buildMapDat[400] __attribute__((section(".data$dcbuildmap_b"))) = {};
++__attribute__((section(".data$dcbuildmap_c"), used)) BUILD_MAP_INFO g_build_map_after[20] = {};
++
++void PortBuildMapGuardsClear() {
++    std::memset(g_build_map_before, 0, sizeof g_build_map_before);
++    std::memset(g_build_map_after, 0, sizeof g_build_map_after);
++}
++
++// A test's way to leave one copy's guards as a long session might (DC_NETPLAY_PERTURB_GUARD).
++void PortBuildMapGuardsFill(unsigned char value) {
++    std::memset(g_build_map_before, value, sizeof g_build_map_before);
++    std::memset(g_build_map_after, value, sizeof g_build_map_after);
++}
++
++// Whether the guards sit right before and after buildMapDat, as they must to take its stray reads.
++bool PortBuildMapGuardsPlaced() {
++    // As addresses: the compiler may take two arrays' pointers for unequal whatever the linker did.
++    volatile std::uintptr_t before = reinterpret_cast<std::uintptr_t>(g_build_map_before);
++    volatile std::uintptr_t grid = reinterpret_cast<std::uintptr_t>(buildMapDat);
++    volatile std::uintptr_t after = reinterpret_cast<std::uintptr_t>(g_build_map_after);
++
++    return before + sizeof g_build_map_before == grid && grid + sizeof buildMapDat == after;
++}

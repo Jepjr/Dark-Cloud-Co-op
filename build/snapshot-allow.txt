@@ -1,0 +1,734 @@
+# The port globals that are game state, for the snapshot's state set (snapregions.py).
+# Only trivially copyable globals belong here: a std:: container, string or smart pointer holds heap pointers that
+# cannot be copied as bytes (those modules get a handler in stage 2). Patterns match demangled names; obj:<glob>
+# takes every global of one object; "!" takes back out.
+#
+# Stage 1 starts with what the plan names and grows from what snaptrip.ps1 parts on (each addition with the run
+# that showed it).
+
+*g_rand_state                # port/src/runtime.cpp (anonymous namespace): the one RNG stream (srand reseeds it)
+# (effect_count, the effects' clock, is the decomp's: effectmacro.cpp, already in the set)
+
+# Town run 3 (2026-10-24, whole image take against restore): port re-implementations' statics that changed and were
+# not put back.
+# (repin: now roty (editloop3.cpp), a game global) *g_event_spin                # editloop3.cpp: the town event's spin
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_held_max                  # collisionmdt.cpp: the held collision box
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_held_min
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_tick_view                 # mglib.cpp: the view the tick's clip tests read
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_tick_view_held
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_held_tick_view
+# (repin: a heap buffer now (gameutil.cpp), rebuilt by every skinning pass: see the repin block) *g_deformed                  # gameutil_motion.cpp: skinned vertices
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) MotionProc2*::Bone_Matrix*   # gameutil_motion.cpp: MotionProc2's static bone matrices
+*g_save_data                 # gameloop.cpp: the save data (CSaveData; TakeState carries it whole)
+*g_autosaved_floor           # repin (Chronicle 9418a550, app/gameloop.cpp): the floor the per-floor autosave last ran on; a floor
+                             # start that matches it skips SaveData's SetMapNo, so a joiner or a fixture's loader keeps the taker's
+
+# Town run 9 (2026-10-24, DC_RAND_TRACE at the parting tick): EdEventPointDraw's sparkle timer draws rand when it
+# restarts, so it is game state though it lives in a draw function (editloop3.cpp, with g_event_spin above).
+# (repin: now sys_eff_sc / sys_eff_cnt (editloop3.cpp), game globals) *g_event_sparkle
+# (repin: now sys_eff_cnt, a game global) *g_event_sparkle_wait
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_villager_ground_height_map # editloop3.cpp: the villagers' ground smoothing (reset with the two above on a resync)
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_villager_ground_height    # editloop3.cpp: the smoothed heights themselves
+
+# Town run 10 (2026-10-24, parted at tick 476 as a town event script ran): the script VM's result, which retail's
+# EdRunEvent caller reads (runscript.cpp). The VM's own stacks and function records live on the C heap (stage 2 handler).
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_run_result
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_item_get_item              # runscript.cpp: the item the next item-get event shows
+
+# Floor run 1 (2026-10-24, coop-floorsnap, snaptrip -Place floor: the restore gave every region back but the checksum
+# differed at once): the healing counter Checksum() adds in a dungeon (dun/motiondrive.cpp), stepped each floor tick.
+*MotionDriveHealCounter
+
+# Floor run 3 (2026-10-24): RandTbl (the message windows' wobble) parted at tick 552: while linked the port rolls it from
+# a generator of its own (gametext.cpp TableRand's state), not the game's.
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *TableRand*state*
+
+# Floor run 3 (2026-10-24, DC_SNAPSHOT_TRIP_PARTS): the checksum differed on the restore tick in two co-op modules
+# whose state is not in the set: the menus (coop_menu.cpp: away/rejoin flip once when player 2 is absent) and the
+# partner (coop_core.cpp: down_left, revive). Both trivially copyable; their pointers hold only within one copy (a
+# two-copy join resets them with the session anyway). Not the module's draw flags or its one-time guards.
+obj:*coop_menu.cpp*
+!guard_variable_for_*
+!*g_drawn
+!*g_cover_drawn
+coop::g_partner
+coop::g_icon_due   # coop-floorscene: ChangePlayer's item-sheet reload held for a scene (both copies reload on one tick)
+coop::g_scene_handover   # coop-sceneowner: her floor merge's change of players held to her scene's end (both copies change on one tick)
+# coop-fx51a (b2, x-fixture-fidelity -Globals 2026-11-05: a fixture's loader against its maker): the random state the floor was
+# built from and its floor (netplay.cpp, sent in a checkpoint for a catch-up joiner's floor and in an apart floor message), and
+# where this copy's player stood as the floor started (coop_worlds.cpp, her arrival's place). A load kept the loader's own.
+*g_floor_build_rand
+*g_floor_build_key
+g_floor_entrance
+
+# Floor run 4 (2026-10-24): MainDungeonMap's mini-map mask parted for one tick at 413 (cell 184): DunMoveChara reveals the
+# cell under the player every fifth tick on two function statics, whose phase the restore did not put back.
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) DunMoveChara()::cnt
+# (repin: upstream took the static out of DunMoveChara) DunMoveChara()::init
+
+# snapjoin run 3 (2026-10-24, two copies): the first lockstep checksum parted on the partner camera (camera2), the co-op
+# camera module's state (coop_camera.cpp): its flags and the view it chose; the camera object itself is on the heap and
+# goes as an extra region (netplay's SnapExtras), the module's pointers to it staying each copy's own.
+obj:*coop_camera.cpp*
+!guard variable for *
+!guard_variable_for_*
+!*CoopBeforeMotion*          # its collision scratch (a std::vector) and test statics
+!*StepPartnerCamera*report*  # a log counter
+!*g_view_arrival*            # coop-arrivalcam: the arriver's draw camera, on this copy's heap
+!*DrawTwiceCheck*              # coop-drawtwice: the self-test's switch and counters
+!*present*GuardOn*            # coop-router: the guard's switch and counters
+!*present*g_checked*
+!*present*g_caught*
+!*PartnerWeaponWarning*roll*   # coop-router: its guard test switch
+!*WakeBesideOther*            # coop-router: the woken-monster test switch
+!*CoopViewBegin*roll*         # coop-drawtwice: its draw-roll test switch
+!*CoopViewBegin*said*
+!*ArrivalViewLog*            # coop-arrivalcam: a test log's last tick
+!*g_own_camera*              # the handler's own pointer across an apply
+!*g_other_pres*              # coop-openercam: one draw's saved words, put back by its end
+!*g_view_projection*         # coop-hischest: each copy's own play projection and one draw's saved one
+!*LoadArrival()::pack*       # the arrival pack's heap buffer, each copy's own (its loaded_* statics stay in)
+
+# snapjoin run 4 (2026-10-24, two copies): the joiner's partner fell through the floor after the apply: the floor builder's
+# table and its guards (port/src/dungeonmap.cpp, sections .data$dcbuildmap_a..c) were not in the set, so the joiner kept its
+# own floor's build (the plan named them; stage 1's town never needed them).
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) buildMapDat
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) g_build_map_before
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) g_build_map_after
+
+# coop-floorjoin2 (2026-10-25, x-floor-join -Case late): the texture registry is made again from the table after an apply
+# (PortTextureRebuildAfterApply); the swizzle each slot's staged pixels are in goes with the table (port/src/texture.cpp).
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) *g_port_texture_swizzled
+
+# coop-snapjoin (2026-10-25, o-opening-resync -Step house-during by snapshot): OUT OF SYNC 15 ticks after a merge inside the
+# mayor's house on "p2 bag": player 2's own bag (coop_inventory.cpp, trivially copyable) was each copy's own across the
+# apply. The host's view goes over hers, as the pack does (her apart changes reach the host before the merge's take: the
+# merge waits for nothing unacknowledged).
+coop::g_bag
+coop::g_key_ring
+
+# coop-bldgsnap (2026-10-26, o-opening-resync -Step house-after -Snapshot with indoor joins on): the interior loop is the
+# port's (port/src/edit_in.cpp re-implements EditInLoop, PORT_OVERRIDE), so the statics it runs on are its own, not the
+# decomp's of the same names already in the set: its phase (GameMode), its character and camera pointers, the parts, motion
+# parts, water, fire and texture animation of the room. Left out, the joiner kept its own room's objects over the host's
+# arenas after an apply indoors (Toan's cloth step faulted on a null object). Trivially copyable (game classes, one exe).
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) obj:*/dc_port.dir/src/edit_in.cpp.obj
+!guard variable for *
+!guard_variable_for_*
+
+# coop-netbugs (2026-10-26, n-debug-start -Kind pick-town -Snapshot -HostMenu; playtest 61): the host's Triangle menu open in
+# Norune at the join (the take goes with a menu open after 3 s): the first lockstep checksum parted on town modes' "his
+# menu" bit, coop_townmenu.cpp's record of the menu his walk opened (trivially copyable), each copy's own across the apply.
+*g_p1_menu
+*g_p1_ticks
+
+# coop-localfix (Jep's 2026-10-26 retest, note 8: back from the dungeon, stacked on each other): the host's stand for player 2,
+# set as a merge starts (coop_spawn.cpp), so a snapshot joiner places her on the merge's tick as the host does (TownMergedOutdoors).
+coop::*::g_stand
+
+# coop-bothescape (Jep's 2026-10-27 run: he escaped the floor, she left it after him, both in Norune): OUT OF SYNC 13 ticks
+# into her merge's lockstep on the part after the partner, then a resync that loaded both towns again. Pad 2's fighting
+# state (coop_combat.cpp: g_combat, and the floor it last saw) was each copy's own across the apply: his copy had reset it
+# when it took its own checkpoint as his floor ended, hers had not. Trivially copyable (its ring effect and heal effect,
+# which hold pointers, stay out). The twin takes the g_combat line out of a copy of the bin's .snapregions.
+coop::g_combat
+coop::*::g_floor_key
+# coop-keydoor (Jep's 2026-10-27 run: P1 joined the floor P2 was on, then the Bone Key door): the key pickers (coop_interact.cpp)
+# step on both copies from the pads, so an open picker is game state; it stayed each copy's own across an apply (his copy had
+# none of hers, nor she of his). And a key door opening beside the game: its own interpreter (a CRunScript whose pointers are
+# to its static stacks, the floor's script and the exe's ext table, alike on both copies; its function records are each copy's
+# own heap copies, read again at each call and otherwise only by error messages), stacks and object handles.
+coop::*::g_picks
+coop::*::g_who
+coop::*::g_cave_key_user
+coop::*::g_doors
+coop::*::g_door_exts
+# coop-skeldoor: whose Cross started the script now starting (his message-only Cross shows beside the game, hers already did).
+coop::*::g_her_script_start
+# coop-doorfix: the cave door's acts on a player (coop_town.cpp: retail's refusal, the walk in), stepped on both copies, and
+# the door's slide: game state, as the key doors' above.
+g_cave_act
+g_cave_door_open
+
+# coop-stateload (2026-10-29): a test hook's env setting cached in a function-local static stays each copy's own. A state
+# fixture made by a run with other test settings put its own value over the loading test's (x-opener-view: LogOpenerView's
+# switch off after the load, no view lines, every row red); a catch-up join between copies of different settings likewise.
+!LogOpenerView()::log
+!coop::(anonymous_namespace)::Debug()::debug
+!coop::(anonymous_namespace)::TestGold()::*
+!coop::(anonymous_namespace)::TestShop()::*
+
+# coop-actorswap (2026-10-30): the player table (coop_actor.cpp): each entry's own game pad, and for players past 2 their
+# pack, purse and member. Trivially copyable; the swap under way (g_swap) is never across a tick, so it stays out.
+coop::*::g_players
+
+# coop-opt7: each player's own presentation, its world half (coop_opener.cpp g_present: kind, box, item, ticks; trivially
+# copyable). The engine on the opener's copy (g_opener_engine) is that copy's alone and stays out.
+coop::*::g_present
+
+# coop-atlasync, coop-actorswap: her Atla's stance, the world half of her presentation (coop_interact.cpp g_atla_turn, face, end,
+# slide, pose, and the game's player's stance under it), all trivially copyable. (coop-opt7 step 3: her presentation's run, which
+# coop-atlasync carried as g_atla_kept, is her copy's engine now and never in the set; the effect, g_atla, is a draw.)
+coop::*::g_atla_*
+!*g_atla_drawn               # (coop_pause.cpp's own of the same prefix: its draw's saved Atla bobs and a log counter)
+!*g_atla_phase*
+!*g_atla_saved
+
+# coop-kocatchup (chestsync's q-chest-face runs, 2026-11-03: a catch-up join to a knocked-out P1 on B1, random alone apart
+# 300 to 400 ticks into the lockstep, 4 runs in 4; counted per caller, CWeaponElement::Step_Wind rolled 60 times a second on
+# his copy and 58 on hers): the slot the next elemental hit lights in CWeaponElFx (coop_combat_damage.cpp, retail's
+# function static) stayed each copy's own across the apply, though the sparks themselves come in the set. His copy had
+# fought alone up to the join, hers had not, so her Xiao's next wind hit lit another slot on each copy, and on hers it
+# put out a spark still live. The resync starts it over (PortWeaponFxSlotReset); a snapshot carries his. The checksum
+# reads it now, so the first check after a join that drops it parts (the twin takes the line out of the bin's set).
+*g_weapon_fx_next
+
+# coop-stage4 4e part 1 (Jep 11-07, talks land at once: a merge comes into his talk mid-talk): the port's talk statics
+# (port/src/editloop3.cpp re-implements the talk, PORT_OVERRIDE, its own statics beside the decomp's of the same names). Left
+# out, her copy landed into his talk with no talker (EdNowTalkChara null: EditInLoop's GetDistance faulted on 0x18).
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) talk_villager__2
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) talk_chara_info_id
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) talk_mode
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) talk_dialog
+# (repin: a local of EdTalkMode now) talk_camera
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) talk_select
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) TalkMesMake
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) TalkMesNo
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) EdTalkMode(*)::vv
+
+# coop-pt1109c: the day change owed through a talk (coop_town.cpp), and which villagers a part went down on with a Georama open (coop_georama_own.cpp):
+# game state both copies step alike, trivially copyable.
+coop::*::g_day_change_*
+*g_villagers_watch
+
+# coop-soakfix3 (test_host_sits, a join taken in his pause now, not after it): the town pause's return mode, EditLoop's own
+# static (port/src/editloop.cpp: Start out of ED_MODE_RETURN_MENU_WALK puts GameMode = old_mode; her copy, without it, left his
+# pause into mode 0, OUT OF SYNC on "town modes" 00000001/00000000), and each player's co-op pause on a floor (coop_pause.cpp
+# g_pause: who is paused, Start's last state, the world's hold; in the checksum by MenuHash, "menus" parted: her copy joined
+# with him unpaused, so his next Start paused hers). Both trivially copyable. (A room's pause is edit_in.cpp's, already whole.)
+# (repin: a game global since Chronicle 9418a550 (port/src/game: in the set by default)) EditLoop()::old_mode
+coop::*::g_pause
+
+# coop-offthread (2026-11-09; the shared-state review's option 4, Jep's coordinator: A): the battle menu's working globals out of the
+
+# state set. Menu state is not world state: each copy runs its own menus (local menus), so a join or a state file gave a copy
+
+# another copy's menu pointers and pages (the stale-pointer shape behind pt1109a's weapon crash). The 92 are the swap list's
+
+# (coop_fullmenu.cpp MenuRegions, SaveRegions) names that only menu code reads: every file naming each, and every function of a
+
+# menu file touching it with its callers outside the menu files, read (debug\scratch\offthread\readers.txt, accessors.txt).
+
+# Kept in the set, the world reads them: MenuMapJumpMode (dun/movechara, edit_in, editloop), ItemVolumeStep (the bag's melt
+
+# timer), CommonMenuMes1-3 (the town's message windows), RoomOutFlag (edit_in's GetInteriorOutFlag), CharaNameDrawFlag/Case
+
+# (MonsterNameInit, the world's HUD), and the ones the town's shop and edit menus share (MenuCharaFrame, WepIcon, ItemIcon,
+
+# StayTex, CursorVibeCnt, PerBoardTex, SaveMenu, McAccess). None of the 92 is read by Checksum() or CoopTownModeSum.
+!ps2:MenuMes
+!ps2:MenuExCashBuffer
+!ps2:NorMenuIcon
+!ps2:SysCur
+!ps2:MenuChara
+!ps2:WepMenu
+!ps2:ItemMenuMode
+!ps2:IconAutoGet
+!ps2:MenuMove
+!ps2:SysChara
+!ps2:BattleMenuFlag
+!ps2:chara_r_long
+!ps2:BtlEffectFlag
+!ps2:BtlMenuSaveDataPt
+!ps2:BtlMenuStatusPt
+!ps2:BtlMenuMode
+!ps2:BtlMenuBGMvol
+!ps2:BtlMenuReadBlock
+!ps2:BtlMenuReadBuf
+!ps2:BtlMenuReadEndFlag
+!ps2:ItemMenuWeaponIconReadBlock
+!ps2:ItemMenuAlreadyReadWepIconTexFlag
+!ps2:MenuShadowReadBlock
+!ps2:BtlMenuExtBlock
+!ps2:BtlEuro
+!ps2:BtlMenuExReadBlock
+!ps2:BtlMenuExReadFlag
+!ps2:MenuExtendReadBlock
+!ps2:MenuExTextureReadFlag
+!ps2:ItemMenuCharaReadBuf
+!ps2:BtlMDSBuildCnt
+!ps2:BtlMenuManualReadBlock
+!ps2:DngWepHavePt
+!ps2:WepMenuEffectReadBuf
+!ps2:CharaStatus
+!ps2:MenuCharaFace
+!ps2:NonCharaFace
+!ps2:BtStatus
+!ps2:WepStatus
+!ps2:BtlAlpha
+!ps2:BtlHira
+!ps2:BtlKata
+!ps2:HelpWinHead
+!ps2:BtlWakuMake2
+!ps2:BtlHelpWinAlpha
+!ps2:BtlHelpWinW
+!ps2:BtlHelpWinH
+!ps2:MenuSelect
+!ps2:MenuItemPackPt
+!ps2:EscapeDngFlg
+!ps2:MenuCharaMove
+!ps2:PosAngle
+!ps2:BtlHaveItemPt
+!ps2:WepFrameRate
+!ps2:WeaponPos
+!ps2:WepPolyPos
+!ps2:BtlEffectCt
+!ps2:MenuWarningMsgFlag
+!ps2:BtlMenuCharaChangeBuf
+!ps2:WeaponMenuSelectKeyLockFlag
+!ps2:mapo
+!ps2:mapmovev
+!ps2:NextWorldPos
+!ps2:MapMoveCursor
+!ps2:MenuMoveTex
+!ps2:ItemIcon2
+!ps2:AttachIcon
+!ps2:MenuWepLevelUp
+!ps2:MenuWeaponModelData
+!ps2:MenuWeaponModelInfo
+!ps2:MenuCharaOldAmbient
+# (repin: upstream removed it (the load is synchronous)) !ps2:MenureadFile
+!ps2:MenuItemUseVolume
+!ps2:WeaponRead_Buf
+!ps2:MenuCharaEffectReadFlag
+!ps2:MenuCharaOldEffect
+!ps2:WepEffectMenuPt
+!ps2:WepEffectMenuReadBuf
+!ps2:MenuWeaponModelBuildBuffer
+!ps2:CharaFileBGReadNo
+!ps2:charachangeid
+!ps2:CharaChangeBaseBuf
+!ps2:menucharReadbuf
+!ps2:menud0wepReadBuf
+!ps2:menud1wepReadBuf
+!ps2:menud2wepReadBuf
+!ps2:MenuWepIconCharaChangePtr
+!ps2:MenuVoiceLoadPtr
+!ps2:PerBoardStatusPt
+!ps2:PerBoardPt
+!ps2:MenuTrushMark
+!ps2:DngWeaponFrm
+
+# coop-soakfix3 (Jep 11-10, A: his merge into her room never waits on her arrival run as seen): that run's record (coop_worlds.cpp
+# g_arrival_seen: the event, its room, the story flags her copy reads as set and holds the writes of, started, frames), so his copy
+# reads and holds the same flags through the rest of it. Trivially copyable.
+*g_arrival_seen
+
+# ---- repin (Chronicle 9418a550, 2026-11-10; debug\build\repin\phase4-stateset.md) -----------------------------------------
+# Upstream moved the port's game files (editloop, dun/gameloop, edit_in, mglib, texture, title/*, sound ...) into port/src/game,
+# which is dc_ps2: every global there is in the set unless a "!ps2:" rule takes it out. Three kinds go out.
+
+# 1. Globals that own heap memory (clang -Wexit-time-destructors over dc_ps2; debug\scratch\repin\heapglobals.ps1): their bytes
+#    are this process's pointers, which mean nothing in another copy. Each holds a loaded resource, a cache or a name a load
+#    sets again (none is a tick's state: a join's copy loads its own), so none needs a handler. With each, what describes
+#    this process's own buffer (a count, a "loaded" flag) and a function static's guard variable (the leading *).
+!ps2:alloc_mdt
+!ps2:alloc_dbuff
+!ps2:alloc_smdt
+!ps2:alloc_sdbuff
+!ps2:*SettledOn(*)::settled
+!ps2:g_shapes
+!ps2:g_cells
+!ps2:g_cells_generation
+!ps2:nameblock
+!ps2:CurrentDir
+!ps2:mapjump_name
+!ps2:g_event_frames
+!ps2:g_event_parts_kept
+!ps2:pad_dma_buffers
+!ps2:g_batch
+!ps2:*::seen
+!ps2:g_deformed
+!ps2:g_deformed_count
+!ps2:g_skinned_vertices
+!ps2:loadedModels
+!ps2:loadedCollisions
+!ps2:memory_image_path
+!ps2:g_image_storage
+!ps2:kBoardNames
+!ps2:kFloorLabels
+!ps2:*DrawSaveBoard(*)::label
+!ps2:*Archive(*)::buffer
+!ps2:card_name
+!ps2:BtCfgCash
+!ps2:*_cfg_file
+!ps2:g_bank
+!ps2:g_slot_banks
+!ps2:g_slot_sequences
+!ps2:g_effect_queue
+!ps2:g_partner_voice
+!ps2:g_partner_special
+!ps2:g_partner_special_set
+!ps2:*SoundCoopLoad*(*)::pack
+!ps2:g_dance_pack
+!ps2:argStrBuff
+!ps2:argValBuff
+!ps2:frame_info_cam
+!ps2:g_library
+!ps2:g_library_order
+!ps2:g_library_bytes
+!ps2:EditGaijiStorage          # the font's extra glyphs, copied from the loaded data (clsmes.cpp)
+
+# 2. The port's globals at 6ec3b808 that were out of the set (dc_port, not allow-listed) and are dc_ps2 now: out as before,
+#    so the set means what it meant (debug\scratch\repin\setdiff.py, the old and new link maps). By the file they live in.
+# btitem.cpp
+!ps2:PortItemSelectResult
+!ps2:escape_file
+!ps2:item_img
+!ps2:item_mds
+# btsysscript.cpp
+!ps2:g_event_data
+# clsmes.cpp
+!ps2:*TtfReady(*)::tried
+!ps2:g_choice_first_row
+!ps2:g_choice_mes
+!ps2:g_choice_more_above
+!ps2:g_choice_more_below
+!ps2:g_overlay_file
+!ps2:g_overlay_mes
+!ps2:g_shapes
+# coop/coop_menu.cpp
+# coop/coop_worlds.cpp
+!ps2:g_pick_pending
+# dataalloc2_1.cpp
+!ps2:g_last_run
+# dataread.cpp
+!ps2:bg_read_info
+# dun/gameloop.cpp
+!ps2:*DrawDungeon(*)::bic_posr
+!ps2:*DrawDungeon(*)::itemposr
+!ps2:*DrawMonstorDetail(*)::saved
+!ps2:*LoaderLoop(*)::nowCursor
+# dun/movechara.cpp
+!ps2:*BtCheckDamageProc(*)::cnt
+!ps2:*BtCheckDamageProc(*)::dmgSnd
+!ps2:*DunMoveChara(*)::eye_logged
+!ps2:*DunMoveChara(*)::foot
+!ps2:*DunMoveChara(*)::id_cnt
+!ps2:*DunMoveChara(*)::snd_cnt
+!ps2:*DunMoveChara(*)::walked
+!ps2:quickChangeLockOn
+!ps2:quickChangeShiftNo
+!ps2:quickChangeShiftRot
+# edit.cpp
+!ps2:*DM_Flag(*)::chara
+!ps2:*DM_Flag(*)::comp_no
+!ps2:*DM_Flag(*)::dun_map
+!ps2:*DM_Flag(*)::game_no
+!ps2:*DM_Flag(*)::map_no
+!ps2:*DM_Flag(*)::select
+!ps2:*DM_Main(*)::run_event
+!ps2:*DM_Main(*)::select
+!ps2:*DM_Main(*)::talk_chara
+!ps2:*DM_Sound(*)::bgm_no
+!ps2:*DM_Sound(*)::bgm_seq
+!ps2:*DM_Sound(*)::se_no
+!ps2:*DM_Sound(*)::select
+!ps2:*DM_Sound(*)::set_no
+!ps2:*EdDDrawFont(*)::count
+!ps2:*EdDebugMenu(*)::mode
+!ps2:Debug
+# editloop.cpp
+!ps2:*EditLoop(*)::apart_ticks
+!ps2:*EditLoop(*)::debug_flag
+!ps2:*EditLoop(*)::end_code
+!ps2:*EditLoop(*)::event_next
+# (repin rebase onto train 56: in the set, coop-soakfix3 above) !ps2:*EditLoop(*)::old_mode
+!ps2:*EditLoop(*)::select
+!ps2:*PartnerDoor(*)::cross_was
+!ps2:*TownDoorScan(*)::done
+!ps2:*TownGroundEventScan(*)::done
+!ps2:*TownGroundEventScan(*)::polys
+!ps2:*TownGroundEventScan(*)::scan
+!ps2:*TownGroundEventScan(*)::seen
+!ps2:g_event_frames
+!ps2:g_event_parts_kept
+!ps2:g_event_toan_kept
+!ps2:g_event_toan_pos
+!ps2:g_event_toan_rot
+!ps2:her_town_event
+!ps2:player_event_no
+# editloop3.cpp
+!ps2:*EdEventPointDraw(*)::sparkle_rand
+!ps2:g_villager_ground_height_valid
+!ps2:g_villager_retail_near
+# editloop_init.cpp
+!ps2:*EditInit(*)::debug_flag_set
+!ps2:*EditInit(*)::name_mes
+# effectmacro.cpp
+!ps2:g_jitter
+# fireomni.cpp
+!ps2:*CFireOmni::DrawFire(*)::fire_test
+!ps2:*CFireOmni::DrawFire(*)::flickers_drawn
+# frame_math.cpp
+!ps2:g_pick_matrix
+# gamepad.cpp
+!ps2:g_debug_menu_pressed
+!ps2:g_fed
+!ps2:g_held_down
+# gameutil_motion.cpp
+!ps2:g_deformed
+# gameutil_sprite.cpp
+!ps2:*set2DSprite_Core(*)::seen
+!ps2:*set2DSprite_Core(*)::trace
+!ps2:g_batch
+!ps2:g_batch_open
+!ps2:g_batch_tex0
+# memcard.cpp
+!ps2:SaveMenuFunc
+# memorycardaccess.cpp
+!ps2:g_image
+# menu_dungeon.cpp
+!ps2:g_picker
+!ps2:menudebugrot
+!ps2:menudebugrscale
+# menu_event_pointer.cpp
+!ps2:event_active
+!ps2:event_pointer
+# menu_manual.cpp
+!ps2:s_menu_cursor
+# menu_misc.cpp
+!ps2:weapon_model_files
+# menu_save.cpp
+!ps2:*DrawSaveBoard(*)::label
+# mglib.cpp
+!ps2:*BlitWithin(*)::scratch
+!ps2:*BlitWithin(*)::scratch_frame
+!ps2:*BlitWithin(*)::scratch_height
+!ps2:*BlitWithin(*)::scratch_width
+!ps2:g_have_tick_view
+!ps2:g_null_packet
+!ps2:g_null_packet_words
+!ps2:g_old_vcount
+!ps2:g_view_no_cut
+!ps2:mgWindowRect
+# monstorunit.cpp
+!ps2:MonstorTable
+# nowload.cpp
+!ps2:*Archive(*)::buffer
+!ps2:boot_skipped
+!ps2:boot_ticks
+!ps2:card_name
+!ps2:card_ticks
+!ps2:painted_cbp
+!ps2:painted_tbp
+!ps2:quiet_load
+!ps2:resync_load
+!ps2:sprite
+# runscript.cpp
+!ps2:*ItemGetRecord(*)::found
+!ps2:*ItemGetRecord(*)::found_in
+!ps2:g_vm_arena_owner
+# runtime.cpp
+!ps2:*LoadOverlay(*)::loaded
+# shot_freefuncs.cpp
+!ps2:*topStatusInfo(*)::popupRGBRate
+!ps2:*topStatusInfo(*)::popupYRate
+# snd.cpp
+!ps2:*RectSprite(*)::seen
+!ps2:*RectSprite(*)::trace
+!ps2:g_linear
+# sound.cpp
+!ps2:*CSound::Init(*)::output_started
+!ps2:*SoundCoopLoadSpecial(*)::pack
+!ps2:*SoundCoopLoadVoice(*)::pack
+!ps2:g_bank
+!ps2:g_coop_ambient_seq
+!ps2:g_effect_queue
+!ps2:g_game_volume
+!ps2:g_partner_special
+!ps2:g_partner_special_set
+!ps2:g_partner_voice
+!ps2:g_slot_banks
+!ps2:g_slot_sequences
+!ps2:g_volume_override
+!ps2:g_volume_scale
+!ps2:midi_state
+!ps2:se_inf_tbl
+!ps2:sq_inf_tbl
+# texture.cpp
+!ps2:*CTextureManager::DeleteTextureBlock(*)::texdup
+!ps2:*DumpTexture(*)::dir
+!ps2:*PortTextureRebuildAfterApply(*)::in_order
+!ps2:*PortTextureRebuildAfterApply(*)::near_guess
+!ps2:g_slots_before
+# title/op_a.cpp
+!ps2:*DrawCloud(*)::ambient
+!ps2:*DrawCloud(*)::sc
+!ps2:*OpA_DrawProcess(*)::am
+!ps2:*OpA_DrawProcess(*)::ambient
+!ps2:*OpA_DrawProcess(*)::cnt
+!ps2:*OpA_DrawProcess(*)::col
+!ps2:*OpA_DrawProcess(*)::lcolor
+!ps2:*OpA_DrawProcess(*)::sw
+!ps2:*OpA_DrawProcess(*)::wait
+!ps2:*OpA_MotionProcess(*)::d
+!ps2:*OpA_MotionProcess(*)::f
+!ps2:*OpA_SoundProcess(*)::flg
+!ps2:*OpA_SoundProcess(*)::mus
+!ps2:*OpA_SoundProcess(*)::seflg
+!ps2:*OpA_SoundProcess(*)::wait
+!ps2:*SmokeProcess(*)::cnt
+!ps2:DanceWait
+!ps2:DancerAmb
+!ps2:DancerPos
+!ps2:DancerRot
+!ps2:EffectTable
+!ps2:OP_AnimeSeq
+!ps2:OP_BuildingMap
+!ps2:OP_BuildingMap2
+!ps2:OP_GroundMap
+!ps2:Shadow
+# title/op_b.cpp
+!ps2:*FaceChange(*)::face
+!ps2:*OpB_MotionProcess(*)::camera
+!ps2:DoransFuusya
+!ps2:OP_NornMapObj
+!ps2:OP_NornMapObj2
+!ps2:TaimatsuFrame
+!ps2:ToansHouse
+!ps2:g_dance_pack
+# title/op_c.cpp
+!ps2:*FaceChangeC(*)::face
+!ps2:*MajinBeemProcess(*)::pos
+!ps2:*MajinBeemProcess(*)::pos2
+!ps2:*OpC_DrawProcess(*)::bright
+!ps2:*OpC_DrawProcess(*)::flg
+!ps2:*OpC_MotionProcess(*)::camera
+!ps2:*OpC_MotionProcess(*)::d
+!ps2:*OpC_SoundProcess(*)::se
+!ps2:*OpC_SoundProcess(*)::wait
+!ps2:CharaF
+!ps2:DanceBgmCnt
+!ps2:FireStep
+!ps2:MBeemCnt
+!ps2:MajinBgmStart
+!ps2:SndCnt
+!ps2:setTexScrollCnt
+!ps2:setTexScrollCntf
+# title/op_d.cpp
+!ps2:*FaceChangeD(*)::face
+!ps2:*OpD_DrawProcess(*)::fade1
+!ps2:*OpD_DrawProcess(*)::fade2
+!ps2:*OpD_DrawProcess(*)::fade3
+# title/opening.cpp
+!ps2:BgmNo
+!ps2:DispFade
+!ps2:End
+!ps2:EndCnt
+!ps2:PauseFrame
+!ps2:SceneCnt
+!ps2:SceneFlg
+!ps2:SceneRp
+!ps2:SceneSw
+# title/opening_mds.cpp
+!ps2:ColModel
+!ps2:ColModelCount
+!ps2:LODNameBuff
+!ps2:ShadowModel
+!ps2:argStrBuff
+!ps2:argValBuff
+!ps2:levelOfDitialZ
+!ps2:nowObjCnt
+!ps2:nowObjCnt2
+!ps2:pointLightStack
+!ps2:shadowModelCount
+# title/rushmovi.cpp
+!ps2:*DrawProcess(*)::fade
+!ps2:*MotionProcess(*)::iwacnt
+!ps2:*MotionProcess(*)::old
+!ps2:*SoundProcess(*)::ambi
+!ps2:*SoundProcess(*)::bat
+!ps2:*SoundProcess(*)::mus
+!ps2:*SoundProcess(*)::wait
+!ps2:CFire__4
+!ps2:MotionInfo
+!ps2:StartDisp
+!ps2:Water__2
+!ps2:bEnd
+!ps2:frame_info_cam
+# title/title.cpp
+!ps2:*DrawProcA(*)::lightning
+# title/title_mpwords.cpp
+!ps2:g_letters
+# title/titleloop.cpp
+!ps2:*TitleDraw(*)::rot
+!ps2:title_net_busy
+!ps2:title_pointer
+# visualvu1.cpp
+!ps2:*Draw3DEnsureVisual(*)::first_word_only
+!ps2:*Draw3DEnsureVisual(*)::keep_stale
+!ps2:*Draw3DEnsureVisual(*)::lost
+!ps2:*Draw3DEnsureVisual(*)::lost_job
+!ps2:*Draw3DEnsureVisual(*)::told
+!ps2:*Draw3DEnsureVisual(*)::told_job
+!ps2:*Draw3DModelBuffer(*)::two
+!ps2:*MdtPrint(*)::header_only
+!ps2:*RemakeAfterStateSet(*)::keep
+!ps2:g_library
+!ps2:g_library_bytes
+!ps2:g_library_order
+!ps2:g_rebuilt_visuals
+!ps2:g_remade_after_set
+!ps2:g_stale_visuals
+!ps2:g_state_epoch
+!ps2:g_untextured_strips
+!ps2:g_visual_job
+# water_draw.cpp
+!ps2:*PrepareRefraction(*)::copies
+!ps2:*PrepareRefraction(*)::pictured
+
+# 3. New at 9418a550 and not game state: test switches cached in function statics (snapregions --src finds those set from
+#    TestEnv / EnvIs / getenv; these are set from a lambda), per-copy performance traces, and what depends on this copy's
+#    own view.
+!ps2:*CharaChangeLoopTraced(*)::trace
+!ps2:*CharaChangeLoopTraced(*)::ordinal
+!ps2:*DirectShadowClipEnabled(*)::enabled
+!ps2:*GameDrawTrace(*)::enabled
+!ps2:*HazeScale(*)::scale
+!ps2:*HazeSkipsIdentityNear(*)::enabled
+!ps2:*ShadowHashEnabled(*)::enabled
+!ps2:*ShadowPartCountsEnabled(*)::enabled
+!ps2:*ShadowVolumePhasesEnabled(*)::enabled
+!ps2:*NoteEndFramePhases(*)::*
+!ps2:*NoteFastShadowHash(*)::*
+!ps2:*NoteFastShadowPhases(*)::*
+!ps2:*NoteShadowVolumePhases(*)::*
+!ps2:*MGEndFrame(*)::trace_phases
+!ps2:*MdtPrint(*)::header_only
+!ps2:*PortTextureRebuildAfterApply(*)::in_order
+!ps2:*PortTextureRebuildAfterApply(*)::near_guess
+!ps2:*RemakeAfterStateSet(*)::keep
+!ps2:*Draw3DEnsureVisual(*)::*
+!ps2:*Draw3DModelBuffer(*)::two
+!ps2:*DrawFire(*)::fire_test
+!ps2:*EffectSmoke(*)::smoke_test
+!ps2:*RectSprite(*)::trace
+!ps2:*set2DSprite_Core(*)::trace
+!ps2:*DumpTexture(*)::dir
+!ps2:*DeleteTextureBlock(*)::texdup
+!ps2:*TownGroundEventScan(*)::scan
+!ps2:*LettersReady(*)::ready
+!*MenuFilterPort(*)::question_stick   # a port global (coop_menu.cpp's obj: rule above): a test switch (DC_COOP_*)
+!ps2:far_shadow_counts
+!ps2:far_villager_marks
+!ps2:game_draw_spans
+!ps2:card_plan                 # coop-areacard: this copy's own config's card
+!ps2:*SayTitleRows(*)::*       # the title menu's log-once lines (each copy says its own)
+!ps2:*TitleDraw(*)::said
+# LiftFrame's frame (mapparts.cpp): a part's lift by this copy's own view (mgRenderInfo.view_scaled), made again on every
+# draw: each copy's camera is its own, so it is neither shared state nor the same on two copies.
+!ps2:*LiftFrame(*)::frame
+# DrawWepDamageDraw's warningcnt (battlemenu.cpp, new upstream): the weapon-damage warning's blink counter, stepped by that
+# draw alone and read by nothing else; a local menu draws it on its owner's copy only (t-triangle-menu-herweapons-guard).
+!ps2:*DrawWepDamageDraw(*)::warningcnt

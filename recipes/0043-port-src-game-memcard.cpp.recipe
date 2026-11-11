@@ -1,0 +1,21 @@
+# port/src/game/memcard.cpp from Chronicle's port/src/game/memcard.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/memcard.cpp
+base port/src/game/memcard.cpp
+from f6a3551af14fc3cecb4d9151b889a220be3d45df
+to 0d07858915933458d650587acfe4b7927b8aae70
+@@ -72,0 +73,7
++// Jep (co-op): these two out of the anonymous namespace; src/coop/coop_townmenu.cpp opens the board screen itself.
+=78 265f5841c641f04a
+=79 e10921e427f726b6
++
+=84 7e2c50e8c9d3025f
+=85 0df899f481c0884b
++
+@@ -78,3 +84,0
+- 265f5841c641f04a
+- e10921e427f726b6
+- e3b0c44298fc1c14
+@@ -84,3 +87,0
+- 7e2c50e8c9d3025f
+- 0df899f481c0884b
+- e3b0c44298fc1c14

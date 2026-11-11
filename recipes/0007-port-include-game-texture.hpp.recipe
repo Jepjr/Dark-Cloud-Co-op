@@ -1,0 +1,33 @@
+# port/include/game/texture.hpp from Chronicle's port/include/game/texture.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/texture.hpp
+base port/include/game/texture.hpp
+from e67ccdac5b12d70ae86baad075287ad98c2ef160
+to caee12946f62d17a5e301fce637e105fd4637f54
+@@ -109,0 +110,24
++// Jep (co-op), coop-pt1108f (Jep's 11-09 playtest): retail's 72 blocks, then six only player 2's menu engine uses (74 to 79). Her menu sat in 44 to 49, and a town
++// script's _LOAD_TEXTURE family deletes and loads 45 to 49, so an event on her walk took her menu's pictures. 73 is never a block: the Z sheet's mark.
++constexpr int kTextureBlockCount = 80;
++constexpr bool TextureBlockValid(int block) {
++    return block >= 0 && block < kTextureBlockCount && block != 73;
++}
++
++// Jep (co-op), coop-floorjoin2 (the host snapshot's "texture keys after an apply"): the
++// texture registry (render/texture_registry.hpp) re-keyed to the game's texture table after another copy's memory snapshot
++// was put back on this one (snapshot_state.cpp). The table (TexManager, in the state set) then names the host's TBP0 and
++// CBP keys, which the registry never handed out, so every draw missed. PortTextureRebuildBefore remembers this copy's own
++// entries by texture name; PortTextureRebuildAfterApply moves a fixed texture's entry (block -1: its pixels were never
++// staged) to the key the table now holds, drops the manager's other entries and makes each staged texture again at its keys
++// from its staged pixels (TextureData, in the state set). (Defined in game/texture.cpp.)
++struct PortTextureRebuildReport {
++    int images = 0;
++    int palettes = 0;
++    int targets = 0;
++    int moved = 0;
++    int skipped = 0;
++};
++void                     PortTextureRebuildBefore();
++PortTextureRebuildReport PortTextureRebuildAfterApply();
++
+@@ -122,1 +146,1
+- 5e0852c3da337b51
++    CTextureBlock     blocks[kTextureBlockCount];    /**< Managed texture blocks. */

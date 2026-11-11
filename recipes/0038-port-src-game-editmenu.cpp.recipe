@@ -1,0 +1,28 @@
+# port/src/game/editmenu.cpp from Chronicle's port/src/game/editmenu.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/editmenu.cpp
+base port/src/game/editmenu.cpp
+from f3bb83987be895815081068898ac6d3daa1864ec
+to e5a4cb6b0392c83d8b767ecdf23309d6739c19e3
+@@ -1455,0 +1456,22
++// Jep (co-op), coop-soakfix4 (a test hook, netplay.cpp): the town edit menu's page and cursor for a test's presses, read and set
++// from outside (EditSwitch and EdCur are this file's own since Chronicle 9418a550).
++int EditMenuPage() {
++    return static_cast<int>(EditSwitch);
++}
++
++bool EditMenuOnSelect() {
++    return EditSwitch == EditMenuState::Select;
++}
++
++bool EditMenuOnOption() {
++    return EditSwitch == EditMenuState::OptionIn || EditSwitch == EditMenuState::Option;
++}
++
++int EditMenuCursor() {
++    return EdCur.selection;
++}
++
++void EditMenuSetCursor(int selection) {
++    EdCur.selection = static_cast<s8>(selection);
++}
++

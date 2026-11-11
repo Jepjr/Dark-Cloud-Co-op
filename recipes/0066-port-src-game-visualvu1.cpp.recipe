@@ -1,0 +1,308 @@
+# port/src/game/visualvu1.cpp from Chronicle's port/src/game/visualvu1.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/visualvu1.cpp
+base port/src/game/visualvu1.cpp
+from 0f9279b28186e73a8227040a9ce34e5c77935e23
+to c6f34762d2740b2b043725b78773671d6f7bc7cb
+@@ -4,0 +5,2
++#include <cstdio>
++#include <cstdlib>
+@@ -8,0 +11,1
++#include <unordered_map>
+@@ -16,0 +20,1
++#include "platform/arena.hpp"
+@@ -24,0 +29,8
++unsigned int *CoopWorldsSceneModel(uint32_t print); // coop-b1lesson (coop/coop_worlds.hpp)
++
++namespace dc::render {
++// Jep (co-op), coop-toanvis: render/draw3d_visual.cpp's tag check and mesh release, for Draw3DEnsureVisual below.
++bool Draw3DBlockTagged(const unsigned int *block);
++void Draw3DReleaseVisual(Draw3DVisual &visual);
++} // namespace dc::render
++
+@@ -671,0 +684,258
++// Jep (co-op): coop-toanvis, coop-joinatla, coop-pond, coop-warmreset. At 6ec3b808 this sat beside the draw records in
++// port/src/visualvu1.cpp; 9418a550 moved the records to render/draw3d_visual.cpp, and this stays with the model builds
++// it watches (CreateVUdataFromMDT keeps each model and names it in its block).
++namespace {
++
++// coop-joinatla (Jep's 2026-10-28 run: the fairy king's warp boxy on P2's screen after she joined his B1 lesson): the
++// print covers the whole model, not its header alone. The warp's glow and another model of hers (e01s01_1's) had the
++// same header, so her copy rebuilt the glow from the other model's data, whose texture the table did not hold: white
++// quads. DC_COOP_MUTATE=header_print (twin): the header alone, as before.
++uint32_t MdtPrint(const unsigned int *data) {
++    static const bool header_only = [] {
++        const char *mutation = std::getenv("DC_COOP_MUTATE");
++        return mutation != nullptr && std::strstr(mutation, "header_print") != nullptr;
++    }();
++    const size_t size = reinterpret_cast<const MDT_HEADER *>(data)->size;
++    const size_t words = header_only || size < sizeof(MDT_HEADER) || size > (32u << 20) ? sizeof(MDT_HEADER) / 4 : size / 4;
++    uint32_t     print = 0x811c9dc5u;
++    for (size_t i = 0; i < words; i++) {
++        print = (print ^ data[i]) * 0x01000193u;
++    }
++    return print | 1u; // never 0: 0 is "no source" (a shadow's or another kind's record)
++}
++
++unsigned int *BlockSource(const unsigned int *block) {
++    return reinterpret_cast<unsigned int *>(static_cast<uintptr_t>(block[9]) | (static_cast<uintptr_t>(block[10]) << 32));
++}
++
++// coop-toanvis: every model built, as it was, by its header's print (a model's file is often gone by the time a state set
++// needs it again: the dungeon's read buffer is reused). Oldest first out past kLibraryBytes.
++constexpr size_t kLibraryBytes = 64u << 20;
++constexpr size_t kLibraryModelBytes = 2u << 20;
++
++std::unordered_map<uint32_t, std::vector<unsigned int>> g_library;
++std::vector<uint32_t>                                    g_library_order;
++size_t                                                   g_library_bytes = 0;
++
++void KeepModel(const unsigned int *data, uint32_t print) {
++    const size_t size = reinterpret_cast<const MDT_HEADER *>(data)->size;
++    if (size < sizeof(MDT_HEADER) || size > kLibraryModelBytes || g_library.count(print) != 0) {
++        return;
++    }
++    g_library[print].assign(data, data + (size + 3) / 4);
++    g_library_order.push_back(print);
++    g_library_bytes += size;
++    while (g_library_bytes > kLibraryBytes && !g_library_order.empty()) {
++        auto it = g_library.find(g_library_order.front());
++        g_library_order.erase(g_library_order.begin());
++        if (it != g_library.end()) {
++            g_library_bytes -= it->second.size() * 4;
++            g_library.erase(it);
++        }
++    }
++}
++
++unsigned int *KeptModel(uint32_t print) {
++    auto it = g_library.find(print);
++    return it != g_library.end() && MdtPrint(it->second.data()) == print ? it->second.data() : nullptr;
++}
++
++int      g_stale_visuals = 0;
++int      g_rebuilt_visuals = 0;
++uint32_t g_state_epoch = 0;       // coop-pond: state sets applied (Draw3DStateSetApplied)
++int      g_remade_after_set = 0;  // coop-pond: records remade once after a state set (RemakeAfterStateSet)
++int g_untextured_strips = 0; // coop-joinatla: strips built whose material names a texture the table does not hold
++int g_visual_job = 0;        // coop-warmreset (Draw3DResetForJob)
++
++// coop-pond (Jep's LAN pack 8 playtest, 2026-11-04: Norune's pond on his screen, flat ground on his partner's): a remakeable
++// model (CVisualMDTVu1) the game edits in place follows its edits only on a remake flag. A town's ground grid is one:
++// CEditArea::RemakeGrid folds the cells a pond or river digs out and raises the flag. A state set brought the host's folded
++// ground but not the flag he spent long before, so her copy's record stayed her own whole ground: it covered the pond's pit,
++// fence and water. Once after each state set (Draw3DStateSetApplied), each such record is remade from the model as it is.
++// DC_COOP_MUTATE=no_remake_after_set (twin): left as it was.
++Draw3DVisual *RemakeAfterStateSet(CVisualVu1 *owner, unsigned int *block, Draw3DVisual *visual) {
++    static const bool keep = [] {
++        const char *mutation = std::getenv("DC_COOP_MUTATE");
++        return mutation != nullptr && std::strstr(mutation, "no_remake_after_set") != nullptr;
++    }();
++    if (visual == nullptr || visual->immediate || visual->state_epoch == g_state_epoch) {
++        return visual;
++    }
++    visual->state_epoch = g_state_epoch;
++    u_int *model = owner->GetMDTDataAddress();
++    if (keep || model == nullptr || !ArenaContains(model)) {
++        return visual;
++    }
++    u_int *const was_data = owner->vu_data;
++    const u_int  was_size = owner->vu_size;
++    owner->CreateVUdataFromMDTRemake(block, model, 1);
++    owner->vu_data = was_data;
++    owner->vu_size = was_size;
++    g_remade_after_set++;
++    return Draw3DFindVisual(block);
++}
++
++} // namespace
++
++// coop-joinatla: the print a model block names its model by (coop_scenepics.cpp indexes the scene's packs by it).
++uint32_t Draw3DModelPrint(const unsigned int *data) {
++    return MdtPrint(data);
++}
++
+=828 5c19ecd9ea55999f
++
++namespace dc::render {
++
++using namespace dc::game;
++
++void Draw3DStateSetApplied() {
++    g_state_epoch++;
++}
++
++int Draw3DRemadeAfterStateSets() {
++    return g_remade_after_set;
++}
++
++int Draw3DStaleVisuals() {
++    return g_stale_visuals;
++}
++
++int Draw3DRebuiltVisuals() {
++    return g_rebuilt_visuals;
++}
++
++// coop-warmreset (test-time plan WS7 step 1): a warm pair's job counts its stale blocks from none and says its first ones again, as
++// a fresh copy does (process totals made a later job's "built again" / "nothing drawn" lines and the join's totals the jobs' sum).
++// netplay.cpp's job start calls it; the trace_once_kept twin does not. The kept-model library stays (a fresh copy has the
++// models of its own floor's build in it too).
++void Draw3DResetForJob() {
++    g_stale_visuals = 0;
++    g_rebuilt_visuals = 0;
++    g_visual_job++;
++}
++
++// coop-toanvis (Jep's 2026-10-26 playtest: Toan only a shadow on P2's screen after she joined his floor): a model block
++// carries, past its tag, the model it was built from (its address and header's print), so the block says what it holds
++// wherever its bytes came from. Player 2's copy had become Xiao alone on the floor, so the player's blocks held Xiao's
++// records; the merge's state set put Toan's model there (other blocks, other models), and the records kept Xiao's meshes
++// or none. A block whose record is missing or built from another model is built again from that model: where the block
++// says it is while it is still there (its print), else this copy's own copy of it (KeepModel: her copy built Toan's at
++// the floor's start); with neither, its stale record goes. DC_COOP_MUTATE=stale_visuals (twin): counted, left as it is.
++Draw3DVisual *Draw3DEnsureVisual(CVisualVu1 *owner, unsigned int *block) {
++    static const bool keep_stale = [] {
++        const char *mutation = std::getenv("DC_COOP_MUTATE");
++        return mutation != nullptr && std::strstr(mutation, "stale_visuals") != nullptr;
++    }();
++
+=763 a494fb17e3ec8c50
++    if (block == nullptr || !Draw3DBlockTagged(block) || block[11] == 0) {
++        return visual;
++    }
++    unsigned int *source = BlockSource(block);
++    if (visual != nullptr && (visual->immediate || (visual->source == source && visual->source_print == block[11]))) {
++        return RemakeAfterStateSet(owner, block, visual);
++    }
++    // coop-b6monsters (Jep's 2026-11-04 pack 8 run, x-floor7-zone): on the copy that joined a scene part-way, a block the state
++    // set carried can name a model in the dungeon's read buffer, which the set leaves out: there the arena holds this copy's
++    // own bytes, whose "size" ran the print past the arena's end (an access violation as floor 7's scene ended). The model
++    // must lie whole in the arena before it is read; one that runs past it is said and not read. DC_COOP_MUTATE=source_whole
++    // (twin): its first word alone, as before, so the model is taken for whole and said "read past the arena", but not read
++    // (the read is the access violation itself, which a twin must not take: it fails on the test's check instead).
++    static const bool first_word_only = [] {
++        const char *mutation = std::getenv("DC_COOP_MUTATE");
++        return mutation != nullptr && std::strstr(mutation, "source_whole") != nullptr;
++    }();
++    bool whole = false;
++    if (ArenaContains(source)) {
++        const size_t size = reinterpret_cast<const MDT_HEADER *>(source)->size;
++        whole = size < sizeof(MDT_HEADER) || size > (32u << 20) || ArenaContains(reinterpret_cast<const unsigned char *>(source) + size - 1);
++        static int told = 0;
++        static int told_job = 0;
++        if (told_job != g_visual_job) {
++            told_job = g_visual_job;
++            told = 0;
++        }
++        if (!whole && told++ < 20) {
++            std::fprintf(stderr, "draw3d: model block %p names a model at %p running past the arena (%zu bytes): %s\n",
++                         static_cast<void *>(block), static_cast<void *>(source), size,
++                         first_word_only ? "taken for whole, read past the arena (source_whole)" : "not read");
++        }
++    }
++    unsigned int *model = whole && MdtPrint(source) == block[11] ? source : KeptModel(block[11]);
++    // coop-b1lesson: or the other copy's scene's model, from this copy's own read of the packs that scene read.
++    if (model == nullptr) {
++        model = CoopWorldsSceneModel(block[11]);
++    }
++    // coop-joinatla (Jep, 2026-10-28: after B1, P2 rejoined his town scene and "can't see the fairy king"; no log of it was kept):
++    // a model this copy cannot build again is said every time (up to 40), not only among the first 12 rebuilds of the session.
++    static int lost = 0;
++    static int lost_job = 0;
++    if (lost_job != g_visual_job) {
++        lost_job = g_visual_job;
++        lost = 0;
++    }
++    if (model == nullptr && g_stale_visuals >= 12 && lost++ < 40) {
++        std::fprintf(stderr, "draw3d: model %08x of block %p is not on this copy (neither here, kept nor in a scene's packs): nothing drawn\n",
++                     block[11], static_cast<void *>(block));
++    }
++    if (g_stale_visuals++ < 12) {
++        std::fprintf(stderr, "draw3d: model block %p %s, its model %p %s (%s)\n", static_cast<void *>(block),
++                     visual ? "built from another model" : "has no mesh", static_cast<void *>(source),
++                     model == source ? "here" : model ? "gone, this copy keeps it" : "gone",
++                     keep_stale ? "left as it is: stale_visuals" : model ? "built again" : "nothing drawn");
++    }
++    if (keep_stale) {
++        return visual;
++    }
++    if (model != nullptr) {
++        // The build names its model in the block; the block keeps the name it came with (both copies' bytes alike).
++        const unsigned int named[3] = {block[9], block[10], block[11]};
++        u_int *const       was_data = owner->vu_data;
++        const u_int        was_size = owner->vu_size;
++        const int          untextured = g_untextured_strips;
++        owner->CreateVUdataFromMDT(block, model, 0, 0);
++        // coop-joinatla: a rebuilt model whose textures the table lacks drew as plain quads (the fairy king's warp, built from
++        // another model of one header). Said, for the tests (x-floor-join -Case scene).
++        static int told = 0;
++        static int told_job = 0;
++        if (told_job != g_visual_job) {
++            told_job = g_visual_job;
++            told = 0;
++        }
++        if (g_untextured_strips != untextured && told++ < 20) {
++            std::fprintf(stderr, "draw3d: model %08x built again with %d strip(s) whose texture the table does not hold\n", block[11],
++                         g_untextured_strips - untextured);
++        }
++        owner->vu_data = was_data;
++        owner->vu_size = was_size;
++        std::memcpy(block + 9, named, sizeof named);
++        visual = Draw3DFindVisual(block);
++        g_rebuilt_visuals++;
++    } else if (visual != nullptr) {
++        Draw3DReleaseVisual(*visual);
++        visual->strips.clear();
++        visual->vertices.clear();
++    }
++    if (visual != nullptr) {
++        visual->source = source;
++        visual->source_print = block[11];
++    }
++    return RemakeAfterStateSet(owner, block, visual);
++}
++
++// Jep (co-op): which of a remakeable model's two blocks it is remade into and drawn from (render/draw3d.hpp). 9418a550
++// draws from block 0 alone, as this did by default; DC_COOP_MUTATE=mdt_double_buffer keeps retail's two (the
++// interpolation test's twin).
++int Draw3DModelBuffer() {
++    static const bool two = [] {
++        const char *mutation = std::getenv("DC_COOP_MUTATE");
++        return mutation != nullptr && std::strcmp(mutation, "mdt_double_buffer") == 0;
++    }();
++
++    return two ? DBuffID : 0;
++}
++
++} // namespace dc::render
++
+=25 7a2f03f556986854
++
+@@ -677,1 +947,1
+- 2b6fc8335e71ab1b
++    if (const Draw3DVisual *visual = Draw3DEnsureVisual(this, vu_data)) {
+@@ -691,0 +962,7
++    // coop-toanvis: the block names its model (Draw3DEnsureVisual).
++    visual.source = data;
++    visual.source_print = MdtPrint(data);
++    KeepModel(data, visual.source_print);
++    block[9] = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(data));
++    block[10] = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(data) >> 32);
++    block[11] = visual.source_print;
+@@ -705,0 +983,3
++            if (handle < 0 && entry.texture[0] != 0) {
++                g_untextured_strips++; // coop-joinatla (Draw3DEnsureVisual's rebuild line)
++            }
+@@ -809,1 +1089,1
+- d21db7120783efd8
++    vu_data = vu_data_buffer[Draw3DModelBuffer()]; // Jep (co-op): 0 but in the mdt_double_buffer twin
+@@ -811,1 +1091,1
+- d21db7120783efd8
++    vu_data = vu_data_buffer[Draw3DModelBuffer()];
+@@ -817,1 +1097,1
+- d21db7120783efd8
++    vu_data = vu_data_buffer[Draw3DModelBuffer()];
+@@ -825,1 +1105,2
+- b6b9ba0ac75bc436
++    Draw3DEnsureVisual(this, vu_data_buffer[Draw3DModelBuffer()]);
++    return CreateVUdataFromMDTRemake(vu_data_buffer[Draw3DModelBuffer()], data, 1);

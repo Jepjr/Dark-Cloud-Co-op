@@ -1,0 +1,138 @@
+# port/src/app/presentation.cpp from Chronicle's port/src/app/presentation.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/app/presentation.cpp
+base port/src/app/presentation.cpp
+from c4048c904f0fdb6fce5c548ce5da2349cbe8d72c
+to 4f33993b64f26c7f843b0fa69976d276df9d191c
+@@ -19,0 +20,6
++#include "character.hpp"   // coop: DC_SCREENSHOT_ALPHA's player position
++#include "editloop.hpp"    // coop: (Chara)
++#include "coop/netplay.hpp"      // coop: netplay
++#include "coop/netplay_test.hpp" // coop: netplay (NetplayMutated)
++#include "gfx/displaylist.hpp"    // coop-pilot: a no-draw list's updates
++
+@@ -378,0 +385,25
++// coop-localfix2: a frame of black (the arriving copy's door fade held while it takes the other copy's state and catches
++// up: NetplayArrivalHold), recorded once.
++const gfx::DisplayListRef &BlackList() {
++    static gfx::DisplayListRef black;
++    if (!black) {
++        gfx::BeginRecording(gfx::RecordingKind::Overlay);
++        if (!gfx::Recording()) {
++            return black;
++        }
++        const std::uint8_t color[4] = {0, 0, 0, 0x80};
++        gfx::Clear(true, color, false, 0.0f);
++        black = gfx::EndRecording();
++    }
++    return black;
++}
++
++bool PresentBlackFrame() {
++    const gfx::DisplayListRef &black = BlackList();
++    bool                       shown = black && gfx::RenderList(*black, 1.0f, {.present = true, .host = true});
++    if (shown) {
+=374 a905cc304c069835
++    }
++    return shown;
++}
++
+@@ -388,0 +420,3
++// coop-pilot: the newest tick's list was kept but not rendered (DC_QA_NO_DRAW).
++static bool g_list_unrendered = false;
++
+@@ -389,0 +424,38
++    // coop: netplay: a joiner catching up to the host (game.netplay_catchup) neither renders nor shows the ticks it
++    // replays: its window holds the loading screen it came from, and the replay runs as fast as the game's own code
++    // allows (drawing never feeds the simulation: drawrand.ps1). The show_catchup mutation renders them. Nothing is
++    // published either, so the render thread (Async) keeps presenting what it had.
++    if (NetplayCatchingUp() && !NetplayMutated("show_catchup")) {
+~502 2fc19d9d75f9828b|        |
++        return;
++    }
++    // coop-pilot (a test seam, DC_QA_NO_DRAW=1): the ticks are not rendered, as a catching-up joiner's are not; the game's own
++    // draw code still runs and records its display list, so what drawing computes is as in play. A test that reads frames
++    // keeps the draw. Off in play. (Nothing is published: under Async the render thread keeps its last frame.)
++    if (NetplayTestNoDraw()) {
++        // (the list is kept, unrendered: a capture renders it on demand, GameScreenshot)
++        // Its texture and mesh updates are applied now, as rendering it would: a list never rendered takes its uploads with
++        // it (gfx.hpp, UpdateTextureNow), and here every tick's list is one. A model loaded after a join (her Xiao's
++        // textures) was missing from every capture after it. (Both calls run on the render thread themselves.)
++        if (list && NetplayTestNoDrawUploads()) {
++            for (const gfx::detail::Entry &entry : list->entries) {
++                if (const auto *t = std::get_if<gfx::detail::UpdateTextureEntry>(&entry)) {
++                    gfx::UpdateTextureNow(t->texture, t->mip, t->x, t->y, t->w, t->h, t->pixels.data());
++                } else if (const auto *m = std::get_if<gfx::detail::UpdateMeshEntry>(&entry)) {
++                    gfx::UpdateMeshVertices(m->mesh, m->first, m->vertices);
++                }
++            }
++        }
+~442 9b5ea13d5e50774e|        |
+~443 5ab1ac51e1074c90|        |
++        g_list_unrendered = true;
+~502 2fc19d9d75f9828b|        |
++        // (the arrival hold is asked each tick as a drawn copy asks it below: it notes where this copy is and times the
++        // arriver's black, game state and the black line a test reads; only its black frame is not presented)
++        (void) NetplayArrivalHold();
++        return;
++    }    // coop-p2skin: player 2's copy before the host's first state: its own game is not shown (NetplayHoldsJoinFrame).
++    if (NetplayHoldsJoinFrame()) {
+~502 2fc19d9d75f9828b|        |
++        return;
++    }
+@@ -439,0 +512,7
++    // coop: netplay: the draw_rand mutation (drawrand.ps1's twin) rolls the simulation's rand from what was drawn, as a
++    // draw-time rand call would, so two runs drawn at different sizes part.
++    if (NetplayMutated("draw_rand")) {
++        for (std::uint64_t i = 0; i < counts.mesh_draws / 7; i++) {
++            rand();
++        }
++    }
+@@ -469,0 +549,6
++            // coop-localfix2: the arriving copy's held door fade (GamePresentBetweenTicks' black frame, for the
++            // render thread): the black list as the tick's one non-interpolated frame.
++            if (NetplayArrivalHold() && BlackList()) {
++                g_published.overlay = BlackList();
++                g_published.settings.interpolation = false;
++            }
+@@ -498,0 +584,11
++    // coop-localfix2 (Jep, 2026-10-26: "the catch up time is entirely hidden by the zone transition"): the copy arriving in a
++    // town where the other stayed shows its door's fade (black) until it has taken her state and caught up, not its own
++    // town for a moment and then its last list drawn again (the sky alone, l-local-play -HostSeries).
++    if (NetplayArrivalHold()) {
+=500 1442f55c5559ad50
++            PresentBlackFrame();
+~522 f7bc250d9d5dd410|            |
+=502 2fc19d9d75f9828b
++        }
++        return false;
++    }
+@@ -535,0 +632,6
++    if (NetplayArrivalHold()) { // coop-localfix2 (GamePresentBetweenTicks)
++        PresentBlackFrame();
+~522 f7bc250d9d5dd410|        |
+~502 2fc19d9d75f9828b|        |
++        return;
++    }
+@@ -586,0 +689,22
++    // coop-pilot: under DC_QA_NO_DRAW the tick's list is rendered here, once and on demand, so a captured frame is the tick's own.
++    if (g_list_unrendered && g_list) {
++        gfx::RenderList(*g_list, 1.0f, {.canonical = true});
++        g_list_unrendered = false;
++    }
++    // coop-localfix2: what the window shows while the arriving copy holds its fade (GamePresentBetweenTicks).
++    if (NetplayArrivalHold() && BlackList()) {
++        return gfx::RenderList(*BlackList(), 1.0f, {.present = false, .host = true}) && gfx::ReadbackFrame(rgba, width, height);
++    }
++    // coop: DC_SCREENSHOT_ALPHA=F: the display frame F of the way from the previous tick to the last, as an
++    // interpolating window shows it between ticks (tests of the interpolation), and where the player
++    // stands in a town.
++    if (const char *alpha = std::getenv("DC_SCREENSHOT_ALPHA"); alpha != nullptr && g_list && g_previous_list) {
++        if (game::mode == game::GAME_MODE_EDIT && game::Chara != nullptr) {
++            sceVu0FVECTOR at;
++
++            game::Chara->GetPosition(at);
++            std::fprintf(stderr, "screenshot: display frame at alpha %s, player at (%.1f %.1f %.1f)\n", alpha, at[0], at[1], at[2]);
++        }
++        return gfx::RenderList(*g_list, std::strtof(alpha, nullptr), {.previous = g_previous_list.get(), .present = true}) &&
+~593 5ba6bc6a1ee794c3|               |
++    }

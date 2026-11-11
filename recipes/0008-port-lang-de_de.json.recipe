@@ -1,0 +1,7 @@
+# port/lang/de_de.json from Chronicle's port/lang/de_de.json (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/lang/de_de.json
+base port/lang/de_de.json
+from 693c0b457d3f56ad51f0e5f19b72dd9c8d2119f9
+to 6b9bdc18b628cc92a5f084a72b13bdbacd834e3e
+@@ -316,0 +317,1
++    "title.menu.multiplayer": "MEHRSPIELER",

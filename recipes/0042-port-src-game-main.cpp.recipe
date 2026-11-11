@@ -1,0 +1,12 @@
+# port/src/game/main.cpp from Chronicle's port/src/game/main.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/main.cpp
+base port/src/game/main.cpp
+from f5b19decf1227af2705700832b9070ecb1abba5f
+to 76b414d10cc293f34429a2924701050bdbf8584d
+@@ -125,2 +125,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): out of the anonymous namespace; src/debug_start.cpp writes its overlay lines into it.
+@@ -128,0 +128,2
++namespace {
++

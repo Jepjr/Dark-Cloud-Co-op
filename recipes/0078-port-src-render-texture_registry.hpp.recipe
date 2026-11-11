@@ -1,0 +1,24 @@
+# port/src/render/texture_registry.hpp from Chronicle's port/src/render/texture_registry.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/texture_registry.hpp
+base port/src/render/texture_registry.hpp
+from 2e30597414c2bde769bd91c8116290d995f01022
+to ccba15e4f6fcf91e1ca369f5c652563ed59cecfa
+@@ -162,0 +163,18
++// Jep (co-op), coop-floorjoin2 (the host snapshot's "texture keys after an apply"): the
++// registry re-keyed to the game's texture table after another copy's memory snapshot was put back on this one
++// (PortTextureRebuildBefore and PortTextureRebuildAfterApply, game/texture.cpp; declared in game/texture.hpp).
++// The rebuild's primitives: an entry made at a given key (whatever was there is dropped). False when a key is reserved, out
++// of range, or for a texture without levels.
++bool PortCreateTextureAt(unsigned tbp, unsigned cbp, const PortDecodedTexture &decoded, PortTextureOwner owner);
++bool PortCreatePlaceholderAt(unsigned tbp, unsigned cbp, std::string_view name, unsigned width, unsigned height, int bpp, PortTextureOwner owner);
++bool PortRegisterNamedTargetAt(unsigned tbp, std::string_view name, unsigned width, unsigned height, bool has_alpha, PortTextureOwner owner);
++// An image entry and its palette (0 for none) moved to other keys.
++bool PortMoveKeys(unsigned from_tbp, unsigned to_tbp, unsigned from_cbp, unsigned to_cbp);
++struct PortKeyMove {
++    unsigned from_tbp, to_tbp, from_cbp, to_cbp;
++};
++bool PortCanMoveKeys(unsigned from_tbp, unsigned to_tbp, unsigned from_cbp, unsigned to_cbp);
++void PortMoveKeysTogether(const std::vector<PortKeyMove> &moves); // coop-pt1108f: every move lifted first, so none evicts a later one's source
++// Draws since start whose TBP0 had no live image entry (PortTextureFromTex0), for the tests' logs.
++unsigned long PortTextureMisses();
++

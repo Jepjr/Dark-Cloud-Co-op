@@ -1,0 +1,17 @@
+# port/src/save/save_slots.hpp from Chronicle's port/src/save/save_slots.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/save/save_slots.hpp
+base port/src/save/save_slots.hpp
+from 4abe42d7729ead10d473931aaf50ebf9a1cd08af
+to b54019c573c4849bd8f8bc7c80c800b33ac015d9
+@@ -88,0 +89,11
++
++namespace dc::game {
++
++// coop: netplay: writes or reads numbered save file_no as the save and load screens do, without them (the
++// link's DC_NETPLAY_SAVE_AT / _LOAD_AT test hooks). False when it cannot. written, when given, gets the SaveData as written
++// (the save screen's image clears the port's options and folds the settings in). Defined in game/memorycardaccess.cpp
++// beside SaveSlotWriteAutosave, so in dc::game like it.
++bool SaveSlotWriteNumbered(int file_no, std::vector<unsigned char> *written = nullptr);
++bool SaveSlotReadNumbered(int file_no);
++
++} // namespace dc::game

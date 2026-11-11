@@ -1,0 +1,401 @@
+# port/src/game/texture.cpp from Chronicle's port/src/game/texture.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/texture.cpp
+base port/src/game/texture.cpp
+from 282d41fa74098da9fe3afc9aff089b813796e0f3
+to f8bed2a75df1996d98bb881dcbb9dfc9dc80c4ed
+@@ -27,0 +28,3
++#include "platform/arena.hpp"     // Jep (co-op), coop-snapjoin: ArenaContains (PortTextureRebuildAfterApply)
++#include "coop/netplay_test.hpp"   // coop-provenance: NetplayMutated
++#include "coop/snapshot_state.hpp" // coop-provenance: SnapshotStateHolds
+@@ -44,1 +47,1
+- bb14e151ca68e60d
++constexpr int kBlockCount = kTextureBlockCount; // Jep (co-op), coop-pt1108f: 72 retail blocks, then player 2's menu's
+@@ -159,0 +163,49
++// Jep (co-op), coop-floorjoin2: whether each registry slot's staged pixels are in the swizzled layout, as Enter was told
++// (CTexture::swizzled keeps retail's meaning instead); the snapshot's state set carries it (build/snapshot-allow.txt)
++// for the rebuild.
++uint8_t g_port_texture_swizzled[196];
++
++// Jep (co-op), coop-floorjoin2 on 9418a550: how each slot's texture was made, so the rebuild after a snapshot makes it again
++// exactly as a fresh load does. A texture from its baked document (Enter, EnterFixTextureZ) is loaded again from that
++// document with the same arguments, the palette its variant was picked by included (the staged pixels are not what such a
++// texture shows, and an indexed one keeps no palette in the table); one entered without pixels is a placeholder again. The
++// state set carries the array with the table (build/snapshot-allow.txt), so after an apply it describes the sender's slots.
++// Plain data only: no pointers (CleanUpBuffer moves staged pixels) and no strings.
++enum PortTextureMade : uint8_t {
++    kTextureMadeOther = 0,       // decoded from its pixels (the source decoder), or nothing entered
++    kTextureMadeBaked = 1,       // Enter: PortLoadBakedTexture
++    kTextureMadeBakedZ = 2,      // EnterFixTextureZ: PortLoadBakedTexture, the Z sheet's way
++    kTextureMadePlaceholder = 3, // Enter without pixels: PortCreatePlaceholder
++};
++struct PortTextureSource {
++    uint8_t  made;
++    int32_t  entry_index; // the document's entry ordinal, -1 for none
++    uint32_t width;       // as the load was asked (the Z sheet's height is 0: any)
++    uint32_t height;
++    int32_t  bpp;         // the load's source_bpp (-1: not given)
++    int32_t  clut_bytes;  // the palette the load picked its variant by (0: none)
++    char     document[256];
++    u_char   clut[1024];
++};
++PortTextureSource g_port_texture_source[196];
++
++namespace {
++
++// Records a baked load's arguments for slot (PortTextureSource).
++void RecordBakedSource(int slot, PortTextureMade made, const char *name, const std::string &document,
++                       std::optional<unsigned> entry_index, unsigned width, unsigned height, int bpp, const u_char *clut,
++                       std::size_t clut_bytes);
++
++// What this copy's registry held, by slot, before another copy's snapshot was put back (PortTextureRebuildBefore).
++struct SlotBefore {
++    char     name[32];
++    unsigned tbp;
++    unsigned cbp;
++    short    width;
++    short    height;
++    short    bpp;
++};
++SlotBefore g_slots_before[196];
++
++} // namespace
++
+@@ -446,0 +499,4
++    g_port_texture_source[tex - manager.textures].made = kTextureMadeOther; // Jep (co-op), coop-floorjoin2: set again below
++    if (std::getenv("DC_COOP_TEXDUP") != nullptr) { // Jep (co-op), coop-texdup
++        std::fprintf(stderr, "coop-texdup: enter slot %d block %d %s\n", (int) (tex - manager.textures), block, name);
++    }
+@@ -525,0 +582,1
++            g_port_texture_swizzled[tex - manager.textures] = static_cast<uint8_t>(indexed && swizzled != 0); // Jep (co-op), coop-floorjoin2
+@@ -567,0 +625,5
++            if (baked) { // Jep (co-op), coop-floorjoin2: the load again, for the rebuild after a snapshot
++                RecordBakedSource(static_cast<int>(tex - manager.textures), kTextureMadeBaked, name, *document, entry_index,
++                                  static_cast<unsigned>(width), static_cast<unsigned>(height), bpp, clut,
++                                  clut == nullptr ? 0 : static_cast<std::size_t>(clut_bytes));
++            }
+@@ -586,0 +649,1
++        g_port_texture_source[tex - manager.textures].made = kTextureMadePlaceholder; // Jep (co-op), coop-floorjoin2
+@@ -639,0 +703,1
++    std::memset(g_port_texture_source, 0, sizeof g_port_texture_source); // Jep (co-op), coop-floorjoin2
+@@ -782,0 +847,1
++    g_port_texture_source[tex - manager.textures].made = kTextureMadeOther; // Jep (co-op), coop-floorjoin2: from its pixels
+@@ -794,0 +860,5
++    // Jep (co-op), coop-floorjoin2: the pixels on record, as a staged texture's are, so a rebuild after a snapshot can make it again.
++    tex->image[0] = reinterpret_cast<u_int *>(image);
++    tex->clut = reinterpret_cast<u_int *>(clut);
++    tex->swizzled = 0;
++    g_port_texture_swizzled[tex - manager.textures] = 0;
+@@ -841,0 +912,293
++    // Jep (co-op), coop-floorjoin2: the load again, for the rebuild after a snapshot.
++    RecordBakedSource(static_cast<int>(tex - textures), kTextureMadeBakedZ, name, *document, std::nullopt, 640, 0, -1, nullptr, 0);
++}
++
++namespace {
++
++void RecordBakedSource(int slot, PortTextureMade made, const char *name, const std::string &document,
++                       std::optional<unsigned> entry_index, unsigned width, unsigned height, int bpp, const u_char *clut,
++                       std::size_t clut_bytes) {
++    PortTextureSource &source = g_port_texture_source[slot];
++    if (document.size() >= sizeof source.document) {
++        StopBakedTexture(name, "baked document path too long for the co-op texture record: " + document);
++    }
++    if (clut != nullptr && clut_bytes > sizeof source.clut) {
++        StopBakedTexture(name, "palette too long for the co-op texture record");
++    }
++    source = PortTextureSource{};
++    source.made = made;
++    source.entry_index = entry_index ? static_cast<int32_t>(*entry_index) : -1;
++    source.width = width;
++    source.height = height;
++    source.bpp = bpp;
++    source.clut_bytes = clut != nullptr ? static_cast<int32_t>(clut_bytes) : 0;
++    std::memcpy(source.document, document.data(), document.size());
++    if (source.clut_bytes > 0) {
++        std::memcpy(source.clut, clut, clut_bytes);
++    }
++}
++
++} // namespace
++
++// Jep (co-op), coop-floorjoin2 (texture.hpp): the registry re-keyed to the table after a snapshot apply.
++void PortTextureRebuildBefore() {
++    for (int i = 0; i < 196; i++) {
++        const CTexture  &tex = TexManager.textures[i];
++        SlotBefore      &before = g_slots_before[i];
++        const sceGsTex0 &tex0 = *reinterpret_cast<const sceGsTex0 *>(&tex.tex0);
++        std::memcpy(before.name, tex.name, sizeof before.name);
++        before.tbp = tex0.TBP0;
++        before.cbp = tex0.CBP;
++        before.width = tex.width;
++        before.height = tex.height;
++        before.bpp = tex.bpp;
++    }
++}
++
++PortTextureRebuildReport PortTextureRebuildAfterApply() {
++    CTextureManager         &manager = TexManager;
++    PortTextureRebuildReport report;
++    bool                     moved[196] = {};
++
++    // Whose pixels a slot's image pointers are: a block texture's sit in game memory, staged in the manager's own buffer
++    // (TextureData) or, extended, in the caller's data (a floor's map), both in the state set, so the host's bytes are here
++    // now; a fixed texture's (block -1) and the Z sheet's (block 73) point at a load buffer long reused since (the first
++    // run of x-floor-join -Case late decoded the HUD's digit sheet from such a pointer: noise; its second, moving the
++    // floor's textures by name instead of decoding them, drew the floor black).
++    // coop-snapjoin: and only pixels the state set carried: in an arena block or in the image's globals. A town's or a
++    // building's texture may point at a heap buffer of the host's (a load buffer of the port's), which this copy has
++    // not: decoding from it read 0x558e0190 and faulted (o-opening-resync -Step house-during, 2026-10-25); such a
++    // texture moves by name as the boot sheets do (this copy loaded the same zone), else gets a placeholder.
++    // coop-provenance (cause: pointer provenance; LAN playtest 2026-10-30, item 37b, her crash in the apply): "in the image's globals"
++    // was "within 1 GB of the manager", and a host heap buffer 720 MB from it (Xiao's slingshot's palette) passed; decoding it
++    // faulted. Now the state set's own ranges: an arena block or a global of the snapregions. DC_NETPLAY_MUTATE=carried_near
++    // (twin): the 1 GB guess, as before.
++    static const bool near_guess = NetplayMutated("carried_near");
++    auto              carried = [&](const void *pixels) {
++        const auto at = reinterpret_cast<std::uintptr_t>(pixels);
++        const auto image = reinterpret_cast<std::uintptr_t>(&manager);
++        return near_guess ? ArenaContains(pixels) || (at > image ? at - image : image - at) < (std::uintptr_t{1} << 30)
++                          : SnapshotStateHolds(pixels);
++    };
++    // repin (9418a550): a block texture made from its baked document (or entered without pixels) is made again from its
++    // record (g_port_texture_source, in the state set) in step 3, as a fresh load makes it; only a texture the source decoder
++    // made from its pixels decodes from the pixels the table points at.
++    auto made = [&](int slot) { return g_port_texture_source[slot].made; };
++    auto staged = [&](const CTexture &tex) {
++        const int slot = static_cast<int>(&tex - manager.textures);
++        if (made(slot) != kTextureMadeOther) {
++            return tex.block >= 0 && tex.block < 72;
++        }
++        return tex.block >= 0 && tex.block < 72 && tex.image[0] != nullptr && carried(tex.image[0]) &&
++               (tex.clut == nullptr || carried(tex.clut));
++    };
++
++    static const bool        in_order = NetplayMutated("rekey_in_order");
++    std::vector<PortKeyMove> key_moves;
++
++    // coop-pt1108f: DC_COOP_TEST_REKEY_PLANT=1 (x-fixture-join -Case pictures, test_pictures_after_join): this copy's keys put so a
++    // move's target falls on a sheet still to move, as they came out on Jep's and the friend's PCs (the friend skipped the logos):
++    // "stayframe"'s palette (her menu's frame) where the table puts a sheet that moves before it. repin: the sheet is found by the
++    // table's slot order (the moves below go in that order), not by name: on Chronicle 9418a550's table "mes_frame_buff" no longer
++    // came before "stayframe", nothing collided, and the rekey_in_order twin passed blind.
++    if (std::getenv("DC_COOP_TEST_REKEY_PLANT") != nullptr) {
++        SlotBefore *stay = nullptr;
++        int         stay_slot = -1;
++        for (int i = 0; i < 196; i++) {
++            if (std::strcmp(g_slots_before[i].name, "stayframe") == 0) {
++                stay = &g_slots_before[i];
++            }
++            if (std::strcmp(manager.textures[i].name, "stayframe") == 0) {
++                stay_slot = i;
++            }
++        }
++        unsigned    onto = 0;
++        const char *first = nullptr;
++        for (int i = 0; i < stay_slot && onto == 0; i++) {
++            const CTexture &tex = manager.textures[i];
++            if (tex.name[0] == 0 || staged(tex) || (i == 0 && std::strcmp(tex.name, "work") == 0)) { // (as the moves below skip them)
++                continue;
++            }
++            const sceGsTex0 &tex0 = *reinterpret_cast<const sceGsTex0 *>(&tex.tex0);
++            for (int j = 0; j < 196; j++) {
++                const SlotBefore &before = g_slots_before[j];
++                if (&before != stay && before.tbp != 0 && std::strncmp(before.name, tex.name, sizeof before.name) == 0 && before.width == tex.width &&
++                    before.height == tex.height && before.bpp == tex.bpp && PortKeyLive(before.tbp) && tex0.TBP0 != before.tbp) {
++                    onto = tex0.TBP0;
++                    first = tex.name;
++                    break;
++                }
++            }
++        }
++        if (stay != nullptr && stay->cbp != 0 && onto != 0 && PortMoveKeys(stay->tbp, stay->tbp, stay->cbp, onto)) {
++            std::fprintf(stderr, "texture: test: this copy's stayframe palette at key %u, where \"%s\" (slot before it) moves first\n", onto, first);
++            stay->cbp = onto;
++        } else {
++            std::fprintf(stderr, "texture: test: no stayframe plant (stayframe slot %d, a sheet before it moving %s)\n", stay_slot, onto != 0 ? "yes" : "no");
++        }
++    }
++    // 1. Textures whose pixels are not the manager's (the title's and the menus' sheets, loaded at boot alike on both
++    //    copies): this copy's own entry of the same name, size and depth moves to the key the table holds now.
++    for (int i = 0; i < 196; i++) {
++        CTexture &tex = manager.textures[i];
++        if (tex.name[0] == 0 || staged(tex) || (i == 0 && std::strcmp(tex.name, "work") == 0)) {
++            continue;
++        }
++        // coop-provenance: a block texture left out for pixels the state set did not carry, said (the tests' line).
++        if (tex.block >= 0 && tex.block < 72 && tex.image[0] != nullptr && made(i) == kTextureMadeOther) {
++            std::fprintf(stderr, "texture: slot %d \"%s\": %s not carried by the state set: moved by name or a placeholder\n", i, tex.name,
++                         !carried(tex.image[0]) ? "image" : "palette");
++        }
++        const sceGsTex0 &tex0 = *reinterpret_cast<const sceGsTex0 *>(&tex.tex0);
++        for (int j = 0; j < 196 && !moved[i]; j++) {
++            const SlotBefore &before = g_slots_before[j];
++            if (before.tbp != 0 && std::strncmp(before.name, tex.name, sizeof before.name) == 0 && before.width == tex.width &&
++                before.height == tex.height && before.bpp == tex.bpp && PortKeyLive(before.tbp)) {
++                // coop-pt1108f: DC_NETPLAY_MUTATE=rekey_in_order (twin): one at a time, as before: a move evicts a sheet still to move.
++                if (std::getenv("DC_COOP_TEXLOG") != nullptr) { // (diagnostic: each boot sheet's move)
++                    std::fprintf(stderr, "texlog: move \"%s\" slot %d: key %u to %u, palette %u to %u\n", tex.name, i, before.tbp, (unsigned) tex0.TBP0, before.cbp, (unsigned) tex0.CBP);
++                }
++                const bool can = in_order ? PortMoveKeys(before.tbp, tex0.TBP0, before.cbp, tex0.CBP) : PortCanMoveKeys(before.tbp, tex0.TBP0, before.cbp, tex0.CBP);
++                if (can) {
++                    if (!in_order) {
++                        key_moves.push_back({before.tbp, tex0.TBP0, before.cbp, tex0.CBP});
++                    }
++                    moved[i] = true;
++                    g_slots_before[j].name[0] = 0; // taken: nothing of it to release below
++                    report.moved++;
++                }
++            }
++        }
++    }
++    PortMoveKeysTogether(key_moves);
++
++    // 2. The rest of this copy's manager entries name textures the table no longer holds: gone, except where a moved entry
++    //    now sits at one of their keys (the table's keys are its own).
++    auto held_by_moved = [&](unsigned key) {
++        for (int i = 0; i < 196; i++) {
++            const sceGsTex0 &tex0 = *reinterpret_cast<const sceGsTex0 *>(&manager.textures[i].tex0);
++            if (moved[i] && (tex0.TBP0 == key || tex0.CBP == key)) {
++                return true;
++            }
++        }
++        return false;
++    };
++    for (int j = 0; j < 196; j++) {
++        const SlotBefore &before = g_slots_before[j];
++        if (before.name[0] == 0) {
++            continue;
++        }
++        if (before.tbp != 0 && !held_by_moved(before.tbp)) {
++            PortReleaseKey(before.tbp);
++        }
++        if (before.cbp != 0 && !held_by_moved(before.cbp)) {
++            PortReleaseKey(before.cbp);
++        }
++    }
++
++    // 3. Every staged or extended texture again, at the table's keys, from the pixels the table points at (in the state
++    //    set with the table); placeholders and the water's "work" target as Initialize and Enter make them.
++    //    repin (9418a550): first every indexed baked slot's palette remembered by its name, as Enter did before its load: a
++    //    baked document picks a palette variant by another texture's remembered palette (PortRememberTextureClut).
++    for (int i = 0; i < 196; i++) {
++        const PortTextureSource &source = g_port_texture_source[i];
++        if (manager.textures[i].name[0] != 0 && source.made == kTextureMadeBaked && source.clut_bytes > 0) {
++            PortRememberTextureClut(manager.textures[i].name, source.clut, static_cast<std::size_t>(source.clut_bytes));
++        }
++    }
++    for (int i = 0; i < 196; i++) {
++        CTexture &tex = manager.textures[i];
++        if (tex.name[0] == 0 || moved[i]) {
++            continue;
++        }
++        const sceGsTex0 &tex0 = *reinterpret_cast<const sceGsTex0 *>(&tex.tex0);
++        const unsigned   tbp = tex0.TBP0;
++        const unsigned   cbp = tex0.CBP;
++        if (i == 0 && std::strcmp(tex.name, "work") == 0) {
++            if (PortRegisterNamedTargetAt(tbp, "work", 640, SCREEN_HALF_HEIGHT, true, PortTextureOwner::Manager)) {
++                report.targets++;
++            } else {
++                report.skipped++;
++            }
++            continue;
++        }
++        // The baked ones (every block's, and a boot sheet or the Z sheet this copy had no entry of to move) and the ones
++        // entered without pixels, from the record, as Enter and EnterFixTextureZ made them.
++        if (const PortTextureSource &source = g_port_texture_source[i]; source.made == kTextureMadePlaceholder) {
++            if (PortCreatePlaceholderAt(tbp, cbp, tex.name, tex.width, tex.height, tex.bpp, PortTextureOwner::Manager)) {
++                report.targets++;
++            } else {
++                report.skipped++;
++            }
++            continue;
++        } else if (source.made == kTextureMadeBaked || source.made == kTextureMadeBakedZ) {
++            const std::string_view        document(source.document, strnlen(source.document, sizeof source.document));
++            const std::optional<unsigned> entry_index =
++                source.entry_index >= 0 ? std::optional<unsigned>(static_cast<unsigned>(source.entry_index)) : std::nullopt;
+~549 a05cf3b4dd6d001a|            |
+~821 43f16f55eceafa2a|            |
++            if (!PortLoadBakedTexture(document, tex.name, 0, source.width, source.height, 0,
++                                      source.clut_bytes > 0 ? source.clut : nullptr, static_cast<std::size_t>(source.clut_bytes),
++                                      decoded, error, entry_index, source.bpp)) {
++                StopBakedTexture(tex.name, "co-op rebuild after a state set: " + error); // (Enter stops on the same failure)
++            }
++            LocalizeTexture(tex.name, decoded);
++            caption::PreparePainted(tex.name, decoded);
++            if (source.made == kTextureMadeBaked) {
++                MakeGroundPeriodic(tex.name, decoded); // (EnterFixTextureZ does not)
++            }
++            if (PortCreateTextureAt(tbp, cbp, decoded, PortTextureOwner::Manager)) {
++                report.images++;
++            } else {
++                report.skipped++;
++            }
++            continue;
++        }
++        if (!staged(tex)) {
++            // BANDAID: a texture the source decoder made from pixels the state set did not carry (a sender's heap buffer:
++            // legacy data without baked documents, or a canvas or unsourced runtime image), with no entry of its name on this
++            // copy to move. Its picture exists only on the sender, so this copy cannot make it: a placeholder of its size (as
++            // Enter makes for a texture entered without pixels), so the draws that reach it find an image rather than nothing.
++            // The root fix carries those pixels in the state set (or sends them).
++            // coop-pt1108f: named in the log: a blank sheet here is a menu or a name box with no picture on this copy alone.
++            std::fprintf(stderr, "texture: slot %d \"%s\" (block %d) is a placeholder on this copy after the state set (BANDAID: pixels not carried)\n", i,
++                         tex.name, (int) tex.block);
++            if (PortCreatePlaceholderAt(tbp, cbp, tex.name, tex.width, tex.height, tex.bpp, PortTextureOwner::Manager)) {
++                report.targets++;
++            } else {
++                report.skipped++;
++            }
++            continue;
++        }
++        // coop-clutcrash (train 50: carried_near crashed with 0xC0000005, and a crash is no catch): the twin's 1 GB guess took
++        // pixels the state set did not carry. Its wrong call is the result, said; the read of the host's address it would make
++        // next is not (unmapped here, it faulted before any check ran). A placeholder, and the run goes on to its checks.
++        if (near_guess && (!SnapshotStateHolds(tex.image[0]) || (tex.clut != nullptr && !SnapshotStateHolds(tex.clut)))) {
++            std::fprintf(stderr, "texture: slot %d \"%s\": %s taken as carried by the 1 GB guess (carried_near): not decoded from the host's address\n", i,
++                         tex.name, !SnapshotStateHolds(tex.image[0]) ? "image" : "palette");
++            if (PortCreatePlaceholderAt(tbp, cbp, tex.name, tex.width, tex.height, tex.bpp, PortTextureOwner::Manager)) {
++                report.targets++;
++            } else {
++                report.skipped++;
++            }
++            continue;
++        }
++        const bool         indexed = tex.bpp < 2;
++        const u_char      *levels[3] = {(const u_char *) tex.image[0], (const u_char *) tex.image[1], (const u_char *) tex.image[2]};
+~549 a05cf3b4dd6d001a|        |
++        if (!PortDecodeTexture(tex.bpp, tex.width, tex.height, levels, tex.image[1] != nullptr ? 3 : 1, (const u_char *) tex.clut,
++                               tex.bpp == 0 ? 16 : 256, indexed && g_port_texture_swizzled[i] != 0, decoded)) {
++            report.skipped++;
++            continue;
++        }
++        LocalizeTexture(tex.name, decoded); // (as Enter now: upstream dropped the texture assets, aa983e72)
++        caption::PreparePainted(tex.name, decoded);
++        MakeGroundPeriodic(tex.name, decoded);
++        if (PortCreateTextureAt(tbp, cbp, decoded, PortTextureOwner::Manager)) {
++            report.images++;
++            report.palettes += indexed ? 1 : 0;
++        } else {
++            report.skipped++;
++        }
++    }
++    return report;
+@@ -915,1 +1278,1
+- a651cb46efbc7041
++    if (!TextureBlockValid(block)) { // Jep (co-op), coop-pt1108f
+@@ -924,1 +1287,1
+- c4a1f432f37842e1
++    if (!TextureBlockValid(block)) { // Jep (co-op), coop-pt1108f
+@@ -946,1 +1309,1
+- a651cb46efbc7041
++    if (!TextureBlockValid(block)) { // Jep (co-op), coop-pt1108f
+@@ -961,1 +1324,1
+- b8457ad22b34988d
++    if (block >= 0 && !TextureBlockValid(block)) { // Jep (co-op), coop-pt1108f
+@@ -969,0 +1333,1
++    static const bool texdup = std::getenv("DC_COOP_TEXDUP") != nullptr; // Jep (co-op), coop-texdup
+@@ -971,0 +1336,3
++            if (texdup && texture.name[0] != 0) {
++                std::fprintf(stderr, "coop-texdup: delete block %d frees slot %d %s\n", block, (int) (&texture - textures), texture.name);
++            }
+@@ -973,0 +1341,1
++            g_port_texture_source[&texture - textures].made = kTextureMadeOther; // Jep (co-op), coop-floorjoin2

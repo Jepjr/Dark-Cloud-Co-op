@@ -1,0 +1,82 @@
+# port/src/localize/localize_texture.cpp from Chronicle's port/src/localize/localize_texture.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/localize/localize_texture.cpp
+base port/src/localize/localize_texture.cpp
+from f97d61e3bc8e3217d44947e7f5196b44616004ce
+to bdb4d6db06143c69746cf2281bfde3ea9093e9ae
+@@ -5,0 +6,1
++#include <cstdlib> // Jep (co-op)
+@@ -6,0 +8,1
++#include <map> // Jep (co-op): LocalizeTextureKept
+@@ -10,0 +13,1
++#include <string_view>
+@@ -13,0 +17,1
++#include "platform/paths.hpp" // Jep (co-op): DC_DUMP_TEXTURE
+@@ -200,0 +205,38
++// Jep (co-op): LocalizeTextureKept's pictures.
++namespace {
++struct Kept {
+=211 c51116669a75e0cf
++    unsigned             width = 0, height = 0;
++};
++std::map<std::string, Kept> g_kept;
++
++void Keep(const char *name, const PortDecodedTexture &texture) {
++    const unsigned w = texture.width, h = texture.height;
++    std::vector<uint8_t> &g_kept_start3 = g_kept[name].rgba;
++
++    g_kept_start3.assign((std::size_t) w * h * 4, 0);
++    for (std::size_t i = 0; i < (std::size_t) w * h; i++) {
++        if (texture.format == gfx::TextureFormat::Index8 && i < texture.levels[0].size()) {
++            const uint32_t colour = texture.palette[texture.levels[0][i]];
++            for (int c = 0; c < 4; c++) {
++                g_kept_start3[i * 4 + c] = (colour >> (8 * c)) & 0xFF;
++            }
++        } else if (i * 4 + 3 < texture.levels[0].size()) {
++            std::copy_n(texture.levels[0].begin() + (std::ptrdiff_t) (i * 4), 4, g_kept_start3.begin() + (std::ptrdiff_t) (i * 4));
++        }
++    }
++    g_kept[name].width = w;
++    g_kept[name].height = h;
++}
++} // namespace
++
++const std::vector<uint8_t> *LocalizeTextureKept(std::string_view name, unsigned &width, unsigned &height) {
++    auto found = g_kept.find(std::string(name));
++    if (found == g_kept.end() || found->second.rgba.empty()) {
++        return nullptr;
++    }
++    width = found->second.width;
++    height = found->second.height;
++    return &found->second.rgba;
++}
++
+@@ -201,0 +244,29
++    // Jep (co-op): the title menu's picture of its words (start3), kept as RGBA for the Multi-player rows, which cut their
++    // letters from it (title/title_mpmenu.cpp, LocalizeTextureKept).
++    if (name != nullptr && (std::string_view(name) == "start3") && !texture.levels.empty()) {
++        Keep(name, texture);
++    }
++    // coop: test hook DC_DUMP_TEXTURE=name (or * for every named one): that texture's texels as raw RGBA (straight alpha) to <save>/texdump-<name>-<w>x<h>.rgba,
++    // for building pictures that match it (the title's Multi-player words, title_mpmenu.cpp).
++    if (const char *dump = std::getenv("DC_DUMP_TEXTURE"); dump != nullptr && name != nullptr && (std::string_view(dump) == name || std::string_view(dump) == "*") &&
++                                                          !texture.levels.empty()) {
++        const unsigned       w = texture.width, h = texture.height;
++        std::vector<uint8_t> rgba((std::size_t) w * h * 4);
++        for (std::size_t i = 0; i < (std::size_t) w * h; i++) {
++            if (texture.format == gfx::TextureFormat::Index8 && i < texture.levels[0].size()) {
++                const uint32_t colour = texture.palette[texture.levels[0][i]];
++                rgba[i * 4] = colour & 0xFF;
++                rgba[i * 4 + 1] = (colour >> 8) & 0xFF;
++                rgba[i * 4 + 2] = (colour >> 16) & 0xFF;
++                rgba[i * 4 + 3] = (colour >> 24) & 0xFF;
++            } else if (i * 4 + 3 < texture.levels[0].size()) {
++                std::copy_n(texture.levels[0].begin() + (std::ptrdiff_t) (i * 4), 4, rgba.begin() + (std::ptrdiff_t) (i * 4));
++            }
++        }
++        const fs::path out = PathsSaveRoot() / ("texdump-" + std::string(name) + "-" + std::to_string(w) + "x" + std::to_string(h) + ".rgba");
++        if (std::FILE *file = std::fopen(out.string().c_str(), "wb")) {
++            std::fwrite(rgba.data(), 1, rgba.size(), file);
++            std::fclose(file);
++            std::fprintf(stderr, "localize: dumped %s (%ux%u, format %d) to %s\n", name, w, h, (int) texture.format, out.string().c_str());
++        }
++    }

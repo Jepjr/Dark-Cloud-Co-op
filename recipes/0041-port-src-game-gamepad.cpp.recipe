@@ -1,0 +1,124 @@
+# port/src/game/gamepad.cpp from Chronicle's port/src/game/gamepad.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/gamepad.cpp
+base port/src/game/gamepad.cpp
+from 645cd41ab90d09f4d82779477527a787e48e5bb0
+to f8018c05a70c5e914102d26453e236ea3abad4fb
+@@ -9,0 +10,7
++#include "coop/copies.hpp"         // Jep (co-op)
++#include "coop/coop_georama.hpp"   // coop: georama
++#include "coop/coop_menu.hpp"      // coop-menus
++#include "coop/coop_perf.hpp"      // coop: perf
++#include "coop/coop_rumble.hpp"    // coop-rumble
++#include "coop/coop_worlds.hpp"    // coop-worlds
++#include "coop/netplay.hpp"
+@@ -107,0 +115,8
++// Jep (co-op), coop: georama: the debug buttons stay player 1's while player 2 has the Georama editor on pad 0.
++bool DebugPad() {
++    return DebugMode && !CoopGeoramaPartnerHolds();
++}
++
++// PadUpdateFrom's pad for port 0 while it runs (none: the real read).
++const InputPadState *g_fed = nullptr;
++
+@@ -113,0 +129,7
++// Jep (co-op)
++void PadUpdateFrom(CGamePad &pad, const InputPadState &now) {
++    g_fed = &now;
++    pad.UpDate();
++    g_fed = nullptr;
++}
++
+@@ -114,0 +137,11
++    // Jep (co-op): a pad of a player's own (PadUpdateFrom): port 0 that player's agreed pad, port 1 none; nothing else runs.
++    if (g_fed != nullptr) {
++        const bool own = port == 0;
++
++        status->button = own ? g_fed->buttons & 0xffff : 0;
++        status->left_x = own ? g_fed->left_x : 0x80;
++        status->left_y = own ? g_fed->left_y : 0x80;
++        status->right_x = own ? g_fed->right_x : 0x80;
++        status->right_y = own ? g_fed->right_y : 0x80;
++        return 7;
++    }
+@@ -115,0 +149,1
++    CopiesApplyWindow();
+@@ -122,1 +156,29
+- 8fa37e697949e8e6
++    // Linked copies (game.netplay) read the pads both copies agreed on for this tick.
+=117 baea0744b6d10c6c
++        CoopPerfNetplayTick(); // coop: perf: NetplayTick, timed
++        CoopGeoramaTick(); // coop: georama
++        coop::MenuTick();  // coop-menus: both players' overlays
++    }
++    // coop: georama: while player 2 builds, port 0 reads player 2's controller and port 1 none.
++    int source = CoopGeoramaSource(port);
++    // coop-worlds: while the town event player 2 started runs, port 0 is her pad and port 1 (her partner) stands.
++    if (source >= 0 && CoopWorldsP2Drives()) {
++        source = port == 0 ? 1 : -1;
++    }
++    if (source < 0) {
+=240 4685de707f181cca
++        status->right_x = status->right_y = status->left_x = status->left_y = 0x80;
++        return 7;
++    }
++    InputPadState linked;
++    if (NetplayPad(source, linked)) {
++        status->button = linked.buttons & 0xffff & ~CoopGeoramaHeld(port); // coop: georama
++        status->right_x = linked.right_x;
++        status->right_y = linked.right_y;
++        status->left_x = linked.left_x;
++        status->left_y = linked.left_y;
++        coop::MenuFilterPort(port, status); // coop-menus
++        return 7;
++    }
++    // A copy bound to one controller (input.controller) reads that controller's pad.
++    if (!scePadRead(CopiesPadSource(source), slot, data.get())) { // coop: georama (source)
+@@ -128,1 +190,1
+- ee7e9d1558125c8f
++        status->button = button & 0xffff & ~CoopGeoramaHeld(port); // coop: georama
+@@ -134,0 +197,1
++    coop::MenuFilterPort(port, status); // coop-menus
+@@ -141,0 +205,13
++    // Jep (co-op): retail walks each port through a query and set-up sequence and reads buttons only once the port
++    // reports a stable controller. Whether a port has a controller is each PC's own business, so two linked copies
++    // would step that sequence apart and feed the game different pads. While linked each port is always ready and
++    // reads the pad every copy agreed on: pad_button_read latches this tick's input, exchanges it (port 0) and fills
++    // in the agreed pad (port/src/coop/netplay.cpp).
++    if (NetplayOwnsPads() && port >= 0 && port <= 1) {
++        state = scePadStateStable;
+~170 49c6f1fd5f13332e|        |
+~222 7463d38228af72fb|        |
+~232 28bceac2eae35bd5|        |
++        return 0;
++    }
++
+@@ -349,1 +425,3
+- 4f8c86fa362cea5a
++    // Jep (co-op), coop-rumble: the send goes to this copy's player's controller, not always the first, with the
++    // partner's hits' own motors (coop/coop_rumble.hpp).
++    CoopRumbleSend(pad[0].input.status.vibration, vibration_enabled);
+@@ -505,1 +583,2
+- 020dcf27d04416e0
++    // Jep (co-op), coop: georama: DebugPad.
++    return DebugPad() && (pad[0].input.status.button & kDebugButtonsModifier) == kDebugButtonsModifier && On(mask);
+@@ -532,1 +611,2
+- e94659948c6ad90b
++    // Jep (co-op), coop: georama: DebugPad.
++    if (DebugPad() && (pad[0].input.status.button & kDebugButtonsModifier) == kDebugButtonsModifier) {
+@@ -536,1 +616,1
+- 6bc810c4048c7768
++    if ((mask & PAD_R3) && DebugPad() && g_debug_menu_pressed) {
+@@ -540,1 +620,1
+- d2b7cc52ad50df79
++    if ((mask & (PAD_L3 | PAD_R3)) && (!DebugPad() || (pad[0].input.status.button & kDebugButtonsModifier) != kDebugButtonsModifier)) {
+@@ -548,1 +628,1
+- d536a66082050dc0
++    if (key_lock || !DebugPad() || (pad[0].input.status.button & kDebugButtonsModifier) != kDebugButtonsModifier) {
+@@ -558,0 +639,7
++// Jep (co-op): GamePad.axis_threshold[0] (private; at 0x454: pad[2], previous_pad[2], unk_130[5], repeat[2]). A copy
++// of the pad assigned back (coop_fullmenu's world step) brings its menu mode back too, so this reads the pad itself.
++int PadMenuThreshold() {
++    static_assert(sizeof(CGamePad) == 0x468 && sizeof(PAD_REPEAT) == 0x188);
++    return reinterpret_cast<const int *>(reinterpret_cast<const char *>(&GamePad) + 0x454)[0];
++}
++

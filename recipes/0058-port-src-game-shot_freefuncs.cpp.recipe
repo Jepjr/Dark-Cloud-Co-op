@@ -1,0 +1,87 @@
+# port/src/game/shot_freefuncs.cpp from Chronicle's port/src/game/shot_freefuncs.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/shot_freefuncs.cpp
+base port/src/game/shot_freefuncs.cpp
+from 73f3aac271118b970e0fe2988791a9926669f7eb
+to 1deca47c5e569f84b53fc81083f425f4468129ef
+@@ -33,0 +34,1
++#include "coop/coop_inventory.hpp" // coop-inventory
+@@ -49,0 +51,13
++// Jep (co-op): these two have external linkage: coop/coop_interact.cpp reads the floor's map name and
++// coop/netplay.cpp keeps both copies' poison clocks alike.
++
++/**
+=73 cd8e8583e8ff7fdf
++ */
+=75 24ef73e737044fbe
++
++/**
+=109 5b967a815e504f6a
++ */
+=111 4907d9a8ae174d9e
++
+@@ -72,5 +85,0
+- 8d64a30d9de151b6
+- cd8e8583e8ff7fdf
+- 533a9f1155720e5e
+- 24ef73e737044fbe
+- e3b0c44298fc1c14
+@@ -108,5 +116,0
+- 8d64a30d9de151b6
+- 5b967a815e504f6a
+- 533a9f1155720e5e
+- 4907d9a8ae174d9e
+- e3b0c44298fc1c14
+@@ -361,42 +365,1
+- be85091f4db36637
+- db35d2dc437590ce
+- 040cf71419fea68c
+- a76f2135c144b653
+- 007ee8f8f5327969
+- e4247e8f78389c7c
+- e3b0c44298fc1c14
+- 7d78d086876520f7
+- e3b0c44298fc1c14
+- 918472f818c5f802
+- 6a057ea49cd58454
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- df7535d5dd149578
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 1365534a2ee8e787
+- 84f71d8960b8742b
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- cd4f33d42159d5e7
+- 6a0af1fe96513bcc
+- e3b0c44298fc1c14
+- f5a3a6bc588efe28
+- fc6b3bc60d0dce4a
+- e3b0c44298fc1c14
+- e7a8769efdce1ba8
+- 6dcc7823bc1774e6
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- fef59d229c05467b
+- 4df11da7316e9f7d
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- fae4980d03060ac3
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 09d0d6175f96b909
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.
+@@ -626,0 +590,5
++    // coop: the other player's bar is this one's life, weapon and water rows alone (coop_hud.cpp).
++    if (coop::StatusBarsOnly()) {
++        return;
++    }
++
+@@ -641,1 +609,2
+- b187832227c5d0cb
++    // coop-inventory: player 2's own window shows player 2's quick-use slots and selection.
++    ITEM_PACK *pack = coop::CoopTopSlots(&UserStatus->item_pack, &selected_item);

@@ -1,0 +1,11 @@
+# port/src/game/visualshadow.cpp from Chronicle's port/src/game/visualshadow.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/visualshadow.cpp
+base port/src/game/visualshadow.cpp
+from 2f4077391a19e353f377a3af64f2861f0109d982
+to 4f09948157480ee8783aff44810776b0227c2124
+@@ -730,1 +730,1
+- 03e9486747321d2d
++    vu_data = vu_data_buffer[Draw3DModelBuffer()]; // Jep (co-op): the block CVisualMDTVu1 draws from
+@@ -861,1 +861,1
+- 2e63491e69955aab
++    return CreateVUdataShadow(vu_data_buffer[Draw3DModelBuffer()], data); // Jep (co-op): as CVisualMDTVu1

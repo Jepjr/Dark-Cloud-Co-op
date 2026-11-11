@@ -1,0 +1,44 @@
+# port/src/app/runtime.cpp from Chronicle's port/src/app/runtime.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/app/runtime.cpp
+base port/src/app/runtime.cpp
+from 156f5920e2cee184cf089d91f125a74c70feb48c
+to 4bfb70408cbaa11e7b5ef6c8d096082008b3492d
+@@ -1,0 +2,1
++#include <cstdint>
+@@ -48,0 +50,2
++static bool RandTrace();
++
+@@ -52,0 +56,28
++namespace dc::game { // repin: coop declares these in dc::game
++
++// The generator's state, which the co-op link's checksum compares between two copies.
++unsigned int PortRandState() {
+=39 913864f95d478ec1
++}
++
++// coop: cameras
++// Puts the state back: independent co-op cameras keep drawing's calls (CFireOmni's reseeding among
++// them), which differ with what each copy shows, out of the state the game steps with.
++void PortRandSetState(unsigned int state) {
++    if (RandTrace() && state != g_rand_state) {
++        std::fprintf(stderr, "rand set %08x\n", state);
++    }
++
++    g_rand_state = state;
++}
++
++} // namespace dc::game
++
++// DC_RAND_TRACE=1 (debugging a desync): every call's caller, as an offset from rand itself (the same in two copies
++// of one build), and every put-back of the state, on stderr; two copies' traces diff to the first call that differs.
++static bool RandTrace() {
++    static const bool on = std::getenv("DC_RAND_TRACE") != nullptr;
++
++    return on;
++}
++
+@@ -53,0 +85,4
++    if (RandTrace()) {
++        std::fprintf(stderr, "rand %llx\n", (unsigned long long) ((std::uintptr_t) __builtin_return_address(0) - (std::uintptr_t) &rand));
++    }
++

@@ -1,0 +1,68 @@
+# port/src/game/menu_misc.cpp from Chronicle's port/src/game/menu_misc.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_misc.cpp
+base port/src/game/menu_misc.cpp
+from 6f58f09f529da2bd042a07087d0f3cc57c8ebe64
+to 157a86ab2b0baffec6e791ed9b73b223411f8609
+@@ -49,0 +50,2
++#include "coop/coop_prompt.hpp"   // Jep (co-op), coop-party
++#include "coop/coop_fullmenu.hpp" // coop-invcrash
+@@ -56,2 +57,0
+- 54a9260f25582e84
+- e3b0c44298fc1c14
+@@ -59,0 +60,2
++// Jep (co-op): this and the menu globals below are out of the anonymous namespace: coop_fullmenu.cpp keeps them per
++// menu (a second player's menu engine), coop_lockhud.cpp CharaNameMes.
+@@ -62,6 +63,0
+- ce5ce811abb37f22
+- e3b0c44298fc1c14
+- 71cb30e196222ce9
+- b4040010e8e51040
+- 0988d1881aa0d2b4
+- e3b0c44298fc1c14
+@@ -82,1 +77,0
+- 214aab1099decd7d
+@@ -84,0 +80,10
++
++namespace {
++
+=62 ce5ce811abb37f22
++
+=64 71cb30e196222ce9
+=65 b4040010e8e51040
+=66 0988d1881aa0d2b4
++
+=82 214aab1099decd7d
+@@ -647,0 +653,7
++// Jep (co-op), coop-invcrash: the weapons' .chr addresses (in the menu's own read buffer), which coop_fullmenu keeps per
++// menu with MenuWeaponModelData and the menu's other globals: one menu's weapon exit read the other's files (Jep's
++// 2026-10-27 crash).
++void MenuWeaponFileRegions(void (*add)(void *at, std::size_t size)) {
++    add(weapon_model_files.data(), sizeof weapon_model_files);
++}
++
+@@ -649,1 +661,1
+- d51363d6fb7be1c8
+=766 276f4dffd33e519c
+@@ -653,0 +666,6
++    // Jep (co-op), repin: retail clears twelve entries of the ten-entry table; its two extra land on MenuCharaOldAmbient, put
++    // there by name, not by the link's layout (on Chronicle 9418a550's link MonstorScriptBuffer follows the table: the
++    // weapons menu set the first monster script arena's pointers to -1; t-triangle-menu-herweapons-guard).
++    const int extra[4] = {-1, -1, -1, -1};
++    static_assert(sizeof extra == sizeof MenuCharaOldAmbient);
++    std::memcpy(MenuCharaOldAmbient, extra, sizeof extra);
+@@ -850,0 +869,7
++    coop::MenuWeaponBuildTrace(*first); // Jep (co-op), coop-invcrash
++
++    // coop-herweapon: player 2's page builds nothing into the world's player (her hand follows the save by itself).
++    if (!coop::MenuBuildsWorldWeapon(chara)) {
++        return 1;
++    }
++
+@@ -1133,0 +1159,7
++    // Jep (co-op), coop-party: the same-character rule and the menus player 2 holds (port/src/coop/coop_prompt.cpp,
++    // MenuCharaChange). Asked first, the co-op either lets the change go ahead or keeps the player's
++    // member (asking the partner to swap, or giving the change to the partner); then nothing loads.
++    if (coop::MenuCharaChange(charachangeid) < 0) {
++        return;
++    }
++

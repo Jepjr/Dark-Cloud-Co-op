@@ -1,0 +1,41 @@
+# port/src/main.cpp from Chronicle's port/src/main.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/main.cpp
+base port/src/main.cpp
+from 43dfe76a4fec03953fbf1ec52ff489711db1f538
+to 4088c8a28c989a83c4a9bc547459b891768aa1b4
+@@ -65,0 +66,5
++#include "coop/coop_boot.hpp"     // coop-boot
++#include "coop/coop_mouse.hpp"    // coop: mouse
++#include "coop/input_anchors.hpp" // coop-anchors
++#include "coop/netplay.hpp"       // coop: netplay (the pad hints)
++
+@@ -148,1 +153,2
+- b76c65807d1479d2
++                 "  --jump MODE[:MAP]  start in edit:<map>, e01/e03/e04 (populated presets), town:<0-4>,\n"
++                 "                     dungeon:<0-6>[:<floor>], title, rush, opening, menu or pick (the debug start picker),\n"
+@@ -358,1 +364,1
+- 73f5fdc6d2971619
++    InputScriptApply(NetplayTestInputFrame(GameFrameCount())); // coop: netplay (a test's presses from the link)
+@@ -380,1 +386,1
+- 84a50dc47014acb6
++    if (!CoopInputScriptLoad(PathsFromUtf8(path), script, error)) { // coop-anchors: @tick and @event lines
+@@ -383,0 +390,1
++    CoopBootKeepScript(script); // coop-boot: the script's keys are the keyboard's
+@@ -448,0 +456,1
++    CoopMouseApply(); // coop: mouse
+@@ -613,0 +622,1
++    CoopMouseBeforeInput(); // coop: mouse
+@@ -614,0 +624,1
++    CoopMouseApply(); // coop: mouse
+@@ -671,1 +681,6
+- 99819046e6524f53
++    // coop: DC_HEADLESS_PACED=1 (tests), the co-op harness's name for upstream's DC_HEADLESS_BOUNDED=1: a headless copy
++    // keeps the game's own pace, as one on screen does (netplay's catch-up joins, where the host plays in real time and
++    // the joiner must catch it up).
++    const char *paced = std::getenv("DC_HEADLESS_PACED");
++    ClockSetUnbounded(options.headless && (bounded_headless == nullptr || std::string_view(bounded_headless) != "1") &&
++                      !(paced != nullptr && paced[0] == '1'));
+@@ -690,0 +706,1
++    NetplayStopThreads(); // coop: netplay's own threads stopped and joined before the teardown below (coop-cand58)
+@@ -720,0 +737,1
++    NetplayPadHints(); // coop: netplay (before SDL starts)

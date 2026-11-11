@@ -1,0 +1,13 @@
+# port/src/render/draw2d.hpp from Chronicle's port/src/render/draw2d.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/draw2d.hpp
+base port/src/render/draw2d.hpp
+from 20f51ba55cbfa36f518e467fe41aaf54d78a29d7
+to 71d72ac072c1fb1ae5a6a88aa9dcee987498b4da
+@@ -99,1 +99,2
+- 48eba1d2dea38be0
++ * set2DSprite's turned sprite with its corners scale times as far from where the pivot lands, in the vertex colour red,
++ * green, blue (0x80 each: the texture as it is; coop: minimap, the players' arrows).
+@@ -102,1 +103,2
+- 190b0c1cbbf6e7db
++                  int pivot_x, int pivot_y, float angle, float scale, u_char red = 0x80, u_char green = 0x80,
++                  u_char blue = 0x80);

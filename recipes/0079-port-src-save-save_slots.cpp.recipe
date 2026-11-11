@@ -1,0 +1,12 @@
+# port/src/save/save_slots.cpp from Chronicle's port/src/save/save_slots.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/save/save_slots.cpp
+base port/src/save/save_slots.cpp
+from fece17fc29958d8e5621c8b3303481e7ed2d27fe
+to 801c9388c62b2c54de4e803f228e9c7bf44cb2ed
+@@ -2,0 +3,1
++#include "coop/netplay_slots.hpp" // coop: netplay
+@@ -25,0 +27,4
++    // coop: netplay: a linked joiner lists, loads and writes the host's slots, in a folder of its own.
++    if (fs::path linked = NetplaySlotsRoot(); !linked.empty()) {
++        return linked;
++    }

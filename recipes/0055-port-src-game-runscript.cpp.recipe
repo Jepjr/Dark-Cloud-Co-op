@@ -1,0 +1,299 @@
+# port/src/game/runscript.cpp from Chronicle's port/src/game/runscript.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/runscript.cpp
+base port/src/game/runscript.cpp
+from d20b1b1c151a85cdb3a276fc5812c6a955658aad
+to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
+@@ -5,0 +6,1
++#include <cstdlib>
+@@ -15,0 +17,1
++#include "platform/arena.hpp" // coop-snapshot: the VM's heap in a pinned arena
+@@ -54,0 +57,9
++// coop-snapshot (port/src/coop/snapshot_state.cpp): the VM's host-side state, each
++// interpreter's stacks and the decoded function records, lived on the C heap, where two copies of the game hold it at
++// different addresses; a snapshot taken on one copy then put the other's script objects onto memory that was not there
++// (the monsters' scripts run every floor tick). It now comes from one arena block of its own, pinned with the rest under
++// DC_FIXED_LAYOUT, so both copies hold it at one address and it goes with the arenas into every snapshot. Nothing is
++// ever given back: a stack grows at most a few times, a record is decoded once per place in a loaded file.
++constexpr std::size_t kVmArenaBytes = 48u << 20;
++int                   g_vm_arena_owner; // the block's owner (its address picks the pinned slot)
++
+@@ -56,4 +67,33
+- 33fc08f5b4df3327
+- 68b3a9a24d4e788e
+- 102477bdb0029cf4
+- 10589cd50a319323
++    RS_STACKDATA *stack = nullptr;
++    int           stack_num = 0;
++    RS_CALLDATA  *call = nullptr;
++    int           call_num = 0;
++};
++
++// coop-scenejoin: the VM's bookkeeping lives in its arena too, at the block's start: how much of it is used, which record
++// (by its address in the loaded file) was decoded where, and each interpreter's stacks. It was a global count and two C-heap
++// maps, which a state set did not carry: after another copy's set went in, this copy's maps still named its own places in
++// the arena, now the other's (a new record decoded there wrote over the other's stacks), and its count could hand out what
++// the other had in use. Both keys are places the two copies share (a loaded file in a pinned arena, a global interpreter),
++// so the tables mean the same on both. Open addressing, never removed from (records are rewritten in place, as before).
++constexpr std::uint64_t kVmMagic = 0x31564d5653435344ull; // "DSCSVMV1"
++constexpr std::size_t   kRecordSlots = 1u << 18;
++constexpr std::size_t   kStackSlots = 256;
++
++struct RecordSlot {
++    const char *key;
++    funcdata   *slot;
++};
++
++struct StackSlot {
++    const CRunScript *key;
++    HostStacks        host;
++};
++
++struct VmBook {
++    std::uint64_t magic;
++    std::size_t   used; // bytes of the arena given out, this book included
++    std::size_t   records;
++    std::size_t   stacks;
++    RecordSlot    record[kRecordSlots];
++    StackSlot     stack[kStackSlots];
+@@ -61,0 +102,26
++VmBook *Book() {
++    auto *book = reinterpret_cast<VmBook *>(ArenaBlock(&g_vm_arena_owner, kVmArenaBytes));
++    if (book->magic != kVmMagic) {
++        std::memset(book, 0, sizeof(VmBook));
++        book->magic = kVmMagic;
++        book->used = (sizeof(VmBook) + 63) & ~static_cast<std::size_t>(63);
++    }
++    return book;
++}
++
++std::size_t SlotOf(const void *key, std::size_t slots) {
++    return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(key) >> 3) * 0x9e3779b97f4a7c15ull >> 40) & (slots - 1);
++}
++
++void *VmAlloc(std::size_t bytes) {
++    VmBook *book = Book();
++    bytes = (bytes + 63) & ~static_cast<std::size_t>(63);
++    if (book->used + bytes > kVmArenaBytes) {
++        std::fprintf(stderr, "runscript: the script VM's arena is full (%zu + %zu of %zu bytes)\n", book->used, bytes, kVmArenaBytes);
++        std::abort();
++    }
++    void *out = reinterpret_cast<unsigned char *>(book) + book->used;
++    book->used += bytes;
++    return out;
++}
++
+@@ -64,3 +130,13
+- dc265a03bcb13050
+- d00e01c8ece0fb70
+- 86531b91b855f083
++funcdata *&RecordSlotFor(const char *record) {
++    VmBook     *book = Book();
++    std::size_t at = SlotOf(record, kRecordSlots);
++    for (; book->record[at].key != nullptr && book->record[at].key != record; at = (at + 1) & (kRecordSlots - 1)) {
++    }
++    if (book->record[at].key == nullptr) {
++        if (++book->records > kRecordSlots * 3 / 4) {
++            std::fprintf(stderr, "runscript: the script VM's record table is full (%zu records)\n", book->records);
++            std::abort();
++        }
++        book->record[at].key = record;
++    }
++    return book->record[at].slot;
+@@ -69,3 +145,13
+- 36515bd693a694a2
+- 113daea45cea957b
+- c8f863199817a0f0
++HostStacks &StacksFor(const CRunScript *script) {
++    VmBook     *book = Book();
++    std::size_t at = SlotOf(script, kStackSlots);
++    for (; book->stack[at].key != nullptr && book->stack[at].key != script; at = (at + 1) & (kStackSlots - 1)) {
++    }
++    if (book->stack[at].key == nullptr) {
++        if (++book->stacks > kStackSlots * 3 / 4) {
++            std::fprintf(stderr, "runscript: the script VM's interpreter table is full (%zu)\n", book->stacks);
++            std::abort();
++        }
++        book->stack[at].key = script;
++    }
++    return book->stack[at].host;
+@@ -79,3 +165,3
+- 3dde8a4846c877fe
+- 0781df50aa1048ea
+- 8887b7988ef17a13
++    funcdata *&slot = RecordSlotFor(record);
++    if (slot == nullptr) {
++        slot = static_cast<funcdata *>(VmAlloc(sizeof(funcdata)));
+@@ -87,1 +173,1
+- 5808923de2b56ac4
++    return slot;
+@@ -161,0 +248,9
++// coop-snapshot (port/src/coop/snapshot_state.cpp): the VM's state that lives on the C heap, each interpreter's
++// host-sized stacks and every decoded function record, so a snapshot taken and put back in one copy covers a script
++// under way. The blocks stay where they are while no script is loaded between the take and the restore.
++void RunScriptForEachHeapBlock(void (*visit)(void *start, std::size_t size, const char *name, void *context), void *context) {
++    // The VM's state lives in its arena now (VmAlloc), which ArenaForEach lists: no heap blocks of its own.
++    (void) visit;
++    (void) context;
++}
++
+@@ -169,0 +265,137
++int ScriptPrograms(const RS_PROG_HEADER *prog, int *nos, int max) {
+=343 2fde6a590e4e44e0
++        return 0;
++    }
++
++    const RS_PROGDATA *entry = reinterpret_cast<const RS_PROGDATA *>(reinterpret_cast<const char *>(prog) + prog->prog);
++
++    for (int i = 0; i < prog->prog_num && i < max; i++) {
++        nos[i] = entry[i].no;
++    }
++    return prog->prog_num;
++}
++
++int ScriptExtCalls(const RS_PROG_HEADER *prog, int no, int ext_id, int *firsts, int max) {
+=343 2fde6a590e4e44e0
++        return 0;
++    }
++
++    const char        *base = reinterpret_cast<const char *>(prog);
++    const char        *code = base + prog->code;
++    const RS_PROGDATA *entry = reinterpret_cast<const RS_PROGDATA *>(base + prog->prog);
+=120 46364bece5281a60
+=121 d22add618e6b4c06
++
+~386 14aad48613e1fb40|    |
++        if (entry[i].no == no) {
+~125 2ea793a882049d8b|            |
++        }
++    }
++
++    // Each function read straight through, as ItemGetRecord does, with a stack of what each slot holds: a
++    // constant integer or not (-1 and known false). Jumps are read past: arguments are pushed in straight
++    // lines, so the id and first argument an EXT takes are the slots it pops.
++    constexpr int kMostInstructions = 20000;
++    struct Slot {
++        bool known;
++        int  value;
++    };
++    int count = 0;
++
+=133 9654cc7833a9ac87
+=134 98ffbcc220bbb9e7
+=135 a388b501ce3ddc99
+=136 3a3de94fed2f3ec4
++            continue;
++        }
++        DiscFuncData disc;
+=140 89ecc441984c3e9f
+=141 9c11d5fc0d855e5b
++            continue;
++        }
++        std::vector<Slot> stack;
++        auto pop = [&](int n) { stack.resize(stack.size() > (size_t) n ? stack.size() - n : 0); };
++        auto push = [&](bool known, int value) { stack.push_back(Slot{known, value}); };
++        const vmcode_t *pc = reinterpret_cast<const vmcode_t *>(code + disc.addr);
++        for (int n = 0; n < kMostInstructions; n++, pc++) {
++            if (pc->op < RS_OP_LOAD || pc->op > RS_OP_COS) {
++                break;
++            }
+~440 27d62b0c0fc14fea|            |
+~441 0a404b15eee0e74b|                |
+~471 2a0ce92666b2b8fe|                |
++                    if (pc->arg2 & (RS_ADDR_LOCAL_INDEX | RS_ADDR_POINTER_INDEX | RS_ADDR_LOCAL_INDEX_FLOAT | RS_ADDR_POINTER_INDEX_FLOAT)) {
++                        pop(1);
++                    }
++                    push(false, 0);
++                    break;
+~495 eb3022948cb9ccc9|                |
++                    push(pc->arg1 == 1, pc->arg2);
++                    break;
+~507 a64d473cd34ce13c|                |
+~517 3bac7e27b8fa35a1|                |
+~528 e1e304bd9a80800a|                |
++                    pop(1);
++                    break;
+~490 7da43309bddac7c4|                |
+~609 f950aa146861eec4|                |
+~627 f49ba9ccbac8f5cb|                |
+~645 e611f9130643e98e|                |
+~663 83b163a7ab6262de|                |
+~688 6d32bacdb49c802e|                |
+~539 9f7c93b7c1407c25|                |
+~697 ce0d0af1fcbc21f6|                |
++                case RS_OP_OR:
++                    pop(2);
++                    push(false, 0);
++                    break;
+~705 4b5f1e8db67c43cb|                |
+~758 dc91698e0db5fc5d|                |
+~771 cf1892a91852e95a|                |
+~744 068155efd7c0a928|                |
+~718 21a5b5414da53f26|                |
+~731 bebe581a8bb9f153|                |
++                    pop(1);
++                    push(false, 0);
++                    break;
+~784 3e8a5f6334303c58|                |
++                    pop(pc->arg1);
++                    break;
++                case RS_OP_EXT: {
++                    int at = (int) stack.size() - pc->arg1;
++                    // _NEXT_EVENT (5) with a constant program: that program runs next, so it is read too.
++                    if (at >= 0 && pc->arg1 > 1 && stack[at].known && stack[at].value == 5 && stack[at + 1].known) {
+~386 14aad48613e1fb40|                        |
++                            if (entry[i].no == stack[at + 1].value) {
+~125 2ea793a882049d8b|                                |
++                            }
++                        }
++                    }
++                    if (at >= 0 && pc->arg1 > 0 && stack[at].known && stack[at].value == ext_id) {
++                        if (count < max && firsts != nullptr) {
++                            firsts[count] = pc->arg1 > 1 && stack[at + 1].known ? stack[at + 1].value : -1;
++                        }
++                        count++;
++                    }
++                    pop(pc->arg1);
++                    break;
++                }
++                case RS_OP_CALL: {
++                    DiscFuncData callee;
++                    std::memcpy(&callee, code + pc->arg2, sizeof(callee));
+~150 0e662eac0a4cbb65|                    |
++                    pop(callee.arg);
++                    push(false, 0);
++                    break;
++                }
+~804 1d35ae110156679a|                |
++                    stack.clear();
++                    break;
++                default:
++                    break;
++            }
++        }
++    }
++    return count;
++}
++
+@@ -299,3 +531,3
+- 4f7d4f08ed70a8ec
+- 48785e6e8e55226a
+- 1424ca33b5b359a7
++    HostStacks &host = StacksFor(this);
++    if (host.stack_num < stack_num) {
++        host.stack = static_cast<RS_STACKDATA *>(VmAlloc(sizeof(RS_STACKDATA) * static_cast<size_t>(stack_num)));
+@@ -304,2 +536,2
+- e1f655ca9e777af4
+- 9ab2344ac1631f70
++    if (host.call_num < call_num) {
++        host.call = static_cast<RS_CALLDATA *>(VmAlloc(sizeof(RS_CALLDATA) * static_cast<size_t>(call_num)));
+@@ -308,1 +540,6
+- 683c54ac4897814f
++    // Cleared at every load: the heap's fresh allocations were zero, and a block kept from an earlier script holds that
++    // script's leavings, which two copies that played apart hold differently (w-world-split next-floor after a merge: the
++    // monsters parted on the floor's first checksum).
++    std::memset(host.stack, 0, sizeof(RS_STACKDATA) * static_cast<size_t>(host.stack_num));
++    std::memset(host.call, 0, sizeof(RS_CALLDATA) * static_cast<size_t>(host.call_num));
++    this->stack = host.stack;
+@@ -310,1 +547,1
+- 76e605d4684c2a3e
++    this->call = host.call;

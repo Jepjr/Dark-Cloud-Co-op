@@ -1,0 +1,89 @@
+# tools/kazarov/src/cpp/platform/arena.cpp from Chronicle's tools/kazarov/src/cpp/platform/arena.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target tools/kazarov/src/cpp/platform/arena.cpp
+base tools/kazarov/src/cpp/platform/arena.cpp
+from 2990abc8443e88b3ecc0be6b3720fc85420c84ca
+to 02a47d88d5a52335d684190bd5428c2f7bce4217
+@@ -4,0 +5,1
++#include <unordered_map>
+@@ -14,0 +16,1
++    int         probe = -1; // the candidate slot it is pinned at (-1: not pinned)
+@@ -22,1 +24,45
+- bb4023edae9999d3
++// ArenaPinLayout: the image's address, or 0. Each owner gets one of kPinSlots slots of 256 MiB from kPinBase on (16 to
++// 80 TiB), picked by a hash of its offset in the image: owners a byte apart (CarvePackets' keys) land far apart, and the
++// few dozen owners share a slot with odds of about 1 in 200 for the whole set. A shared slot or a block over 256 MiB
++// shows as "could not be pinned", the same every run of one build.
++std::uintptr_t           g_pin_image = 0;
++std::size_t              g_unpinned = 0;
++constexpr std::uintptr_t kPinBase = std::uintptr_t{1} << 44;
++constexpr std::uintptr_t kPinSlot = std::uintptr_t{1} << 28;
++constexpr std::uint64_t  kPinSlots = (std::uint64_t{64} << 40) / kPinSlot;
++
++std::unordered_map<std::uintptr_t, int> g_plan; // owner offset -> its probe (ArenaPinPlan)
++int                                      g_probes = 8;
++std::size_t                              g_probed = 0;
++
++std::uintptr_t PinnedAddress(std::uintptr_t offset, int probe = 0) {
++    // Probe 0 is the slot every build before had; probe k another fixed one (the offset with k folded into its high bits).
++    std::uint64_t x = (offset ^ (static_cast<std::uint64_t>(probe) << 52)) + 0x9e3779b97f4a7c15ull; // splitmix64
++    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
++    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
++    x ^= x >> 31;
++    return kPinBase + static_cast<std::uintptr_t>(x % kPinSlots) * kPinSlot;
++}
++
++Block MapBlock(const void *owner, std::size_t bytes, std::size_t lead, int prefer = -1) {
++    const auto at = reinterpret_cast<std::uintptr_t>(owner);
++    if (g_pin_image != 0 && at >= g_pin_image) {
++        const std::uintptr_t offset = at - g_pin_image;
++        const auto           planned = g_plan.find(offset);
++        const int            first = prefer >= 0 ? prefer : planned != g_plan.end() ? planned->second : 0;
++        for (int k = first; k < first + g_probes; k++) {
++            ArenaMemory memory = ArenaMemoryMapAt(reinterpret_cast<void *>(PinnedAddress(offset, k)), bytes, lead);
++            if (memory.map == nullptr) {
++                continue;
++            }
++            if (k != first) {
++                g_probed++;
++                std::fprintf(stderr, "arena: the block of owner image+0x%llx (%zu bytes) is pinned at probe %d (probe %d held)\n",
++                             static_cast<unsigned long long>(offset), bytes, k, first);
++            }
++            return {owner, memory, k};
++        }
++        g_unpinned++;
++        std::fprintf(stderr, "arena: the block of owner image+0x%llx (%zu bytes) could not be pinned\n",
++                     static_cast<unsigned long long>(at - g_pin_image), bytes);
++    }
+@@ -59,3 +105,12
+- e07b392fe52c485f
+- 624ca08891bece23
+- df93396458ef9f0a
++        // Pinned, the owner's slot is its only address, so the outgrown block gives it up: grown in place, a stale
++        // pointer into the old block now reads the new one rather than zeroes.
++        const auto old = reinterpret_cast<std::uintptr_t>(block.memory.map);
++        const auto at = reinterpret_cast<std::uintptr_t>(owner);
++        const int probe = block.probe;
++        if (g_pin_image != 0 && at >= g_pin_image && probe >= 0 && old == PinnedAddress(at - g_pin_image, probe)) {
++            ArenaMemoryUnmap(block.memory);
++        } else {
+~59 e07b392fe52c485f|            |
+~60 624ca08891bece23|            |
++        }
++        block = MapBlock(owner, bytes, lead, probe); // (its slot again: a pinned owner keeps its address)
+@@ -69,0 +125,16
++void ArenaPinLayout(std::uintptr_t image) { g_pin_image = image; }
++
++std::size_t ArenaUnpinned() { return g_unpinned; }
++
++void ArenaPinPlan(std::uintptr_t offset, int probe) { g_plan[offset] = probe; }
++
++void ArenaPinProbes(int count) { g_probes = count < 1 ? 1 : count; }
++
++std::size_t ArenaProbed() { return g_probed; }
++
++void ArenaForEach(void (*visit)(const void *owner, unsigned char *start, std::size_t size, void *context), void *context) {
+=42 85403552f6edb450
++        visit(block.owner, block.memory.base - block.memory.lead, block.memory.lead + block.memory.capacity, context);
++    }
++}
++

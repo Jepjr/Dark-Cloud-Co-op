@@ -1,0 +1,10 @@
+# port/src/data/data_read.hpp from Chronicle's port/src/data/data_read.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/data/data_read.hpp
+base port/src/data/data_read.hpp
+from 384cc5b321eb75ec44e6d528c68f0640e202ecd5
+to 5e9bdd461c13dc855e4c9793d60cf6a05f7d8c54
+@@ -25,0 +26,4
++// coop: whether the data came from an NTSC disc (languages.json's "release" names NTSC), whose floor
++// title pictures are laid out as NTSC retail drew them (floor_title.cpp).
++bool DataNtscRelease();
++

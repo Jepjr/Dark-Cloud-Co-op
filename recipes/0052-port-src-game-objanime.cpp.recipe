@@ -1,0 +1,17 @@
+# port/src/game/objanime.cpp from Chronicle's port/src/game/objanime.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/objanime.cpp
+base port/src/game/objanime.cpp
+from ea9b442f3a99fb66f434a76746f115f9bb95a911
+to d96ea72b99ea95fe7d9ab8ef03710b86aeefc914
+@@ -22,1 +22,2
+- 54a9260f25582e84
++// Jep (co-op): Fire and all_stop have external linkage: coop/netplay_test.cpp perturbs the fire's flicker and
++// coop/netplay.cpp carries the stop flag in a resync's state.
+@@ -29,0 +31,4
++bool all_stop;
++
++namespace {
++
+@@ -35,2 +39,0
+- 2291e17efb4514c0
+- e3b0c44298fc1c14

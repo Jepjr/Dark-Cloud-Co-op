@@ -1,0 +1,44 @@
+# port/src/game/dngstatusdata.cpp from Chronicle's port/src/game/dngstatusdata.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dngstatusdata.cpp
+base port/src/game/dngstatusdata.cpp
+from f708584cfad9b5343c1692c608bd28e77324cab9
+to cf382ad3f5cbe9a8c2248434034e992a7caec378
+@@ -12,0 +13,9
++// coop-worldkeys (port/src/coop/coop_inventory.cpp): with separate bags the party's keys and story items are the world's
++// key ring, in no bag; each true when the ring takes the call.
++bool CoopRingSearch(int item, int *slot);
++bool CoopRingLost(int item, int *slot);
++bool CoopRingCheckGet(int item);
++bool CoopRingGet(int item, int *slot);
++bool CoopRingLostGateKey(dc::game::CDngStatusData *status); // coop-keyring (port/src/coop/coop_inventory.cpp)
++int  CoopKeyFloorTag(int item, int volume);                 // coop-keyfloor (port/src/coop/coop_inventory.cpp)
++
+@@ -55,0 +65,4
++    if (int slot; CoopRingSearch(item_id, &slot)) { // coop-worldkeys
++        return slot;
++    }
++
+@@ -100,0 +114,4
++    if (int slot; CoopRingLost(item_id, &slot)) { // coop-worldkeys
++        return slot;
++    }
++
+@@ -112,0 +130,4
++    if (CoopRingLostGateKey(this)) { // coop-keyring: the party's key ring, kept while the other player is on a floor
++        return;
++    }
++
+@@ -146,0 +168,4
++    if (CoopRingCheckGet(item_id)) { // coop-worldkeys: the ring has room
++        return 0;
++    }
++
+@@ -244,0 +270,4
++    if (int slot; CoopRingGet(item_id, &slot)) { // coop-worldkeys
++        return slot;
++    }
++
+@@ -269,1 +298,2
+- 4b9fabf1e7a91ea8
++            int have_copy = ItemDataToHaveCopy(item_id);
++            have_copy = CoopKeyFloorTag(item_id, have_copy); // coop-keyfloor: a floor key's uses are its floor

@@ -1,0 +1,33 @@
+# port/src/game/fireomni.cpp from Chronicle's port/src/game/fireomni.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/fireomni.cpp
+base port/src/game/fireomni.cpp
+from c52b236826e9eecec4378c240f27df445634fed0
+to 1e08678c18642b971659b56f20f35cc256ee4312
+@@ -5,0 +6,1
++#include <cstdio>
+@@ -6,0 +8,1
++#include <cstring>
+@@ -8,0 +11,1
++#include "coop/netplay_test.hpp" // coop: netplay
+@@ -15,0 +19,2
++const char *TestEnv(const char *name); // coop: netplay (coop/coop_core.cpp)
++
+@@ -100,0 +106,10
++    // coop: netplay
++    // DC_TEST_FIRE_DRAWS=count says how many flickers have been drawn at the first and every 300th; =skip draws no
++    // fire, as a copy that skips drawing would (drawrand.ps1).
++    static const char *fire_test = TestEnv("DC_TEST_FIRE_DRAWS");
++    static long        flickers_drawn = 0;
++
++    if (fire_test != nullptr && std::strcmp(fire_test, "skip") == 0) {
++        return;
++    }
++
+@@ -135,0 +151,2
++        // coop-drawrng: retail reseeds the generator here and leaves it reseeded; the floor and town draws take the draw
++        // stream (coop_camera.cpp DrawRngEnter), so the reseed never reaches the next tick.
+@@ -142,0 +160,4
++        if (fire_test != nullptr && (++flickers_drawn == 1 || flickers_drawn % 300 == 0)) {
++            std::fprintf(stderr, "fire: %ld flickers drawn\n", flickers_drawn);
++        }
++

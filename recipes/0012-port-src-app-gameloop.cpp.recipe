@@ -1,0 +1,319 @@
+# port/src/app/gameloop.cpp from Chronicle's port/src/app/gameloop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/app/gameloop.cpp
+base port/src/app/gameloop.cpp
+from 3fb86052c81c0d3f4787ea22e2185ee63b0c22ff
+to c595ddb34e46b2eb531eb4232047b548bbc0f677
+@@ -10,0 +11,1
++#include <span>
+@@ -58,0 +60,17
++#include "character.hpp"
++#include "debug_start.hpp" // debug start
++#include "itemdata.hpp"   // debug start: the starting weapons
++#include "userstatus.hpp" // debug start
++
++#include "coop/coop.hpp" // debug start: TestEnv
++#include "coop/coop_boot.hpp" // coop-areacard
++#include "coop/coop_fullmenu.hpp"
++#include "coop/coop_inventory.hpp" // coop-inventory
++#include "coop/coop_party.hpp"     // coop-party
++#include "coop/coop_worlds.hpp"
++#include "coop/netplay.hpp"      // coop: netplay
++#include "coop/netplay_test.hpp" // coop: netplay
++
++namespace dc::game {
++unsigned int PortRandState(); // app/runtime.cpp
++} // namespace dc::game
+@@ -164,0 +183,3
++    int  floor = 0;      // debug start: dungeon:<n>:<floor>'s floor, 1 up (0: the floor select)
++    bool pick = false;   // debug start: --jump pick, the picker (debug_start.cpp) in the menu's place
++    bool debug = false;  // debug start: town:<n> or dungeon:<n>:<floor>, which turn saving off (DebugStartMark)
+@@ -167,0 +189,1
++int  g_jump_floor = -1; // debug start: the floor the first entrance window enters, 0 up, until taken
+@@ -168,0 +191,7
++bool g_resync_load = false; // coop: netplay
++
++bool TickRandLog() {
++    static const bool on = std::getenv("DC_TICK_RAND_LOG") != nullptr;
++
++    return on;
++}
+@@ -267,0 +297,2
++    CoopInventoryNewGame(); // coop-inventory: P2's bag empty, no gilda
++    CoopPartyNewGame();     // coop-party: no pad 2 pick
+@@ -286,0 +318,6
++            if (g_jump.pick) {
++                // debug start: the picker; a choice (1) or O (-1, back where the picker was opened) closes it.
++                const int result = DebugStartModeLoop();
++                g_jump.pick = g_jump.pick && result == 0;
++                return result;
++            }
+@@ -307,1 +344,1
+- 0998f0077407230a
++            return coop::FullMenuGameLoop(); // coop-fullmenu: GameLoop, or the menu beside the world
+@@ -320,0 +358,3
++    if (g_jump.debug) {
++        DebugStartMark(); // debug start: no saves from here on
++    }
+@@ -338,0 +379,1
++            g_jump_floor = g_jump.floor - 1; // debug start
+@@ -339,0 +381,2
++            // As retail's dungeon loader (LoaderInit) and the town's jump do: the floor starts its music.
++            EdEventInfo.map_jump_bgm_play = 1; // coop: audio
+@@ -624,0 +668,1
++    // NAME[:N[:M]]; only dungeon takes a second number (debug start: its floor).
+@@ -627,2 +671,8
+- f82a8766ab1e96fb
+- 7f1367005ebb6154
++    std::string_view rest = name.size() < text.size() ? text.substr(name.size() + 1) : std::string_view();
++    std::string_view number = rest.substr(0, rest.find(':'));
++    std::string_view second = number.size() < rest.size() ? rest.substr(number.size() + 1) : std::string_view();
++    auto             parse = [](std::string_view digits, int &out) {
++        auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), out);
++        return error == std::errc{} && end == digits.data() + digits.size() && out >= 0;
++    };
++    Jump jump;
+@@ -630,5 +680,2
+- 45a9364551b06aaf
+- 12d17e63240148bb
+- e00df813fcf19f04
+- b63dfc51f517571a
+- 2a44168318e224e1
++    if (!rest.empty() && !parse(number, jump.map)) {
++        return false;
+@@ -636,2 +683,5
+- 2e1463312c82d723
+- 448358293dcce488
++    if (number.size() < rest.size() && (name != "dungeon" || !parse(second, jump.floor))) {
++        return false;
++    }
++    bool numbered = name == "edit" || name == "town" || name == "dungeon";
++    if (!numbered && !rest.empty()) {
+@@ -650,1 +700,7
+- a685e8f8cc839216
++    } else if (name == "town" && jump.map < TOWN_COUNT) {
++        jump.mode = GAME_MODE_EDIT; // debug start: a town by number, as edit:<0-4>
++        jump.debug = true;
++        if (DebugStartMutated("town")) {
++            jump.map = (jump.map + 1) % TOWN_COUNT;
++        }
++    } else if (name == "dungeon" && jump.map <= 6 && jump.floor <= DebugStartFloors(jump.map)) {
+@@ -651,0 +708,1
++        jump.debug = jump.floor > 0;
+@@ -659,0 +717,3
++    } else if (name == "pick") {
++        jump.mode = GAME_MODE_MENU; // debug start: the picker in the developer menu's place
++        jump.pick = true;
+@@ -666,0 +727,113
++// debug start: once, the floor a dungeon:<n>:<floor> jump enters (0 up), marked reached; -1 otherwise.
++int GameTakeJumpFloor() {
++    int floor = g_jump_floor;
++    g_jump_floor = -1;
++    // coop-snapshot: a floor-start checkpoint taken (netplay): straight onto the host's floor. His save, which this copy
++    // holds now, already has the floor reached and the party, so none of the debug start's seeding below.
++    if (floor < 0) {
++        const int netplay_floor = NetplayTakeRestartFloor();
++        if (netplay_floor >= 0) {
++            std::fprintf(stderr, "catchup: entering dungeon %d floor %d, the checkpoint's\n", selectMapNo, netplay_floor + 1);
++            return netplay_floor;
++        }
++    }
++    if (floor >= 0 && DebugStartMutated("floor")) {
++        floor = floor > 0 ? floor - 1 : floor + 1;
++    }
++    if (floor < 0) {
++        floor = DebugStartTakeResyncFloor(); // the floor the host was on before a join's resync
++    }
++    if (floor < 0 || UserStatus == nullptr) {
++        return -1;
++    }
++    // The story scenes a fresh save would play on arriving and that a test start skips, by the game flag each
++    // sets (a sweep of every floor, 2026-10-20): Divine Beast Cave's floors 1 (103), 2 (100), 3 (106), 5 (104),
++    // 6 (101) and 7 (105), Sun and Moon Temple's 4 (130) and 7 (131), Moon Sea's 8 (140). The bosses' scenes
++    // stay (Shipwreck's 18, 120, among them).
++    static const int scenes_seen[] = {100, 101, 103, 104, 105, 106, 130, 131, 140};
++    for (int flag : DebugStartMutated("scene") ? std::span<const int>() : std::span<const int>(scenes_seen)) {
++        SaveData->SetGameFlag(flag, 1);
++    }
++    // The party the story has by the end of this dungeon, each with its starting weapon, as joining gives it: a
++    // fresh party of Toan alone cannot load some floors, which call on the member who joins in that dungeon
++    // (Divine Beast Cave's 11th Xiao, Wise Owl Forest's 12th Goro, Shipwreck's 5th every member's weapon).
++    static const int party[7] = {2, 3, 4, 5, 6, 6, 6};
++    static const int starter[6] = {ITEM_WEAPON_DAGGER,    ITEM_WEAPON_WOODEN_SLINGSHOT, ITEM_WEAPON_MALLET,
++                                   ITEM_WEAPON_GOLD_RING, ITEM_WEAPON_FIGHTING_STICK,   ITEM_WEAPON_MACHINE_GUN};
++    // DC_DEBUG_START_MUTATE=party: the party as it is (a fresh save's Toan alone: v-standin-weapon's stand-in).
++    if (selectMapNo >= 0 && selectMapNo < 7 && UserStatus->party_size < party[selectMapNo] && !DebugStartMutated("party")) {
++        UserStatus->party_size = static_cast<s8>(party[selectMapNo]);
++        for (int i = 1; i < UserStatus->party_size; i++) {
++            if (UserStatus->equipped_weapon_slot[i] < 0) {
++                static_cast<CDngStatusData *>(UserStatus)->GetItem(starter[i], 0);
++                UserStatus->equipped_weapon_slot[i] = 0;
++            }
++        }
++    }
++    s8 &reached = UserStatus->floor_reached[selectMapNo];
++    reached = std::max<s8>(reached, static_cast<s8>(floor));
++    std::fprintf(stderr, "debug start: entering dungeon %d floor %d\n", selectMapNo, floor + 1);
++    return floor;
++}
++
++static int g_where_last[4] = {-2, -2, -2, -2}; // debug start: the place last printed
++
++// debug start: DC_DEBUG_START_TRACE=1 prints the place, each time it changes, for the tests (read only).
++void DebugStartTraceWhere() {
++    static const bool on = TestEnv("DC_DEBUG_START_TRACE") != nullptr;
++    int              (&last)[4] = g_where_last;
++    if (!on) {
++        return;
++    }
++    const bool dungeon = mode == GAME_MODE_DUNGEON;
++    const int  now[4] = {static_cast<int>(mode), static_cast<int>(MapNo),
++                         dungeon && UserStatus != nullptr ? UserStatus->cur_floor + 1 : 0,
++                         dungeon ? static_cast<int>(gameTask == GAME_TASK_PLAY) : 0};
++    // The dungeon's event flags (the floor scripts' first-visit scenes), each change.
++    static s8 flags[50] = {};
++    if (UserStatus != nullptr && dungeon) {
++        for (int i = 0; i < 50; i++) {
++            if (UserStatus->event_flags[i] != flags[i]) {
++                std::fprintf(stderr, "debug start: event flag %d %d -> %d at tick %lld\n", i, flags[i],
++                             UserStatus->event_flags[i], (long long) g_frames);
++                flags[i] = UserStatus->event_flags[i];
++            }
++        }
++    }
++    // The save's game flags (story progress; the event scripts' _SGET_GAME_FLAG), each change.
++    static std::vector<char> game(8192, 0);
++    for (int i = 0; i < 8192; i++) {
++        const char value = SaveData->GetGameFlag(i) != 0;
++        if (value != game[i]) {
++            std::fprintf(stderr, "debug start: game flag %d -> %d at tick %lld (mode %d)\n", i, value, (long long) g_frames,
++                         static_cast<int>(mode));
++            game[i] = value;
++        }
++    }
++    if (std::equal(now, now + 4, last)) {
++        return;
++    }
++    std::copy(now, now + 4, last);
++    std::fprintf(stderr, "debug start: where tick %lld mode %d map %d floor %d playing %d\n", (long long) g_frames, now[0],
++                 now[1], now[2], now[3]);
++}
++
++// debug start: the picker's choice, applied as a jump would have been at boot.
++void GameApplyDebugStart(int mode_, int map, int floor) {
++    // Debug mode on, as a --jump has it: it comes to a joiner with the host's state, and a join's resync then
++    // goes straight back onto the host's floor (debug_start.cpp).
++    DebugMode = 1;
++    g_jump.mode = mode_;
++    g_jump.map = map;
++    g_jump.floor = floor;
++    g_jump.pick = false;
++    g_jump.debug = true;
++    ApplyJump();
++    if (mode_ == GAME_MODE_EDIT && map >= 0 && map < 200) {
++        // A town as the game travels to one, by a map jump the main loop follows as the picker's mode ends, as a
++        // dungeon's is: a catch-up host's checkpoint then names where it goes (a town set straight into the mode
++        // instead replayed out of step on the joiner in Matataki and Muska Racka).
++        MapJump(map, -1);
++    }
++}
++
+@@ -694,0 +868,12
++// debug start: the press of pad 1's L3+R3 (the lockstep's pad 1 when linked: the host's), outside the menu.
++bool GameDebugStartRequested() {
++    static bool   held_before = false;
++    InputPadState linked;
++    const bool    lockstep = !DebugStartMutated("local") && NetplayPad(0, linked);
++    const auto    buttons = lockstep ? linked.buttons : InputGetPad(0).buttons;
++    const bool    held = (buttons & (kInputL3 | kInputR3)) == (kInputL3 | kInputR3);
++    const bool    pressed = held && !held_before;
++    held_before = held;
++    return pressed && mode != GAME_MODE_MENU;
++}
++
+@@ -715,0 +901,24
++// coop: netplay: leaves the mode mid-frame, as the developer menu does, for the map a resync of
++// linked copies sends both to (a dungeon's entrance, 200 on, or a town).
++static void GameLeaveForNetplay(int next_map) {
+=365 a406cde73518665b
++        ClockSyncV();
++    }
++    SndExit();
+=369 80c02ec8c0040902
+=370 b8e018752d52eb9b
+=371 30f09207b5c04c0b
+=372 efe7cf1b7a1d4fed
++    NextMapNo = next_map;
++    g_resync_load = true; // coop: netplay: its loading screen runs short (GameTakeResyncLoad)
++}
++
++// coop: netplay: a resync's map load, which the loading screen runs as --fast-load does (nowload.cpp), so a player
++// already in the place is not shown its title card again when the other joins. Taken once, by that load.
++bool GameTakeResyncLoad() {
++    bool resync = g_resync_load;
++
++    g_resync_load = false;
++    return resync;
++}
++
+@@ -727,1 +936,2
+- 0d0693ab8f5b762a
++    if (g_autosave && ConfigGet().autosave && !DebugStartSavesOff("the autosave") && // debug start
++        !SaveSlotWriteAutosave()) {
+@@ -768,0 +979,6
++void GameExtendFrameBudget(std::int64_t frames) {
++    if (g_frame_budget >= 0) {
++        g_frame_budget += frames;
++    }
++}
++
+@@ -772,0 +989,4
++bool GameFrameBudgetSpent() {
++    return g_frame_budget >= 0 && g_frames >= g_frame_budget;
++}
++
+@@ -866,1 +1086,1
+- 789e9a918adcb655
++        if (!DebugMode && mode == GAME_MODE_MENU && !g_jump.pick) { // debug start: the picker needs no debug mode
+@@ -886,0 +1107,1
++        CoopAreaCardLoadStart(MapNo); // coop-areacard: the load's time against its card's, for the log
+@@ -898,0 +1120,1
++        DebugStartBeforeModeInit(); // debug start: after a join's resync, the floor the host was on
+@@ -912,0 +1135,1
++        CoopAreaCardLoaded(); // coop-areacard
+@@ -934,0 +1158,1
++            NetplayFrameStart(); // coop-snapshot
+@@ -950,0 +1175,6
++            // coop: netplay: DC_TICK_RAND_LOG=1 logs the random generator after each tick's mode loop, so two runs of the
++            // same play drawn differently (render size, interpolation) can be shown to step the simulation alike: the
++            // drawing must never feed its rand (tools/coop-qa/netplay/drawrand.ps1).
++            if (TickRandLog()) {
++                std::fprintf(stderr, "tickrand %lld %d %08x\n", (long long) g_frames, (int) mode, PortRandState());
++            }
+@@ -973,1 +1203,2
+- 98703d1b14d596d3
++            // coop-quittitle: or a netplay session's Quit Game applied on this copy (its link closed by the take).
++            if (result == 0 && (battlemenu::TakeBattleMenuTitleRequest() || NetplayTakeQuitToTitle())) {
+@@ -978,0 +1210,1
++            DebugStartTraceWhere(); // debug start: DC_DEBUG_START_TRACE's place lines for the tests
+@@ -985,0 +1218,1
++            CoopWorldsAfterFrame(); // coop-worlds: the tests' screen checks after a split
+@@ -992,0 +1226,15
++            // debug start: pad 1's L3+R3, from the lockstep's pads when linked, so both copies open the picker
++            // on the same tick and its choice takes both there.
++            if (GameDebugStartRequested()) {
+=990 578e2400ed02b12b
++                g_jump.pick = true;
++                std::fprintf(stderr, "debug start: L3+R3, the picker\n");
++                break;
++            }
++            // coop: netplay: a resync of linked copies leaves the mode on the tick both took it.
++            if (int netplay_map; NetplayTakeRestart(netplay_map)) {
++                GameLeaveForNetplay(netplay_map);
++                DebugStartOnResync(); // debug start: back to the host's floor directly, not its floor menu
++                std::fill(std::begin(g_where_last), std::end(g_where_last), -2); // debug start: the place again after it
++                break;
++            }
+@@ -993,0 +1242,1
++        NetplayModeEnded(); // coop: netplay
+@@ -997,0 +1247,1
++        CoopWorldsCheckTownLeave(old_main_mode, NextMapNo); // coop-worlds: a town exit that did not split

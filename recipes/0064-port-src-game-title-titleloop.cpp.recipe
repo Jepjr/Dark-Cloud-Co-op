@@ -1,0 +1,210 @@
+# port/src/game/title/titleloop.cpp from Chronicle's port/src/game/title/titleloop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/title/titleloop.cpp
+base port/src/game/title/titleloop.cpp
+from 642b570fbd99f2b4d309296da88cc685e422832c
+to 565bcdd3dfc6ade3bfc278cc357bf34d8e260367
+@@ -10,0 +11,1
++#include <cstdio>
+@@ -12,0 +14,1
++#include <string>
+@@ -17,0 +20,3
++#include "coop/coop.hpp"
++#include "coop/coop_lobby.hpp"
++#include "coop/netplay.hpp"
+@@ -54,0 +60,1
++#include "title/title_mpmenu.hpp"
+@@ -242,0 +249,6
++// coop: a join under way or the address entry up (NetplayTitleJoin), so netplay's line shows (TitleMpNetBusy).
++bool title_net_busy = false;
++bool TitleMpNetBusy() {
++    return title_net_busy;
++}
++
+@@ -248,0 +261,1
++    int  row = -1;           // coop: the Multi-player submenu's row pointed at (title_mpmenu.hpp)
+@@ -250,0 +264,27
++// coop: the rows the menu shows, said once for each layout (mp-title-row, c-solo-title): their order, their capitals'
++// tops and where the last one's letters end, against the trademark lines; and the frame the Multi-player row is first
++// drawn on, with the game's own rows (coop-mainmenu, Jep 2026-10-30: it showed a moment late).
++void SayTitleRows() {
++    static int  said_count = 0;
++    static int  frames = 0;
++    static bool said_multi = false;
++    const int   rows = title::menu::RowCount();
++
++    frames++;
++    if (rows != said_count) {
++        said_count = rows;
++        std::string names;
++        std::string tops;
++        for (int row = 0; row < rows; ++row) {
++            names += std::string(row != 0 ? " " : "") + title::menu::RowEnglish(row) + " " + std::to_string(row);
++            tops += " " + std::to_string(title::menu::TextTop(row));
++        }
++        std::fprintf(stderr, "title: rows %s; capitals' tops%s; the last row's letters end at %.1f, the trademark lines start at %d\n",
++                     names.c_str(), tops.c_str(), static_cast<double>(title::menu::RowsBottom()), title::menu::kTrademarkTop);
++    }
++    if (!said_multi && title::menu::RowOf(TITLE_MENU_MULTIPLAYER) >= 0) {
++        said_multi = true;
++        std::fprintf(stderr, "title-mp: Multi-player row shown above Option (one client), drawn on the menu's frame %d\n", frames);
++    }
++}
++
+@@ -278,0 +319,10
++    } else if (TitleMpOpen()) {
++        // coop: an open Multi-player submenu has its own rows, on the title menu's (title_mpmenu.hpp).
+=278 66e2dc30425860f9
+=281 9e2ad0ebe419aac4
++        if (row >= 0 && row < TitleMpRows()) {
++            action.row = row;
+=287 278ec59f5d8cce52
+=288 49202caf9e08d1f7
++            opcnt = 0;
++        }
+@@ -283,2 +333,7
+- 71efc1c8b67c8b52
+- 0b43aa1917f57670
++            // coop: the select shown on that row (the Multi-player row moves Option and Exit down one).
++            const int select = title::menu::SelectAt(row);
++            if (CCursol.select != select) {
++                if (CoopDebug()) {
++                    std::fprintf(stderr, "title: pointer on row %d (select %d)\n", row, select); // coop: tests
++                }
++                CCursol.select = select;
+@@ -306,0 +362,28
++    // coop-lobby: the lobby the hosting save's pick opened owns the title until it starts the game or is left
++    // (coop_lobby.hpp); the backdrop draws as in the fade in, at the lobby's own fade.
++    if (coop::lobby::Active()) {
++        switch (coop::lobby::Step()) {
++            case coop::lobby::Result::Start:
++                if (coop::lobby::NewGame()) {
+~472 55406a154c28d6b4|                    |
++                } else {
++                    // (as TITLE_STEP_SAVE's load)
+=534 8cffa57972031c1e
+=535 b92406ee048e9218
+=536 6a693f3dd1c309f8
++                }
++                break;
++            case coop::lobby::Result::Closed:
++                brink = 0;
+=559 fa11a617a4420c6b
++                TitleMpFromLobby();
+=560 c919daeb1fc5d02d
++                break;
++            case coop::lobby::Result::Running:
+~215 275ed540d6cb946a|                |
++                TitleDraw();
++                CSnd.Step();
++                return 0;
++        }
++    }
++
+@@ -313,1 +396,1
+- 16a0176ba42a57da
++            if ((GamePad.Down(PAD_START) || TitleMpTestStart()) && EffCnt > 16) { // coop-lobby: the lobby jump's Start too
+@@ -338,1 +421,1
+- b37094ff13266958
++            if (GamePad.Down(PAD_START) || pointer.start || TitleMpTestStart()) {
+@@ -351,1 +434,1
+- b37094ff13266958
++            if (GamePad.Down(PAD_START) || pointer.start || TitleMpTestStart()) {
+@@ -377,1 +460,1
+- 580976c21bd11dce
++                if (Fade1 > 127 && (GamePad.Down(PAD_START) || pointer.start || TitleMpTestStart())) {
+@@ -397,0 +481,23
++            // coop: netplay: player 2's Join (netplay.hpp); a join under way holds off the attract movie.
++            if (NetplayTitleJoin(GamePad.Down(PAD_SELECT))) {
++                opcnt = 0;
++                title_net_busy = true;
++            } else {
++                title_net_busy = NetplayTitleEntryOpen();
++            }
++
++            // One client typing the host's address: the menu leaves the pad alone.
++            if (NetplayTitleEntryOpen()) {
++                break;
++            }
++
++            // coop: the Multi-player submenus own the pad while one is up (title_mpmenu.hpp).
++            if (TitleMpOpen()) {
++                // Host > Steam or IP > Start or Continue: on as the menu's New Game or Load (the select is set).
++                if (TitleMpStep(pointer.row, pointer.confirm, pointer.back)) {
+~431 67d97c9fc4f064d1|                    |
++                }
++                opcnt = 0;
++                break;
++            }
++
+@@ -403,0 +510,5
++                // coop: up and down go by the rows shown, wrapping (title_menu.hpp: the Multi-player row between Continue
++                // and Option); a select not shown (the Multi-player row gone meanwhile) starts from START.
++                const int rows = title::menu::RowCount();
++                int       row = std::max(0, title::menu::RowOf(CCursol.select));
++
+@@ -405,1 +516,1
+- 2e3dcf44036f0985
++                    row = (row + rows - 1) % rows;
+@@ -411,1 +522,1
+- 7811414d4cb5fc69
++                    row = (row + 1) % rows;
+@@ -416,9 +527,2
+- 3a320e531fac1f74
+- bc9def1dea482f87
+- 0bf0a088a649c22d
+- e3b0c44298fc1c14
+- 6b5d8ff629678f5b
+- ef4bf18754fd35ee
+- 0bf0a088a649c22d
+- e3b0c44298fc1c14
+- cef875ead3b64be2
++                CCursol.select = title::menu::SelectAt(row);
++                CCursol.Set(title::menu::HandY(row));
+@@ -426,0 +531,1
++                    std::fprintf(stderr, "title: menu pick: %s (row %d)\n", title::menu::RowEnglish(row), row); // coop: tests
+@@ -428,0 +534,2
++                    } else if (CCursol.select == TITLE_MENU_MULTIPLAYER) {
++                        TitleMpEnter(); // coop: Host / Join (title_mpmenu.hpp), with the confirm sound
+@@ -469,0 +577,1
++                TitleMpClose(); // coop: a submenu that flashed its pick (title_mpmenu.hpp)
+@@ -471,0 +580,6
++                        // coop-lobby: a new game hosted opens the lobby first (the opening book once it starts).
++                        if (coop::lobby::Pending()) {
++                            coop::lobby::Open(true);
+~215 275ed540d6cb946a|                            |
++                            break;
++                        }
+@@ -533,0 +648,7
++                    // coop-lobby: a slot loaded to host opens the lobby (the world loads once it starts).
++                    if (coop::lobby::Pending()) {
++                        brink = 0;
++                        coop::lobby::Open(false);
+~215 275ed540d6cb946a|                        |
++                        break;
++                    }
+@@ -715,1 +836,9
+- b2b034a2f1f86f7f
++                // coop: an open Multi-player submenu draws its own rows instead (title_mpmenu.hpp), on the same places.
++                if (brink != 0) {
++                    static bool said = false;
++                    if (!said) {
++                        said = true;
++                        std::fprintf(stderr, "title: the pick flashes on %s\n", TitleMpOpen() ? "its Multi-player submenu" : "the main rows"); // coop: tests
++                    }
++                }
++                if (CProcess.no != TITLE_STEP_ATTRACT_FADE_OUT && !TitleMpOpen()) {
+@@ -716,0 +846,5
++                    SayTitleRows(); // coop
++                }
++
++                if (TitleMpOpen()) {
++                    TitleMpDraw(CFade.Get(brightness), CFade.Get(32), CFade.Get(128), !TitleMpNetBusy());
+@@ -755,0 +890,1
++    coop::lobby::Draw(); // coop-lobby
+@@ -766,0 +902,6
++
++    // coop: netplay: player 2's Join line under the menu (netplay.hpp).
++    // coop: not under an open Multi-player submenu, which has its own line, unless a join is under way.
++    if ((CProcess.no == TITLE_STEP_MENU || CProcess.no == TITLE_STEP_MENU_BLINK) && (!TitleMpOpen() || TitleMpNetBusy())) {
++        NetplayDrawTitleJoin();
++    }

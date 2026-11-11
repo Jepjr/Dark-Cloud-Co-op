@@ -1,0 +1,20 @@
+# port/src/render/draw2d.cpp from Chronicle's port/src/render/draw2d.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/draw2d.cpp
+base port/src/render/draw2d.cpp
+from bfe11d5ffe9b18679a060f961a381070e0aaa148
+to c4583686aca0fcbaadb8eec5e47f5d474f80252f
+@@ -207,1 +207,1
+- 9eda5bc231acfc4c
++                  float angle, float scale, u_char red, u_char green, u_char blue) {
+@@ -232,0 +233,1
++    // coop: minimap (the vertex colour: red, green, blue; 0x80 each is retail's)
+@@ -234,2 +235,2
+- 054d5b58b296ef80
+- 08f42856583136e4
++        draw2d::Vertex(x[0], y[0], 0.0f, u0, v0, red, green, blue, 0x80),
++        draw2d::Vertex(x[1], y[1], 0.0f, static_cast<float>(texel.x + screen.width), v0, red, green, blue,
+@@ -237,2 +238,2
+- f9a91b6ad5b167a4
+- 7230f867c8bbc273
++        draw2d::Vertex(x[2], y[2], 0.0f, u0, v1, red, green, blue, 0x80),
++        draw2d::Vertex(x[3], y[3], 0.0f, static_cast<float>(texel.x + texel.width), v1, red, green, blue,

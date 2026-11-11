@@ -1,0 +1,201 @@
+# port/src/game/shop.cpp from Chronicle's port/src/game/shop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/shop.cpp
+base port/src/game/shop.cpp
+from 65af951a4155087aeb491b1cce181ee525303ca2
+to f00c87299c07990aef92f180746953caec8bd2a8
+@@ -31,0 +32,1
++#include "coop/coop_menu.hpp" // coop-menus
+@@ -40,0 +42,9
++// coop-small2 (Jep 11-09, storage option C): the party storage's pick-ups claimed at the press and its put-downs sent as one move
++// (port/src/coop/coop_storage.cpp). Off (one player, the lockstep fix-off, DC_COOP_MUTATE=storage_retail): retail's exchanges.
++bool CoopStorageOn();
++void CoopStoragePut(int page, int slot, const void *data, int size);
++void CoopStorageClaim(int page, int slot, int expected, int purpose, const void *swap, int swap_size);
++void CoopStorageSort(int page);
++bool CoopStorageWaiting();
++bool CoopStorageGranted(int *page, int *slot, int *purpose, void *data, int size);
++bool CoopStorageRefused();
+@@ -543,1 +553,4
+- 3d3f8e3260af21f1
++                if (to_stock && CoopStorageOn()) {
++                    s16 pair[2] = {(s16) item_no, (s16) data.volume};
++                    CoopStoragePut(BOARD_PAGE_ITEM, slot_no, pair, 4); // coop-small2: the put, one move
++                } else if (to_stock) {
+@@ -556,1 +569,4
+- 3d3f8e3260af21f1
++                if (to_stock && CoopStorageOn()) {
++                    data.attach.item_no = item_no;
++                    CoopStoragePut(BOARD_PAGE_ATTACH, slot_no, &data.attach, sizeof(ATTACH_LIST)); // coop-small2
++                } else if (to_stock) {
+@@ -567,1 +583,4
+- 3d3f8e3260af21f1
++                if (to_stock && CoopStorageOn()) {
++                    data.weapon.item_no = item_no;
++                    CoopStoragePut(BOARD_PAGE_WEAPON, slot_no, &data.weapon, sizeof(WEAPON_HAVE)); // coop-small2
++                } else if (to_stock) {
+@@ -633,0 +653,2
++// coop-menus: player 2's purse and bag swapped in first when she walked Toan to the keeper (coop_menu.cpp), so the
++// shop is built on what she carries and charges her.
+@@ -634,0 +656,2
++    coop::MenuShopBegin();
++
+@@ -687,0 +711,3
++    coop::MenuShopTrace(ShopMenu.talk_mode, ShopMenu.side, ShopMenu.board.cursor, SaveData->GetDngStatus()->money,
++                        done); // coop-menus: DC_COOP_MENUDEBUG
++
+@@ -690,0 +717,1
++        coop::MenuShopEnd(); // coop-menus: the purses and bags back, the walk back to player 1
+@@ -1386,0 +1414,92
++// coop-small2: a storage cell's item, the held record as a storage record, and its size (CoopStorage*)
++static int CoopStockCellItem(int page, int slot) {
+=3259 7ae06fa63fd15a75
+=2385 d16074c05ff70859
++            return ShopStockPt->dungeon_items[slot];
+=2393 ec3d339b63d1e604
++            return ShopStockPt->weapons[slot].item_no;
+=2401 d7835c8412651fb9
++            return ShopStockPt->attachments[slot].item_no;
++    }
++    return -1;
++}
++
++static int CoopHeldRecord(int page, MENU_ITEMDATA *out) {
++    memset(out, 0, sizeof(*out));
+=3259 7ae06fa63fd15a75
+~1469 9f3ac16c0f5a2b1f|        |
++            s16 pair[2] = {ShopHaveItemPt->item_no, ShopHaveItemPt->volume};
++            memcpy(out, pair, 4);
++            return 4;
++        }
+=2393 ec3d339b63d1e604
++            memcpy(&out->weapon, ShopHaveWepPt, sizeof(WEAPON_HAVE));
++            return sizeof(WEAPON_HAVE);
+=2401 d7835c8412651fb9
++            memcpy(&out->attach, ShopHaveAttachPt, sizeof(ATTACH_LIST));
++            return sizeof(ATTACH_LIST);
++    }
++    return 0;
++}
++
++// coop-small2: what landed for this player since the last step: a claim refused (the refuse sound, nothing held), or granted: into the
++// hand as retail's lift leaves it (from that cell), or, a take, its icon on to the bag as retail's take prompt sends it.
++static void CoopChargeLanded() {
++    MENU_ITEMDATA got;
++    int           page, slot, purpose;
++
++    while (CoopStorageRefused()) {
+~1433 fee065472be65a31|        |
++    }
++    while (CoopStorageGranted(&page, &slot, &purpose, &got, sizeof(got))) {
++        s16 item;
++
++        memcpy(&item, &got, 2);
++        if (purpose == 1) {
++            int bag_page;
++            int space = GetBoardSpace(item, &bag_page);
+~1535 bfa7fda290764d43|            |
++            int row = slot / 5 - ShopMenu.stock_top_row;
++            int x = slot % 5 * 0x28 + 0x34;
+~1496 a5b835adc5d56cba|            |
+~1391 a1e2be35f39a223e|            |
++
++            memset(&record, 0, sizeof(record));
++            if (page == BOARD_PAGE_ITEM) {
++                s16 pair[2];
++                memcpy(pair, &got, 4);
++                record.volume = pair[1];
++            } else {
++                memcpy(&record, &got, sizeof(record));
++            }
+~1462 195c173c29200412|            |
++            ShopDataMove.IconMoveTarSet(space, icon, item, &record, x, y, 0);
+~1499 416dedf6c50ea1fb|            |
+~1378 1ea4d05abc81b15f|                |
+~1379 a2c0515a0d16ff8e|                |
++            }
++        } else {
+=3982 585b323e257bd580
+=3983 58367fd631eed00c
++                    s16 pair[2];
++                    memcpy(pair, &got, 4);
++                    ShopHaveItemPt->item_no = pair[0];
++                    ShopHaveItemPt->volume = pair[1];
++                    break;
++                }
+=3709 ca7e9c89726f7df4
++                    memcpy(ShopHaveWepPt, &got.weapon, sizeof(WEAPON_HAVE));
+~2037 18efa23fbd365f7a|                    |
++                    break;
+=3712 b3ee3636267168c1
++                    memcpy(ShopHaveAttachPt, &got.attach, sizeof(ATTACH_LIST));
+~2049 8d1498badde3c8b9|                    |
++                    break;
++            }
+~664 e798d3023b7e37d7|            |
+~4683 0ab84288aaece001|            |
++            ShopHaveItemPt->from_slot = slot;
++        }
+=3946 ee548f6a205301dc
++    }
++}
+@@ -1395,0 +1515,4
++    if (ShopMenu.ready != 0 && CoopStorageOn()) {
++        CoopChargeLanded(); // coop-small2
++    }
++
+@@ -1510,1 +1633,11
+- 21c765e05aa69ad7
++                if (GamePad.Down(PAD_TRIANGLE | PAD_CROSS) != 0 && CoopStorageOn()) {
++                    // coop-small2: the take claims the cell; its icon to the bag when the claim lands (CoopChargeLanded)
++                    int cell = CoopStockCellItem(ShopMenu.board.page, ShopMenu.board.cursor);
++
++                    if (!CoopStorageWaiting() && cell >= ITEM_ATTACH_START) {
++                        CoopStorageClaim(ShopMenu.board.page, ShopMenu.board.cursor, cell, 1, NULL, 0);
++                    } else {
+=4333 f4084070043a8cf4
++                    }
+=1451 60b2100c6f816219
+=1461 2493a3ae0adab9ee
+@@ -1726,0 +1860,9
++                                if (CoopStorageOn()) {
++                                    // coop-small2: back to its cell (or, taken by then, the page's first free one) as one move
++                                    MENU_ITEMDATA held;
++                                    int           size = CoopHeldRecord(ShopHaveItemPt->from_page, &held);
++
++                                    CoopStoragePut(ShopHaveItemPt->from_page, ShopHaveItemPt->from_slot, &held, size);
+=1748 b386e0891bc39629
++                                    break;
++                                }
+@@ -2021,0 +2164,26
++                if ((mode == kind || kind == BOARD_PAGE_NONE) && CoopStorageOn()) {
++                    // coop-small2: a lift (or a swap's) claims the cell, the held record lands in the hand when it does; a drop on an
++                    // empty cell goes at once as one move (CoopChargeLanded, coop_storage.cpp)
++                    int  cell = CoopStockCellItem(mode, ShopMenu.board.cursor);
++                    bool held = ShopHaveItemPt->item_no >= ITEM_ATTACH_START;
++
++                    if (CoopStorageWaiting() || (!held && cell < ITEM_ATTACH_START)) {
+=4333 f4084070043a8cf4
++                    } else if (!held) {
++                        CoopStorageClaim(mode, ShopMenu.board.cursor, cell, 0, NULL, 0);
++                    } else {
+~1391 a1e2be35f39a223e|                        |
++                        int           size = CoopHeldRecord(mode, &record);
++
++                        if (cell < ITEM_ATTACH_START) {
++                            CoopStoragePut(mode, ShopMenu.board.cursor, &record, size);
+~1613 c7547393aedf1d9b|                            |
+~1627 452f0786ac7058bc|                            |
+=1648 4b1898576d17cb4c
++                        } else {
++                            CoopStorageClaim(mode, ShopMenu.board.cursor, cell, 0, &record, size);
++                        }
++                    }
++                    return 0;
++                }
++
+@@ -2180,0 +2349,5
++            } else if (GamePad.Down(PAD_SQUARE) && CoopStorageOn()) {
++                if (ShopMenu.board.page != BOARD_PAGE_WEAPON) {
++                    CoopStorageSort(ShopMenu.board.page); // coop-small2: one move, on the board as it then is
++                }
+=2193 16f3fe3453b2f293

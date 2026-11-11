@@ -1,0 +1,24 @@
+# port/src/app/gameloop.hpp from Chronicle's port/src/app/gameloop.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/app/gameloop.hpp
+base port/src/app/gameloop.hpp
+from 88bbacba4b4227bdb0ab4cdff6a0b29f82474369
+to 678d963e759bfce275103fadca9742777d9846d0
+@@ -26,0 +27,2
++// coop: netplay: more frames for the budget (none without one): a test host's frames spent waiting for its first join.
++void GameExtendFrameBudget(std::int64_t frames);
+@@ -31,0 +34,2
++// coop: netplay: whether the run ended on its --frames budget (a linked copy's Leave says so).
++bool GameFrameBudgetSpent();
+@@ -75,4 +79,5
+- 92ff6495fce234eb
+- 6f9b47271de4c0f9
+- 0861d1d5a1a8662c
+- 4b58937d91ed9549
++ * the interior), "dungeon[:<n>]" (dungeon n, 0-6, map 200 + n, at its floor select; "dungeon:<n>:<floor>"
++ * enters that floor, 1 up, directly), "town:<0-4>" (as edit), "title", "rush", "opening", "menu", "pick"
++ * (debug_start.hpp's picker in the menu's place; co-op), or the populated town presets "e01" (Norune), "e03"
++ * (Queens) and "e04" (Muska Lacka); false for anything else. RunGame then sets DebugMode, skips the warm-up and
++ * starts in that mode, set up as the developer menu (and, for a dungeon, its loader) would have.
+@@ -121,0 +127,2
++// coop: netplay: whether this load is the one a resync of linked copies started (once; nowload.cpp shortens it).
++bool GameTakeResyncLoad();

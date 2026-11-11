@@ -1,0 +1,112 @@
+# port/src/platform/config.hpp from Chronicle's port/src/platform/config.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/platform/config.hpp
+base port/src/platform/config.hpp
+from b06a678d4fb1724ddce235a5e4ad1f117023ad74
+to a6ae7a420b5d4ed3d3665d95e19420cc32ee3fc4
+@@ -3,0 +4,1
++#include <optional>
+@@ -50,0 +52,91
++    // game.coop: on a dungeon floor, the second controller walks a second party member (port/src/coop);
++    // coop: georama: in a town's build mode the two take turns with the editor (coop/coop_georama.hpp).
++    bool              coop = false;
++    // input.controller: 0 reads every controller as usual; 1 or 2 binds this copy's player to the
++    // first or second controller only (port/src/coop/copies.cpp), for two copies side by side.
++    int               controller = 0;
++    // game.window_title, video.window_left and video.window_top: the window's title and where it
++    // opens; empty and -1 keep the defaults.
++    std::string       window_title;
++    int               window_left = -1;
++    int               window_top = -1;
++    // game.netplay: 0 plays alone; 1 or 2 links this copy to another over UDP as that player (port/src/coop/
++    // netplay.cpp), the other copy at game.netplay_peer. Copy n listens on game.netplay_port + n and sends to
++    // game.netplay_port + the other's n; inputs take effect game.netplay_delay ticks after they are read.
++    int               netplay = 0;
++    std::string       netplay_peer = "127.0.0.1";
++    int               netplay_port = 47100;
++    int               netplay_delay = 3;
++    // game.netplay_controller_only: while linked, the keyboard and the mouse reach neither copy's game,
++    // which they would otherwise steer on one copy alone (the mouse turns that copy's camera).
++    bool              netplay_controller_only = true;
++    // game.netplay_keyboard (or DC_NETPLAY_KEYBOARD=1): with game.netplay_controller_only, the keyboard still plays
++    // (it folds into this copy's pad, which the link sends); the mouse stays out. For a player with no controller. Off.
++    bool              netplay_keyboard = false;
++    // game.netplay_wan_lookup: one client hosting asks a STUN server (DC_NETPLAY_STUN, or stun.l.google.com:19302) for
++    // this PC's internet address, to show it. On; false (or DC_NETPLAY_STUN=off) asks nobody.
++    bool              netplay_wan_lookup = true;
++    // coop-upnp: game.netplay_upnp: a host by Multi-player > Host > IP (or NAT > Code) asks the router by UPnP to forward its
++    // UDP port (game.netplay_port + 1) to this PC for as long as it plays, so a friend can join by address or code without
++    // a manual port forward (port/src/coop/netplay_upnp.hpp; DC_NETPLAY_UPNP=1 or 0 overrides). On; false asks nobody.
++    bool              netplay_upnp = true;
++    // coop-lobby: game.lobby_local, where players on this PC come in: "combined" (any
++    // lobby takes one by Start on a free controller; no LOCAL row) or "separate" (MULTIPLAYER > LOCAL's own lobby);
++    // DC_LOBBY_LOCAL overrides. game.netplay_last_code: the code Join > Code joined last (its entry opens with it).
++    // game.netplay_player_id: this copy's own lobby identity (16 hex digits, made once), so a rejoin gets its seat back.
++    std::string       lobby_local = "combined";
++    std::string       netplay_last_code;
++    std::string       netplay_player_id;
++    // coop-consent (Jep, 2026-11-02: the player's own call): game.lobby_show_ip: the host's outside IP shown in the lobby's
++    // header and the waiting lines (R1 in the lobby). Off.
++    bool              lobby_show_ip = false;
++    // game.netplay_catchup (or DC_NETPLAY_CATCHUP=1): the host, playing alone, starts its place over once from its own
++    // state and records its pads from there (netplay's Option B, so a joiner can catch up without a reload). Off.
++    bool              netplay_catchup = false;
++    // coop-areacard (Jep, 2026-11-09): the area name card a mode's load shows (coop/coop_boot.hpp). game.area_card: "retail"
++    // (the default), "short" (a resync's card), "custom" (game.area_card_start, _fade_in, _hold, _fade_out in ticks, 60 a
++    // second, each divided by game.area_card_speed). game.area_card_coop_only (on): a single-player game keeps retail's.
++    std::string       area_card = "retail";
++    int               area_card_start = 20;
++    int               area_card_fade_in = 128;
++    int               area_card_hold = 120;
++    int               area_card_fade_out = 128;
++    float             area_card_speed = 1.0f;
++    bool              area_card_coop_only = true;
++    // coop-snapshot: game.netplay_snapshot (or DC_NETPLAY_SNAPSHOT=1): a catch-up join on a dungeon floor sends the host's
++    // state as a memory snapshot and the joiner replays only the ticks since. Takes effect
++    // only in a build with the fixed layout (DC_FIXED_LAYOUT: the two copies hold the game's memory at one address);
++    // elsewhere a join catches up as before. Off.
++    bool              netplay_snapshot = false;
++    // coop-steamrate: game.netplay_steam_rate: how fast a join's state goes over Steam. 0 or "auto" (the default): the
++    // host paces by what reaches the joiner, starting at 1 MB/s and rising to at most 40 MB/s, backing off when pieces
++    // are lost. A number is a fixed rate in KB/s (e.g. 2048), or text with its unit ("512 KB/s", "2 MB/s"), from
++    // 64 KB/s to 1024 MB/s: Steam sends at exactly that rate, no pacing (DC_STEAM_SEND_RATE, bytes a second, overrides).
++    // Held here in KB/s.
++    int               netplay_steam_rate = 0;
++    // coop: cameras
++    // game.coop_independent_cameras: while linked, each player has a camera of their own that follows
++    // their character and turns with their right stick; each copy shows its own player's. Unset is on
++    // (coop::IndependentCamerasSetting); only an explicit false keeps one shared camera while linked.
++    std::optional<bool> coop_independent_cameras;
++    // coop-inventory
++    // game.coop_own_bags: in co-op, player 2 has an item bag and gilda of their own, and the two send
++    // items to each other (port/src/coop/coop_inventory.hpp). Off: the party's pack and purse are shared.
++    bool              coop_own_bags = false;
++    // coop-menus
++    // game.coop_menus: in co-op, Triangle opens each player's own menu overlay, which pauses nobody
++    // (port/src/coop/coop_menu.hpp), and Start the game's own menu. Off: the buttons are retail's. On by default
++    // (Jep's 2026-10-20 playtest: the real launchers' saves never set it, so they had retail's buttons).
++    bool              coop_menus = true;
++    // game.coop_menu_panel: the small per-player overlay on Triangle (coop_menu.hpp). Off by default (Jep's
++    // 2026-10-20 ask): with it off Triangle opens the game's own menu beside the running world for each
++    // player, and Start is retail's pause again. On: Triangle is the overlay's and Start the game's menu.
++    bool              coop_menu_panel = false;
++    // coop-floorgate: game.coop_story_gather: a floor whose opening scene is unseen, or whose boss is alive, is gone into
++    // by both players together (its gate asks the other to come; port/src/coop/coop_worlds.cpp). On; false: the gates as
++    // before. A link plays by the host's.
++    bool              coop_story_gather = true;
++    // coop-gateflow: game.coop_gate_picker: a floor's exit gate takes its player to the dungeon's floor menu (Circle there:
++    // back to town), not the walk into the gate and its "next floor / back to town" window; the other player on the floor is
++    // asked to go along (port/src/coop/coop_worlds.cpp). On; false: the gates as before. A link plays by the host's.
++    bool              coop_gate_picker = true;
+@@ -51,0 +144,3
++    // release2: game.write_log: Play Dark Cloud Co-op.exe keeps the game's output in save\log.txt (local only, never sent;
++    // the last three starts kept). On; false: no log. The game only keeps the key.
++    bool write_log = true;
+@@ -186,0 +282,8
++// coop: settings for this run only, never written to config.json (the title's Multi-player turns co-op on for the
++// session it starts). apply sets them on the running settings; restore copies the saved values of the same keys from
++// saved into the settings about to be saved. ConfigChange keeps both apart while a session is set; nullptr ends it
++// (the running settings go back to the saved ones). The change hooks run as for ConfigChange.
++using ConfigSessionApply = void (*)(Config &config);
++using ConfigSessionRestore = void (*)(Config &config, const Config &saved);
++void ConfigSetSession(ConfigSessionApply apply, ConfigSessionRestore restore);
++

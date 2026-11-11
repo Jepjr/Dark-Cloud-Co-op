@@ -1,0 +1,234 @@
+# port/src/game/editloop3.cpp from Chronicle's port/src/game/editloop3.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/editloop3.cpp
+base port/src/game/editloop3.cpp
+from f0d923fc37435cf55550ee702eb6b9d93e5168a4
+to a9fc469bf54f4689d6cce339c5ccd8f590a3abec
+@@ -42,0 +43,1
+=42 9504d6e19d884f4b
+@@ -71,0 +73,17
++#include "coop/netplay_test.hpp" // coop-localfix: NetplayMutated
++
++// coop hooks (src/coop defines them at global scope)
++int  CoopWorldsScriptGameFlag(int flag, int value); // coop-mayorhouse (port/src/coop/coop_worlds.cpp)
++int  CoopTownEventMotion(dc::game::CCharacter *character, int motion, bool *over); // coop-xiaopose (port/src/coop/coop_town.cpp)
++bool CoopWorldsScriptWritesHeld();                  // coop-mayorhouse
++bool CoopTownRoomKeepsPeople(const void *program, int event_no); // coop-mayorhide (port/src/coop/coop_town.cpp)
++float CoopTownNearestPlayer(const float *villager, float from_game_player); // opt8 (port/src/coop/coop_town.cpp)
++void CoopScriptMenuOpens(int kind); // coop-scriptmenus: the script's menus on the opener's copy alone (port/src/coop/coop_scriptmenu.cpp)
++int  CoopScriptMenuInit(dc::game::CCamera *camera);
++int  CoopScriptMenuStep();
++int  CoopScriptMenuResult(int here);
++void CoopScriptMenuExit();
++void CoopScriptMenuOver();
++void CoopWorldsSceneChrFile(int index, const char *path);                       // coop-tutimages (port/src/coop/coop_worlds.cpp)
++void CoopWorldsSceneTexture(int block, int file, const char *entry, int order); // coop-tutimages
++
+@@ -423,0 +442,12
++// coop: netplay
++// EdEventPointDraw's spin and the event points' sparkle timer, retail's function statics, here so a resync can
++// start them over: a copy that was in a town before keeps them where they were, and the sparkle draws rand when it
++// restarts. The villagers' ground smoothing is put back alike.
++namespace {
++
++float roty = 0.0f;
++float sys_eff_sc = 0.0f;
++int   sys_eff_cnt = 0;
++
++} // namespace
++
+@@ -433,1 +462,0
+- 6358ccb6d8e9f25e
+@@ -440,3 +468,0
+- e4377253d5bfe162
+- ad00479740350882
+- e3b0c44298fc1c14
+@@ -445,1 +471,8
+- 22229b48a0c188df
++        // coop-localfix (Jep's 2026-10-26 Local playtest: OUT OF SYNC 150 ticks after a town join, then the town reloaded):
++        // a draw function, so a copy that draws fewer frames than it ticks (a catch-up's replay) drew the game's rand
++        // fewer times than the host. The sparkle is only drawn: its own generator. DC_NETPLAY_MUTATE=sparkle_game_rand
++        // (twin): the game's rand, as before.
++        static unsigned int sparkle_rand = 1;
++
++        sparkle_rand = sparkle_rand * 1103515245u + 12345u;
++        sys_eff_cnt = (NetplayMutated("sparkle_game_rand") ? rand() : static_cast<int>((sparkle_rand >> 16) & 0x7FFF)) % 20 + 10;
+@@ -1516,1 +1549,2
+- 2f39d6c079a888a3
++            // opt8: it stops for the nearest player, not the game's alone (a villager another player talks to stood on as it walked).
++            float distance = CoopTownNearestPlayer(villager_position, DistVector(player_position, villager_position));
+@@ -3640,0 +3675,11
++    // coop-mayorhide: a co-op room event with both players in the room keeps the room's people (their buffer, animations)
++    if (CoopTownRoomKeepsPeople(EdEventScript.prog, EdEventInfo.event_no)) {
+~8536 d62367edbfbf1b41|        |
++
+~8562 5a056036f88d8bff|        |
+~8563 0c72423b7a6ce5e6|            |
++        }
++
++        return 1;
++    }
++
+@@ -3822,0 +3868,1
++        CoopWorldsSceneChrFile(i, nullptr); // coop-tutimages
+@@ -3829,0 +3876,1
++            CoopWorldsSceneChrFile(i, path.c_str()); // coop-tutimages: which file each pack is, for the other copy's scene view
+@@ -3970,1 +4017,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(45, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -3999,1 +4048,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(46, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -4034,1 +4085,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(block, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -4850,1 +4903,2
+- c1b302bde470a2cc
++    bool  over = false; // coop-xiaopose: player 2's body in her room event plays its own motion for Toan's
++    int   motion = CoopTownEventMotion(character, GetStackInt(stack++), &over);
+@@ -7359,1 +7413,4
+- 8a3e82fb580bfb86
++    // coop-mayorhouse: not in a room's arrival run as seen on player 2's copy (CoopWorldsScriptWritesHeld)
++    if (!CoopWorldsScriptWritesHeld()) {
+~7359 8a3e82fb580bfb86|        |
++    }
+@@ -7370,1 +7427,1
+- 921b8f7bb761e752
++    SetStack(result, CoopWorldsScriptGameFlag(flag, SaveData->GetGameFlag(flag))); // coop-mayorhouse
+@@ -7381,1 +7438,3
+- a35fe2d1e95f4642
++    if (!CoopWorldsScriptWritesHeld()) { // coop-mayorhouse
+~7381 a35fe2d1e95f4642|        |
++    }
+@@ -7411,1 +7470,3
+- 7a7795b56d0fa58f
++    if (!CoopWorldsScriptWritesHeld()) { // coop-mayorhouse
+~7411 7a7795b56d0fa58f|        |
++    }
+@@ -8768,2 +8829,6
+- 91d52f1810bcc510
+- 4d1420f086134eee
++ * Publishes the world-map or bait choice of the event menu that just finished
++ * to the waiting script.
++ *
++ * Jep (co-op): was PortEdEventMenuMode, which also stepped the menu (EdMenuMode). coop-scriptmenus steps it
++ * in CoopScriptMenuStep (linked, on the opener's copy alone) and the choice is the one every copy has
++ * (CoopScriptMenuResult), so the step and the publishing are apart.
+@@ -8771,5 +8836,8
+- 3861d3a308119496
+- e8530f7e3adf3119
+- 5cf826ed37e3e843
+- 8f33ea31772c343c
+- b5bdcb708c15cb15
++void PortEdEventMenuPublish() {
++    if (menu_mode == ED_MENU_WORLD_MAP) {
++        MenuMapJumpMode = CoopScriptMenuResult(MenuMapJumpMode); // coop-scriptmenus
++
++        if (world_map_result != nullptr) {
+~8774 8f33ea31772c343c|            |
+~8775 b5bdcb708c15cb15|            |
++        }
+@@ -8777,1 +8845,1
+- 36cd40af0a516dec
++    if (menu_mode == ED_MENU_CHANGE_ESA && p_use_item != nullptr) {
+@@ -8779,1 +8847,1
+- f68abe63378970ce
++        ListBaitForScript(reinterpret_cast<RS_STACKDATA *>(p_use_item), CoopScriptMenuResult(EdGetUseItem()));
+@@ -8781,1 +8848,0
+- 47ad9b03c24ea793
+@@ -9012,0 +9080,1
++            CoopScriptMenuOpens(menu_mode); // coop-scriptmenus: whose it is, on every copy
+@@ -9015,0 +9084,1
++                CoopScriptMenuOver();
+@@ -9025,1 +9094,1
+- dbc01d40f7f4e978
++                if (CoopScriptMenuInit(EdEventInfo.camera) != 0) { // coop-scriptmenus: EdInitModeFinish on the opener's copy alone
+@@ -9034,3 +9103,4
+- 1f256d088d4bba0f
+- e3b0c44298fc1c14
+- ada817b0d68159af
++                // coop-scriptmenus: EdDrawOffAll and EdMenuMode on the opener's copy alone; it ends on every copy on its command's tick,
++                // where the choice goes to the script as PortEdEventMenuMode has it (the world map's, a bait's).
++                if (CoopScriptMenuStep() != 0) {
++                    PortEdEventMenuPublish();
+@@ -9040,1 +9110,1
+- 3ebcb3235730056f
++                            int item = CoopScriptMenuResult(EdGetUseItem());
+@@ -9055,1 +9125,1
+- 05814781d6ba1965
++                    CoopScriptMenuExit(); // coop-scriptmenus: retail's EdExitMenu
+@@ -9376,0 +9447,50
++// coop-talks2: a second talk beside the room's own (player 2's, port/src/coop/coop_town.cpp): this file's talk statics and
++// EdEventInfo's talk fields, swapped with a saved set of them around her talk's start, step and draw. The talk's message
++// window (EditMes1) is swapped by its caller.
++namespace {
++struct EdTalkSaved {
++    CNPCharacter *villager;
++    int           chara_info_id;
++    int           camera;
++    TalkModeState mode;
++    int           select;
++    int           mes_make;
++    int           mes_no;
++    TalkDialog    dialog;
++    s32           npc_id;
++    s32           messages[16];
++    s32           select_message;
++    s32           select_prompt;
++};
++
++void EdCloseTalkMes();
++} // namespace
++
++int EdTalkStateBytes() {
++    return static_cast<int>(sizeof(EdTalkSaved));
++}
++
++void EdTalkStateSwap(void *saved) {
++    auto *other = static_cast<EdTalkSaved *>(saved);
++
++    std::swap(other->villager, talk_villager__2);
++    std::swap(other->chara_info_id, talk_chara_info_id);
++    std::swap(other->camera, talk_camera);
++    std::swap(other->mode, talk_mode);
++    std::swap(other->select, talk_select);
++    std::swap(other->mes_make, TalkMesMake);
++    std::swap(other->mes_no, TalkMesNo);
++    std::swap(other->dialog, talk_dialog);
++    std::swap(other->npc_id, EdEventInfo.talk_npc_id);
+~9168 425efa0d7386c89d|    |
++        std::swap(other->messages[i], EdEventInfo.talk_messages[i]);
++    }
++    std::swap(other->select_message, EdEventInfo.talk_select_message);
++    std::swap(other->select_prompt, EdEventInfo.talk_select_prompt);
++}
++
++// coop-talks2: the talk window closed and ready for a talk's first message (EdCloseTalkMes), for her window as her talk starts.
++void EdTalkWindowReset() {
+~9552 8dcf065308589797|    |
++}
++
+@@ -9779,0 +9900,18
++
++// coop-tutimages: the event's sprites and sprite tables, for the other copy's view of this copy's scene (port/src/coop/coop_worlds.cpp).
++ED_SPRITE *EdEventSpriteAt(int index) {
++    return GetSprite(index);
++}
++
++CSpriteTable *EdEventSpriteTable(int back) {
++    return back != 0 ? &SpriteTableBack : &SpriteTable;
++}
++
++// coop: netplay: EdEventPointDraw's spin and sparkle and the villagers' ground smoothing started over for a resync.
++void PortEditLoop3ResetForResync() {
++    roty = 0.0f;
+~444 da57c93fece83087|    |
+~450 31b31b49fa61d1a5|    |
++    g_villager_ground_height_map = -1;
++}
++

@@ -1,0 +1,158 @@
+# port/src/game/runscript_opcodes.cpp from Chronicle's port/src/game/runscript_opcodes.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/runscript_opcodes.cpp
+base port/src/game/runscript_opcodes.cpp
+from 18534f699f504370921e59aa3a8d77f9d89e5ddf
+to 07023027b064fa4b5af68aba485552eea6524407
+@@ -28,0 +29,8
++// Jep (co-op): the opcodes src/coop/coop_target.cpp replaces (each player's monster target), for the table below.
++int _GET_DISTANCE(RS_STACKDATA *stack, int argc);
++int _GET_POSITION(RS_STACKDATA *stack, int argc);
++int _CHK_USER_INNER_PRODUCT(RS_STACKDATA *stack, int argc);
++int _GET_CHR_ID(RS_STACKDATA *stack, int argc);
++int _GUARD_SEARCH(RS_STACKDATA *stack, int argc);
++int _GET_USER_STATUS(RS_STACKDATA *stack, int argc);
++
+@@ -223,37 +231,1
+- 8d64a30d9de151b6
+- 8611cc9f7074d7aa
+- 533a9f1155720e5e
+- f4fa4a68bc30ef78
+- 82141eb355d284e4
+- b64ef81b17c6d801
+- 2f236d5ff444c1d0
+- e3b0c44298fc1c14
+- 0e957396b7053e2f
+- e3b0c44298fc1c14
+- f51678ecc3ded1d3
+- c9531080d0271d06
+- d625d7ab43bcf189
+- 6cd4f10a96de3dbf
+- 1517c2f80ecc5a3d
+- ebc98014457793b1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 328285254ea98f5e
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 8d64a30d9de151b6
+- dba678e7bfb62cbc
+- 533a9f1155720e5e
+- d252880d9d6d3d36
+- 82141eb355d284e4
+- a74f1ee99c25d673
+- 8314fbe67a109050
+- e3b0c44298fc1c14
+- 9bc6696f2397084a
+- 1365534a2ee8e787
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- a3e217b5250c4fea
+- 8eedb17c12a87837
+- 28d86778615f6af4
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
+@@ -261,5 +233,1
+- f7261cac72fca8d6
+- d58566cbd8536750
+- 4857ec93702d88ca
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
+@@ -332,41 +300,1
+- 8d64a30d9de151b6
+- 17a5285130206b9d
+- 533a9f1155720e5e
+- 01bea4fccc9c23c9
+- 82141eb355d284e4
+- 8314fbe67a109050
+- 6cda50c4f3bd9f53
+- 4dab6e52af4dc339
+- dcc9a1d045cd4fa0
+- 3209f27c9bcefe2a
+- 025206a578be25a2
+- efbc34b587a9f2c1
+- e3b0c44298fc1c14
+- 2b469b9f495ad0a8
+- 06a4e89cb19cc2b9
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 7d78d086876520f7
+- 915d1e0225b8b498
+- ee4a5c3ba62a68bb
+- 098fd9413b313f3c
+- 755803ff003ba186
+- 61b04394a73e2d1f
+- e3b0c44298fc1c14
+- 4ed49bf7f3ecf773
+- 27bb681b6c3571a3
+- 32ae04ec77c4bb1c
+- cb23e26cb1d75dd5
+- 21cb47fd5828cae6
+- 66d7a1718c473af9
+- 2c1be200f7e55797
+- b2c6081102d64a64
+- 364814856ed13dd5
+- e3b0c44298fc1c14
+- 67306f5f5acd73d9
+- 6660632e7661e0ad
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- d3a5a12966c4f154
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
+@@ -1167,7 +1095,1
+- 8d64a30d9de151b6
+- f5120a9d0aa5c6ba
+- 533a9f1155720e5e
+- a9941c34b9de00a4
+- fab924484f9190f7
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
+@@ -1704,27 +1626,1
+- 8d64a30d9de151b6
+- 141495d4147ba41c
+- 533a9f1155720e5e
+- d567636998b23c25
+- 82141eb355d284e4
+- 4dab6e52af4dc339
+- 8314fbe67a109050
+- b9046e74aae40d97
+- e3b0c44298fc1c14
+- 7d78d086876520f7
+- 915d1e0225b8b498
+- 4506f7bf020f7730
+- f6859e4e8534022b
+- 993765fc5e0914ab
+- 4d71141476d1a36c
+- 71ac61715ae83212
+- cb23e26cb1d75dd5
+- e3b0c44298fc1c14
+- d510a75505001bc2
+- ae0aef581da7958c
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 4c23d177150c8af1
+- 4463a308ccfd2bc9
+- dd8d92d426f381b6
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
+@@ -1772,15 +1668,1
+- 8d64a30d9de151b6
+- 426f9ecae5497a98
+- 533a9f1155720e5e
+- c660254a98b1a111
+- 16f74177e1ca1163
+- 64eba130d72bb060
+- 55d3f1992473099e
+- e3b0c44298fc1c14
+- 973a2860af6222c9
+- 1785df7dc14e6015
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 1f6c4b0626281191
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.

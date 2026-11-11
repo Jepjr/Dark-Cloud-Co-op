@@ -1,0 +1,32 @@
+# port/src/game/effectmacro.cpp from Chronicle's port/src/game/effectmacro.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/effectmacro.cpp
+base port/src/game/effectmacro.cpp
+from e9d55216d1a0551880e718c9b5daa879c6c2cea7
+to 8ca0b82e29dad17b0eb17828a8b2a709c2ded84c
+@@ -8,0 +9,1
++#include <cstdio>
+@@ -24,0 +26,2
++const char *TestEnv(const char *name); // coop-drawrng (port/src/coop/coop_core.cpp)
++
+@@ -28,0 +32,4
++// Jep (co-op): external linkage: coop/netplay.cpp carries the effect clock in a resync's state, coop/netplay_test.cpp
++// perturbs it.
++int effect_count;
++
+@@ -32,1 +38,0
+- 54d100133fab3dfd
+@@ -54,0 +61,14
++    // coop-drawrng: the smoke is made while drawing, only for chimneys in this copy's view (a joiner replaying the host's pads
++    // parted after a long idle in Norune, coop-netbugs 2026-10-26); its draws come from the draw stream (DrawRngEnter).
++    // DC_TEST_SMOKE_DRAWS=count says how many puffs have been made at the first and every 100th; =skip makes none, as a
++    // copy whose camera sees no chimney would (drawrand.ps1).
++    static const char *smoke_test = TestEnv("DC_TEST_SMOKE_DRAWS");
++    static long        puffs_made = 0;
++
++    if (smoke_test != nullptr && std::strcmp(smoke_test, "skip") == 0) {
++        return;
++    }
++    if (smoke_test != nullptr && (++puffs_made == 1 || puffs_made % 100 == 0)) {
++        std::fprintf(stderr, "smoke: %ld puffs made\n", puffs_made);
++    }
++

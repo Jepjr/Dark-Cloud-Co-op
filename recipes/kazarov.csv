@@ -1,0 +1,7 @@
+"Recipe","Target","Base","Hunks","Added","CopiedByNumber","RemovedByHash"
+"K002-tools-kazarov-include-platform-arena.hpp.recipe","tools/kazarov/include/platform/arena.hpp","tools/kazarov/include/platform/arena.hpp","1","18","0","0"
+"K003-tools-kazarov-include-platform-memory.hpp.recipe","tools/kazarov/include/platform/memory.hpp","tools/kazarov/include/platform/memory.hpp","1","2","0","0"
+"K006-tools-kazarov-src-cpp-platform-arena.cpp.recipe","tools/kazarov/src/cpp/platform/arena.cpp","tools/kazarov/src/cpp/platform/arena.cpp","5","72","3","4"
+"K007-tools-kazarov-src-cpp-platform-input.cpp.recipe","tools/kazarov/src/cpp/platform/input.cpp","tools/kazarov/src/cpp/platform/input.cpp","2","3","0","2"
+"K008-tools-kazarov-src-cpp-platform-memory.cpp.recipe","tools/kazarov/src/cpp/platform/memory.cpp","tools/kazarov/src/cpp/platform/memory.cpp","3","28","10","8"
+"K009-tools-kazarov-src-cpp-gfx-memory.cpp.recipe","tools/kazarov/src/cpp/gfx/memory.cpp","tools/kazarov/src/cpp/gfx/memory.cpp","6","58","1","0"

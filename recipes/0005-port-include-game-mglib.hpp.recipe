@@ -1,0 +1,19 @@
+# port/include/game/mglib.hpp from Chronicle's port/include/game/mglib.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/mglib.hpp
+base port/include/game/mglib.hpp
+from cf69cb7e0f4cb4a13db4ef1275865c9fa90b87e6
+to f811f6866c9b88f1eb2609f581c7484364c23a0c
+@@ -283,0 +284,13
++/**
++ * Jep (co-op): MGSetViewMatrix for a view drawn into another target within the tick (a co-op player's own
++ * camera, the lobby's models), which is not a camera cut of the frame's own view.
++ */
++void MGPortSetViewMatrixNoCut(float (*view)[4], float *position);
++
++/**
++ * Jep (co-op): cameras. Keeps the view the frame drew from as the one the next tick's camera cut is
++ * measured against, whatever view the frame leaves set after it (a linked copy that drew from its own
++ * player's camera puts the game's back for the next tick to read: port/src/coop/coop_camera.cpp).
++ */
++void MGPortHoldTickView();
++

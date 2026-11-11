@@ -1,0 +1,804 @@
+# port/src/game/dun/gameloop.cpp from Chronicle's port/src/game/dun/gameloop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dun/gameloop.cpp
+base port/src/game/dun/gameloop.cpp
+from 0e33bf793f50f825f5113006e0b97828a65c8531
+to e714046d220f35a6701934d0131f7c21b27e29bd
+@@ -31,0 +32,10
++#include "coop/coop.hpp"
++#include "coop/coop_combat.hpp" // coop: combat
++#include "coop/netplay.hpp"
++#include "coop/coop_worlds.hpp" // coop-localfix: player 2's Toan unseen until her member plays
++#include "coop/coop_inventory.hpp" // coop-inventory
++#include "coop/coop_menu.hpp"      // coop-menus
++#include "coop/coop_fullmenu.hpp"  // coop-menuflash: FullMenuMapKept
++#include "coop/coop_pause.hpp"     // coop-pausegeo
++#include "coop/coop_message.hpp"   // coop-itemprompt
++#include "coop/coop_interact.hpp"  // coop-b4story
+@@ -96,0 +107,8
++namespace coop {
++void DungeonTestSeed(); // coop-fixplace (port/src/coop/coop_duntest.cpp): a test's fixed floor
++int  ItemSelectLoop();  // coop-menuleakfix (port/src/coop/coop_fullmenu.cpp): a script's item window on its owner's screen
++int  ActorNumber(int index); // coop-opt7e (port/src/coop/coop_actor.cpp)
++bool PresentLight(int player, const float *stood, float light[4][4], float colour[4][4]); // coop-opt7e (coop_opener.cpp)
++} // namespace coop
++void CoopWorldsAtlaListMake(int dungeon); // coop-joinatla (port/src/coop/coop_worlds.cpp)
++
+@@ -102,2 +120,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): external linkage: coop/coop_audio.cpp, coop/coop_combat.cpp and dun/motiondrive.cpp read it.
+@@ -105,1 +122,3
+- f8b67bfe8f7206eb
++extern constexpr std::array<s32, 6> defWeapon__6 = {ITEM_WEAPON_DAGGER_BROKEN, ITEM_WEAPON_WOODENSLINGSHOT_BROKEN, ITEM_WEAPON_MALLET_BROKEN, ITEM_WEAPON_GOLD_RING_BROKEN, ITEM_WEAPON_FIGHTING_STICK_BROKEN, ITEM_WEAPON_MACHINE_GUN_BROKEN};
++
++namespace {
+@@ -411,0 +431,3
++} // namespace
++
++// Jep (co-op): external linkage: dun/motiondrive.cpp (coop's motionDrive) steps it.
+@@ -415,2 +436,0
+- 0fdd034175cd9c06
+- e3b0c44298fc1c14
+@@ -450,2 +470,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): external linkage: coop/coop_hud.cpp reads the player's texture animations.
+@@ -454,0 +474,2
++namespace {
++
+@@ -848,0 +870,3
++} // namespace
++
++// Jep (co-op): external linkage: coop/coop_lockhud.cpp draws its life bar in them.
+@@ -852,0 +877,2
++namespace {
++
+@@ -1746,1 +1772,1
+- f5f04e1986a2c4b1
++        CoopWorldsAtlaListMake(dungeon); // coop-joinatla: BtAtraListMake, its random state kept for the other copy
+@@ -1859,1 +1885,1
+- aa7c684bf36a7f25
++            if (coop::ItemSelectLoop() != 0) { // coop-menuleakfix: EventItemSelectLoop, drawn on its owner's copy
+@@ -2018,5 +2043,0
+- 5b8e5412a0bf94b6
+- 2b9f255930d1e83e
+- a634353aed65a368
+- bc3c50159ce02f49
+- be339122338fc295
+@@ -2034,37 +2055,3
+- a1c3e3bef537ee46
+- 3685353543ec0dc5
+- 5dfb1cecf642b09f
+- e3b0c44298fc1c14
+- 92496f376ae363d7
+- c21ede269257653a
+- 70584909e5f061da
+- 8d41ef89c307369c
+- fbf1599b6e2716ff
+- a6f56dd36a5022aa
+- e3b0c44298fc1c14
+- c11a26d461161ab2
+- 123074ce31333e46
+- bca764ad6f97acb1
+- e3b0c44298fc1c14
+- c8f2c3fce89e9f15
+- e3b0c44298fc1c14
+- 25cc57606da08bc4
+- e3b0c44298fc1c14
+- 8670e35d98d552d1
+- e3b0c44298fc1c14
+- 52a85c269d893478
+- 00b6456c2158c694
+- 7e31a92d2dda021d
+- 7ebd41ff4dd8a1f5
+- 6814666cf3895e1e
+- e3b0c44298fc1c14
+- 0c409cc846d96984
+- 8daadb35e31969ca
+- 2bc7bf11da04616c
+- ce7a476bc7765c32
+- e3b0c44298fc1c14
+- 91c3b6df19ec5e54
+- 8473d0b3a810a324
+- 811a967e55f4a8b2
+- a182d626aa2f875b
+- 28d86778615f6af4
++    // The Atlamillia lights the player from wherever its effect stands. coop-opt7e: the body of the player whose Atla it is
++    // (an opener's copy runs it as its engine: P2+ run P1's routine); retail's light, its rate, from coop::PresentLight.
++    coop::PresentLight(coop::ActorNumber(0), CharaFrame->position, light, colour);
+@@ -2147,0 +2135,22
++    // coop: cameras
++    // Drawing a monster writes what the tick reads (its hit and projectile points, its events' timers,
++    // current_monster). Which dormant ones draw is this copy's own detail setting, so linked copies put
++    // those back: rendering writes no simulation state the other copy would not.
++    struct Dormant {
++        std::remove_reference_t<decltype(unit->effect[0])>  effect;
++        std::remove_reference_t<decltype(unit->effect2[0])> effect2;
++        std::remove_reference_t<decltype(unit->effect3[0])> effect3;
++        std::remove_reference_t<decltype(unit->event[0])>   event;
++        std::remove_reference_t<decltype(unit->event2[0])>  event2;
++    };
++
++    static Dormant saved[16];
++    bool           linked = NetplayLocalPlayer() != 0;
++    int            current = unit->current_monster;
++
++    for (int i = 0; linked && i < 16; i++) {
+=2143 7039bff67f0397fd
++            saved[i] = {unit->effect[i], unit->effect2[i], unit->effect3[i], unit->event[i], unit->event2[i]};
++        }
++    }
++
+@@ -2152,0 +2162,8
++
++            if (linked) {
++                unit->effect[i] = saved[i].effect;
++                unit->effect2[i] = saved[i].effect2;
++                unit->effect3[i] = saved[i].effect3;
++                unit->event[i] = saved[i].event;
++                unit->event2[i] = saved[i].event2;
++            }
+@@ -2154,0 +2172,4
++
++    if (linked) {
++        unit->current_monster = current;
++    }
+@@ -2171,1 +2192,2
+- e5381d554380b926
++// centre is the character the floor is drawn round: CoopViewFrame.
++static void DrawDungeon(CFrameVu1 *centre) {
+@@ -2190,0 +2213,1
++            coop::CoopQuickSlotTextureCopy(); // coop-inventory: P2's icons on P2's own window
+@@ -2213,0 +2237,1
++        coop::CoopQuickSlotTextureCopy(); // coop-inventory: P2's icons on P2's own window
+@@ -2224,1 +2248,1
+- 9533bcaeb3895d35
++        NowDngMap->DrawMap(NowCamera__3, centre);
+@@ -2235,1 +2259,1
+- 19f042807880da40
++        sceVu0CopyVector(box_pos, centre->position);
+@@ -2237,0 +2262,2
++        coop::HisPresentationBoxesDraw(centre->position); // coop-b4story: her screen keeps the floor's other boxes
++
+@@ -2253,1 +2279,1
+- a643099d3755ccc7
++    if (atraGetStatus == 0) { // (coop-opt7: his Atla's status is his copy's alone; pt1109c's her-screen exception is gone)
+@@ -2257,1 +2283,2
+- ec9c29cad4619da6
++        sceVu0CopyVector(atra_pos, centre->position);
++        coop::PauseAtlaDrawBegin(); // coop-pausegeo: the bob holds with the world
+@@ -2258,0 +2286,1
++        coop::PauseAtlaDrawEnd(atra_pos);
+@@ -2261,1 +2289,1
+- 5c0d0d4fdf20863d
++    const bool hide_player = CoopWorldsHideDungeonPlayer(); // coop-localfix
+@@ -2263,2 +2291,2
+- 93964914f055f5e3
+- c4d2a4e57c730261
++    if (!hide_player) {
+~2261 5c0d0d4fdf20863d|        |
+@@ -2265,0 +2294,10
++    CoopDrawShadow();
++
++    const bool draw_player = CoopPlayerShown() && EdEventInfo.player_draw != 0 && !hide_player; // coop-fpvisible
++
++    if (draw_player) {
++        CoopDrawPlayer();
++    }
++    CoopPlayerDrawReport(draw_player);
++
++    CoopDraw();
+@@ -2319,1 +2357,1
+- 1c547c9ce6110999
++        sceVu0CopyVector(water_pos, centre->position);
+@@ -2346,1 +2384,1
+- c7f54d669c7b4ef5
++    sceVu0CopyVector(raster_pos, centre->position);
+@@ -2348,1 +2386,1
+- c6c2eed2dad15dd5
++    NowDngMap->DrawRaster(centre);
+@@ -2351,1 +2389,1
+- 1522f7013ab9b372
++        NowDngMap->DrawFire(centre, NowCamera__3);
+@@ -2353,1 +2391,1
+- 9009833630dfc3dd
++        NowDngMap->DrawFireFreeStyle(centre, NowCamera__3);
+@@ -2460,0 +2499,1
++    CoopDrawPartnerMark(bicCursorFrame); // coop-p2marks: hers over her, from where she stands
+@@ -2465,0 +2505,1
++            coop::LockHudBegin(); // coop-lockhud: this copy's own player's lock's name and bar
+@@ -2469,1 +2509,4
+- df7420492c1b0fb1
++                if (coop::LockHudPlayerPreview()) {
+~2469 df7420492c1b0fb1|                    |
++                }
++
+@@ -2472,0 +2516,2
++            coop::LockHudEnd();
++
+@@ -2537,0 +2583,1
++                CoopDrawShots();
+@@ -2559,1 +2605,2
+- d6f8c6960db07df1
++        const int hud_y = coop::FullMenuHudY(rogoY3); // coop-hudblink: hidden by this copy's own menu only
++        int       gauge_alpha = hud_y + 0x60;
+@@ -2561,1 +2608,3
+- 34289375cfa0bf95
++        // coop: combat (the linked copy whose player is P2 shows P2's weapon panel instead)
++        if (CoopDrawWeaponPanel(gauge_alpha)) {
++        } else if (static_cast<int>(BtActStatus.action_gauge) >= 100) {
+@@ -2571,1 +2620,1
+- cc575c1a0612878e
++        if (static_cast<int>(wear) < 100 && !coop::g_weapon_panel_shown.drawn) { // coop: combat
+@@ -2578,1 +2627,1
+- 131e089e12efd411
++        if ((infoMap != 0 || coop::FullMenuMapKept()) && NowDngMap->map_type == 1) { // coop-menuflash: hers beside his menu
+@@ -2592,2 +2641,4
+- bc7c4f69a80c342e
+- c3a6754ab337176c
++        CoopTopStatusInfo(hud_y, itemNowSel, UserStatus->cur_floor); // coop: combat (P2's on linked copy B)
++        CoopDrawHud(hud_y);
++        coop::MenuDraw(); // coop-menus: this copy's player's overlay
++        CoopStatusErrDraw(hud_y); // coop-p2hurt: her ailments on her copy
+@@ -2620,0 +2672,2
++    CoopWorldsSceneSpritesDraw(); // coop-tutimages: the other copy's scene pictures, while this copy shows its scene
++
+@@ -2639,1 +2692,3
+- 571d039a0cc020fd
++    // coop-pt1109c: DngMessMan.enabled, but his presentation doesn't shut hers (DngMesEnabledHere); coop-itemprompt: the
++    // other player's weapon message is not drawn here (DngMesShown).
++    if (DngMessMan.hide_timer <= 0 && coop::DngMesEnabledHere() != 0 && coop::DngMesShown()) {
+@@ -2641,1 +2696,1
+- 64c6bee44e5b6e28
++            int mes_no = coop::DngMesDrawn(); // coop-p2hurt: her own thirst's message on her copy
+@@ -2698,0 +2754,2
++    coop::MenuDrawPromptCover(); // coop-menus: P2's prompt, on P1's linked copy
++
+@@ -2708,0 +2766,8
++// coop: cameras
++// Linked copies with a camera each draw their own player's view (CoopViewBegin).
+=2171 e5381d554380b926
++    CoopViewBegin();
++    DrawDungeon(CoopViewFrame());
++    CoopViewEnd();
++}
++
+@@ -2716,489 +2781,1
+- 73152ba3f9fbab60
+- 0b6f5aa5e99beb30
+- 139eda4b87442b44
+- 1457cd0300dda765
+- 82ae70c8be564b60
+- e3b0c44298fc1c14
+- 108559991cd8d5fb
+- ecb3ab763f00631f
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 616d88c021a917df
+- 0a2a5f6d89a5b030
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 93964914f055f5e3
+- e219382cc05fbe12
+- 78507860858c03f7
+- 55e7cb315f819123
+- dabafa9c39e209bc
+- e3b0c44298fc1c14
+- c0745a9698ea6865
+- e3b0c44298fc1c14
+- 2bf43d29ab064044
+- 1569331a3d9b1167
+- e0b8e95ad67274cf
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 908b236f1197fbf4
+- 08dc987dec9abbb8
+- 49ffb483996aade5
+- 9bf31e77fb1cc6d1
+- affe96e4220ff3e6
+- 4b9362262b583cd5
+- e3b0c44298fc1c14
+- 9bcb65e74609813c
+- 5f7d21754da63232
+- e3b0c44298fc1c14
+- 9014e1b2cfab37ac
+- e5e9b756cb3325c9
+- eac80d801dc18ea6
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- f9a0ab3e9a9e09ec
+- 0a4b38709b7a8e7d
+- 9bf31e77fb1cc6d1
+- cad786e788b1f1fc
+- 4b9362262b583cd5
+- e3b0c44298fc1c14
+- 9bcb65e74609813c
+- 5f7d21754da63232
+- e3b0c44298fc1c14
+- 9014e1b2cfab37ac
+- 605a9a2da70d59a1
+- eac80d801dc18ea6
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 5a3f51526360aad0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- a30c02aa7c0945b1
+- f9eb18db2a2a187c
+- 4e2894f8bbde8956
+- 58bf2040b9ada942
+- e3b0c44298fc1c14
+- 592b97768cb98ade
+- 6abb5a0c885576ef
+- e3b0c44298fc1c14
+- 2ed7839f91ed4bc0
+- e3b0c44298fc1c14
+- 8c1f5b17d08c117c
+- c4ec8b1093a94436
+- 0bf0a088a649c22d
+- e3b0c44298fc1c14
+- 603d162ed6493e57
+- cee6aa0aa5f94f3d
+- e3b0c44298fc1c14
+- d7f0fd4c2912fef4
+- 3e0626479d0868f7
+- c9ae42e16b6c41aa
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- db2185a41ee927b4
+- 8a232ae9499ed0ac
+- 172d4debfb30c074
+- eeeaf20c62769099
+- 99bac45ac8526ded
+- 77885ad5ce27a0ac
+- 8ab84d92c7f29652
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 780c29fffdae257f
+- e3b0c44298fc1c14
+- a8fc0eb220c3b6db
+- 8db1c94000467104
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- bcfd49348a37a2a2
+- 6006ee8694193896
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 5a8aac2d6dbe47e3
+- 7e5edff013aa1f04
+- e3b0c44298fc1c14
+- 1d16db0452d18084
+- e3b0c44298fc1c14
+- b33bd3a9561338a2
+- e3a70ef72264e635
+- e3b0c44298fc1c14
+- c0745a9698ea6865
+- e3b0c44298fc1c14
+- 2bf43d29ab064044
+- 1569331a3d9b1167
+- e0b8e95ad67274cf
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 1cffefed9c2465e0
+- 4f862edb085ecc7c
+- bec59a3b758c037d
+- b2a0ec83d341eeb5
+- e3b0c44298fc1c14
+- 9bcb65e74609813c
+- 5f7d21754da63232
+- e3b0c44298fc1c14
+- 9014e1b2cfab37ac
+- e5e9b756cb3325c9
+- eac80d801dc18ea6
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 6324ec750e821a0c
+- 3350aa1453aa9903
+- 4f862edb085ecc7c
+- bfb795216be4057a
+- b2a0ec83d341eeb5
+- e3b0c44298fc1c14
+- 9bcb65e74609813c
+- 5f7d21754da63232
+- e3b0c44298fc1c14
+- 9014e1b2cfab37ac
+- 605a9a2da70d59a1
+- eac80d801dc18ea6
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 9c3a487dfccfcb52
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- a8fc0eb220c3b6db
+- 8db1c94000467104
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 532a976d5a51fcfe
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- cface4a347cf5c32
+- de9062d02467e6b6
+- 8510a32fb7435c5f
+- 1cf425dce9599dbe
+- 4281bba474dae42d
+- 86afdf70a95436e8
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- fe269eb563e866ef
+- ecb3ab763f00631f
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- e6143b36c93df4ec
+- a85af3055f961864
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 575b640083d8fef7
+- 616d88c021a917df
+- 5ae01e71ce668876
+- ea6c026b03ff84d0
+- dc4fc838f345edc3
+- e3b0c44298fc1c14
+- e9f3a74ddc529245
+- b8cd66ec5b383f46
+- 7af9935e0e43e254
+- e3b0c44298fc1c14
+- 53f5cd75681b5c90
+- c00bab7e3e881b9f
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- d4192413bb58fe0d
+- 9e3001bf0551f95f
+- f5b27c218adf23cf
+- 084e1512c6c04485
+- df5129c3d4013a41
+- 86afdf70a95436e8
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 93964914f055f5e3
+- f6b32b98960278b8
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 5346c07f65b26ee0
+- f058b0f2cc5f2eaf
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- a9949d914f89ce17
+- 23a4b5c454353d8a
+- e3b0c44298fc1c14
+- c48c84e3ca45bc9f
+- e3b0c44298fc1c14
+- 302af069c9d36c8f
+- 64c7db75820894f6
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- a6f7a039e5fa39a8
+- 10dd4fc1c495b168
+- 66b0e1167ef0f742
+- e3b0c44298fc1c14
+- fc09461ef307f302
+- 261f156c0fd71c24
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 4b594bd39f9c030a
+- e969a714026a8093
+- b5b51748422ee586
+- 0ed902f76c860901
+- e3b0c44298fc1c14
+- 1be1c440801f5714
+- 47ebb63df1aec12a
+- e3b0c44298fc1c14
+- 307e53cb7e123c01
+- 9daed514d8a225d3
+- ca61cd59f8d54a87
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- b331399bcd175af4
+- 48223896f8816832
+- d625d7ab43bcf189
+- 3346f9b309a72a8b
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 9a2547c6c27201a8
+- 68e6e196945885c0
+- e3b0c44298fc1c14
+- 92f79472267b9727
+- 7c0d4128ee82b4a2
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- d6ff6e1f2c73ccc5
+- e3b0c44298fc1c14
+- 9cf801144ba2d381
+- 24ef2e9aae94a895
+- 77885ad5ce27a0ac
+- 496537162b903f0e
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 3e2bce9aa20f3946
+- e3b0c44298fc1c14
+- a6caad0bbc356142
+- 8344dcb12a7ee2e8
+- 0aab3e80cba83031
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 5dedf4f030484fd8
+- e3b0c44298fc1c14
+- 063fb0fc95a7cf27
+- 897ef4a19ed3efde
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 04052b9e7a6c8983
+- 5ae01e71ce668876
+- ea6c026b03ff84d0
+- e3b0c44298fc1c14
+- 9611cf3d7c23324f
+- 2eef5455f975fb05
+- e3b0c44298fc1c14
+- 8cff341d3bef7d13
+- 501695ca7c0058fa
+- 974255aab7a0bf49
+- 86afdf70a95436e8
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 0d56ce80fd29f4c3
+- a4e0ea3303210c00
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 345808cbd7d9fed5
+- cdae72a5424c3042
+- 8c4a5b65f1b9b518
+- 8a2ec4473134be3e
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 291b944c40b66a2b
+- e3b0c44298fc1c14
+- 25e728959fb0c76e
+- f70474ffd468343d
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 9b5bcbf343909c8a
+- 3238e9665d32111f
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 93f7b3e1aa648c26
+- e3b0c44298fc1c14
+- 49cd0cabdacc850a
+- e3b0c44298fc1c14
+- 7a2c8a394269e5d0
+- b38e19e2b10340e6
+- 21df09981fe6a877
+- 85465c57614b3cde
+- 084e1512c6c04485
+- c4eb41e26afd740b
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 3eb116a7c09f256c
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 7980b687cbb56905
+- 23181ba8bba9c7f9
+- 4cbebe05b796c9d0
+- 190bcc4431e8451a
+- 66d7035bd9d4360f
+- 8a689eb21ca74218
+- 0bf0a088a649c22d
+- 084e1512c6c04485
+- 1983dc0136ac31a9
+- 86afdf70a95436e8
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 66d35c997e46d510
+- ecfb1431b9afd2c2
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- c558fefc29441be5
+- e3b0c44298fc1c14
+- a95d94b78335dfe9
+- 7f7f3c23ef86d47b
+- 94b136bae15287a8
+- 377cdeac94e429cf
+- 2a44168318e224e1
+- 244c216bb338155c
+- 17a522520e547ab8
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 0558e076e15c575e
+- 1d960e9d4a5bac42
+- 4f456793caf45db0
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 2b2d6753abd1a56d
+- e3b0c44298fc1c14
+- 3854279aa3caa7e3
+- ae0aef581da7958c
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 60fb1929f1c647b4
+- 4a0b0fb8e946dbcd
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 264ab4ffff4154f2
+- e668f1487ca89a66
+- ebd4cd1b08b5543e
+- 2affb0159adc9001
+- e3b0c44298fc1c14
+- 5cf80fc866200170
+- e3b0c44298fc1c14
+- 39df34217022afe1
+- ca452be998993068
+- 8ec3643e04ca7232
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 2f2c5e410a7703e0
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- b078ba8f7c48df4d
+- b24cd42ca6040de3
+- e3b0c44298fc1c14
+- bb92e3dc86a43a5a
+- 611814f138d9e07b
+- e3b0c44298fc1c14
+- 9cbf6497c4527422
+- c5c41134e8f7a27d
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 6c4fb114ebe389f8
+- e3b0c44298fc1c14
+- a408e2ddfa519491
+- 3fe50ca05355f856
+- e7f1e24d6d67a1fc
+- e3b0c44298fc1c14
+- 06fa3587ce3f02f1
+- fc103f51bb7a87ea
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- ce037c6461d7e3a3
+- bb9b2e8245e022f1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 58fba53892491abb
+- 5b7d74dbac01bb19
+- e3b0c44298fc1c14
+- 0a29192906260643
+- de5b0db5ee8be148
+- 4ed64dcd7e35fd19
+- 7c945da289a54600
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 0b11edca28500607
+- bd898faf05d46ebb
+- e3b0c44298fc1c14
+- 33ec4eb4a0bec6e4
+- e3b0c44298fc1c14
+- 5b1e561c82302075
+- f6e8bc287fc89e7d
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 9bab2a07299baad8
+- 0ea502cfbad75e54
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- d7790dd4c57b95b3
+- d07da73fc4132708
+- f915bd78ab77afb3
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 23afbf849ef33c37
+- 5055ed8d36d27b33
+- a4b0e55d57fecdca
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 6d3fb8e29b3abf08
+- ecb3ab763f00631f
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- fde5cfe11d66973b
+- 550755c1ac743701
+- e3b0c44298fc1c14
+- e3c4fc7a599a5c59
+- c3d67e6111a23b12
+- 21ae3ffc8cef8e98
+- d625d7ab43bcf189
+- 4305d6d6ad092033
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 407a348b6bcdf45e
+- 817f14757d0a8ca6
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- c89d80a096e307c3
+- a941458b30892588
+- a06fef9b0f562dc0
+- e3b0c44298fc1c14
+- 3f9d2af1f6362deb
+- c710cff4029d0e41
+- d625d7ab43bcf189
+- 9da3a81f91c0f14d
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 20924ca77bfed69a
+- 313f023063c86917
+- e3b0c44298fc1c14
+- fb02a8979e84ae7f
+- 447d53c728d9b494
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 9f873196085b3833
+- d1b1afba9cccd40e
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- f7f6887e08b68aa6
+- e3b0c44298fc1c14
+- 7c42b56f1410c63f
+- e3b0c44298fc1c14
+- a9bba450ebbe3459
+- 2eb05fe435237f28
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 4961eb63bf577d8b
+- 9eb39a7024ea3ec1
+- daeadd210251cf4a
+- 333c0e60f6f22cc7
+- d43a743e33e5acc4
+- 3f94ba22dabeba86
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/added/port/src/dun/motiondrive.cpp, which replaces this function.
+@@ -3216,0 +2794,1
++    coop::DungeonTestSeed(); // coop-fixplace: a test's fixed floor (DC_DUNGEON_TEST_SEED)
+@@ -4955,2 +4533,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): external linkage: coop/coop_camera.cpp's cameras keep it.
+@@ -4959,0 +4537,2
++namespace {
++
+@@ -5466,2 +5045,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): external linkage: coop/coop_camtest.cpp (coop-lockhud) reads it.
+@@ -5471,33 +5049,1
+- 0fdd034175cd9c06
+- e3b0c44298fc1c14
+- fbe1491de37867f4
+- 324f2dcffa8e73fa
+- 32f0636ba72b4b28
+- b6770c47b3520dce
+- e3b0c44298fc1c14
+- 55d424c7a5147958
+- db83d8afbfa6135e
+- e3b0c44298fc1c14
+- 5d4feb530ffa949d
+- 733cc4d6d0b8a457
+- 38678aac584d3bec
+- cd1f59b505785cc2
+- 48e61ff6e5e38045
+- a0b632c3cc9a1614
+- 542933b96e157d66
+- 0d591bad3a1fef5b
+- 192e9c369e593bbf
+- a80fd75e3a5af1f1
+- 3fffa157afc67f08
+- e3b0c44298fc1c14
+- 0fd4e45fcf8d60e5
+- e3b0c44298fc1c14
+- 7b9839aa4d4f4cbb
+- 3588b1229fdef314
+- e09d8b8cf485e02a
+- 411bd2608ff11db2
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 9f5322bc2beffdd1
+- 4b392659c041072f
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_lockhud.cpp, which replaces this function.

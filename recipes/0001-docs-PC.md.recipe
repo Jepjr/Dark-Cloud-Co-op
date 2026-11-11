@@ -1,0 +1,26 @@
+# docs/PC.md from Chronicle's docs/PC.md (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target docs/PC.md
+base docs/PC.md
+from ab40a504199da3051148fd657ad821c6a75210e0
+to 28d88df173fbcf5166f9161ed267032ad70e0b57
+@@ -586,0 +587,14
++  Debug start (`port/src/debug_start.cpp`): `town:<0-4>` is `edit:<0-4>`
++  (Norune, Matataki, Queens, Muska Racka, Yellow Drops); `dungeon:<n>:<floor>`
++  enters that floor (1 up, to 15, 17, 18, 18, 15, 25 and 100) directly through
++  retail's requested-floor entry (`InitDunEnterMenu`) and marks it reached;
++  `pick` shows a list of the towns and dungeons in the developer menu's place:
++  Up/Down a row, Left/Right a floor (L1/R1 by ten), Cross starts there, Circle
++  goes back where the list was opened (at boot, on to the title). Pad 1's
++  L3+R3 opens the same list at any time, in every build and launcher; linked,
++  it reads the lockstep's pads, so both copies open it on the same tick and
++  travel together. A floor start gives the party the members the story has by
++  that dungeon (each with its starting weapon) and marks the first-visit
++  scenes seen (game flag 103, Divine Beast Cave). A debug start turns
++  `DebugMode` on; a join's resync then sends both copies straight back onto
++  the host's floor rather than to its floor menu.
+@@ -772,0 +787,5
++- The attract movie's loading screen shows the SCE and Level-5 logos (about
++  800 ticks). Start or Cross on either controller, or their keyboard bindings
++  (Enter, Space), ends them with a short fade; while `game.netplay` is set only
++  a controller does (`port/src/coop/coop_boot.hpp`). The logos come before the
++  first frame, so an input script's frame-0 line is what is held through them.

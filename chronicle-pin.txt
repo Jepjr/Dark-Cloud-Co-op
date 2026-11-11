@@ -1,0 +1,7 @@
+# The Chronicle commit the mod builds on, and its tools/kazarov submodule commit (Chronicle's own pin), with where
+# build.ps1 fetches that Kazarov commit when the checkout's tools\kazarov lacks it (newer Chronicle uses another repo).
+# kazarov-head: the mod's Kazarov commit that recipes\K*.recipe rebuild from it, byte for byte.
+upstream 9418a5506e2a08e7739aa68d70841df6bc516201
+kazarov b619d1aaed05e850257b2fcebc49bda3fcdb7cec
+kazarov-url https://github.com/TheMoonPeople/Kazarov.git
+kazarov-head 2188c8bfc329cbf0e2ccf5fc4c66778c3ad5968b

@@ -1,0 +1,24 @@
+# port/src/ui/menu_mouse.cpp from Chronicle's port/src/ui/menu_mouse.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/ui/menu_mouse.cpp
+base port/src/ui/menu_mouse.cpp
+from b8040302f285bf479381f6ba00b7c1e65940135d
+to 88a2ee2094724fbe17cc8c6be26246bbebd382c9
+@@ -31,0 +32,1
++#include "coop/coop_keytab.hpp" // Jep (co-op), coop-keytab: the board's fourth tab
+@@ -479,0 +481,4
++    if (coop::KeysTabOn()) { // coop-keytab: four tabs, set closer (tab, not page)
++        int left = 0x154 + coop::KeysTabLeft(page);
++        return Rect{left, 72, left + coop::KeysTabWidth(), 120};
++    }
+@@ -548,1 +553,1
+- aaf564aba469ffe8
++    for (int i = 0; i < coop::KeysTabTabs(); ++i) { // coop-keytab: four with the Keys tab
+@@ -628,0 +634,8
++            if (arrow == 0 && coop::KeysTabOn()) { // Jep (co-op), coop-keytab: four tabs; the page's place among them, not its number
++                int here = 0;
++                while (here < 3 && coop::KeysTabPageOf(here) != board.page) {
++                    ++here;
++                }
++                int ahead = (tab - here + 4) % 4;
++                steps = ahead == 3 ? -1 : ahead;
++            }

@@ -1,0 +1,11 @@
+# port/src/game/cloth.cpp from Chronicle's port/src/game/cloth.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/cloth.cpp
+base port/src/game/cloth.cpp
+from df676f3bdaca64f5564c93a0895e4465a796d6d0
+to 4d879bb35638489cc93a93b2ace3d15e91f4a682
+@@ -466,0 +467,5
++// Jep (co-op): cloth.hpp
++void ClothForgetSettled() {
++    SettledOn().clear();
++}
++

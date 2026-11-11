@@ -1,0 +1,67 @@
+# port/src/title/title_menu.hpp from Chronicle's port/src/title/title_menu.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/title/title_menu.hpp
+base port/src/title/title_menu.hpp
+from ac121bc3543741b122bf59fbcdfea1b895cf099c
+to 9f531984bc7c5745be7632c8e4590b8d3015c059
+@@ -10,1 +10,1
+- 41049688809c983b
++ * Selects keep CCursol's numbering: 0 to 2 are retail's, so TitleLoop's handling of them is unchanged,
+@@ -11,0 +12,7
++ *
++ * Jep (co-op): a row is a place on the screen, a select what CCursol holds. Co-op's Multi-player row
++ * (select TITLE_MENU_MULTIPLAYER, title/title_mpmenu.hpp) stands between CONTINUE and OPTION whenever
++ * co-op shows it (TitleMpShown), so the menu is then START, CONTINUE, MULTIPLAYER, OPTION, EXIT: five
++ * rows, set closer and a little higher so they still end above the trademark lines. Without it the
++ * menu is the four rows above, where they always were. Co-op's Multi-player submenus are drawn on the
++ * same rows in the same letters (DrawRow).
+@@ -22,1 +29,1
+- a1c6aec5c5c5da14
++ * Most rows the menu shows (Jep, co-op: with the Multi-player row).
+@@ -24,1 +31,36
+- 33df95c59c711592
++constexpr int kMaxRows = 5;
++
++/**
++ * Screen y where the title picture's trademark lines start; every row's letters end above it.
++ */
++constexpr int kTrademarkTop = 405;
++
++/**
++ * Number of menu rows shown now, Exit included: 4, or 5 with co-op's Multi-player row.
++ */
++int RowCount();
++
++/**
++ * The row a CCursol select is shown on, or -1 when it is not shown.
++ */
++int RowOf(int select);
++
++/**
++ * The CCursol select shown on a row.
++ */
++int SelectAt(int row);
++
++/**
++ * A row's words in English, for the log.
++ */
++const char *RowEnglish(int row);
++
++/**
++ * Screen y of a row's capitals' tops.
++ */
++int TextTop(int row);
++
++/**
++ * Screen y where the last row's letters, their halo included, end.
++ */
++float RowsBottom();
+@@ -37,1 +79,1
+- d3632804575d0112
++ * Draws the rows, the one showing select selected at selected_alpha and the rest at other_alpha,
+@@ -41,0 +84,6
++/**
++ * Draws text on a row in the menu's letters: at alpha when chosen, else as Draw dims other_alpha
++ * (Jep, co-op: the Multi-player submenus' rows).
++ */
++void DrawRow(int row, const std::string &text, bool chosen, int alpha);
++

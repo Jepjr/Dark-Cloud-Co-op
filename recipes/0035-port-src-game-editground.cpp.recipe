@@ -1,0 +1,42 @@
+# port/src/game/editground.cpp from Chronicle's port/src/game/editground.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/editground.cpp
+base port/src/game/editground.cpp
+from c00195f018e7b3ec037796069874ba798d209551
+to 26c5fe43838840fb83b5fa1ce42fd153a6c4a2f4
+@@ -994,35 +994,1
+- ee9b4630b4283d4f
+- 18ce2eb1667238cf
+- e794a955560ffed2
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 01d9795a9276238b
+- d47b3af06d9b0ab0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- efd9b426b16d114f
+- d215a174967fcd84
+- 140fd7dfb9862915
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 6e2b336b4fd6c73b
+- 571744ade02eb826
+- e3b0c44298fc1c14
+- bbf26f9183d11ff0
+- 3fe9f1a0755f216c
+- 246b7fb4edc730c1
+- c7d1e3255e91036e
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 1e05a272cad9451f
+- 246b7fb4edc730c1
+- a58f860a9fe5f77d
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- 52fbb4c6e8846dea
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 87da50b8ed614c42
+- 28d86778615f6af4
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.

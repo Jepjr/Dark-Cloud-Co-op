@@ -1,0 +1,70 @@
+# tools/kazarov/src/cpp/gfx/memory.cpp from Kazarov b619d1aa (coop-gfxleak, train 56's K009 ported to b619d1aa's chunk lists at the repin's rebase; by hand with build\Recipe.psm1). Kazarov's lines appear only as hashes.
+target tools/kazarov/src/cpp/gfx/memory.cpp
+base tools/kazarov/src/cpp/gfx/memory.cpp
+from ab953cfd59094d80ff253c2dc6f2d6fdaff9be3d
+to dffd99b3b10d1fe787853406e1561001fe251e70
+@@ -1,0 +2,1
++#include <cstdio>
+@@ -322,0 +324,50
++// coop-gfxleak (Jep), ported to Kazarov b619d1aa's chunk lists: the chunks every frame slot holds, transient and staging. A
++// new peak past the ring's bound is said on stderr, so a test can read that the slots' chunks (and the constant records'
++// descriptor sets among them) stay flat over thousands of ticks.
++size_t g_transient_chunks = 0;
++size_t g_transient_peak = (kKeptChunks + kKeptStagingChunks) * kFramesInFlight;
++
++void CountChunks(std::ptrdiff_t delta) {
++    g_transient_chunks = static_cast<size_t>(static_cast<std::ptrdiff_t>(g_transient_chunks) + delta);
++    if (g_transient_chunks > g_transient_peak) {
++        g_transient_peak = g_transient_chunks;
++        std::fprintf(stderr, "gfx: transient chunks peak %zu (transient and staging; the ring keeps %zu)\n", g_transient_peak,
++                     (kKeptChunks + kKeptStagingChunks) * kFramesInFlight);
++    }
++}
++
++// DC_GFX_MUTATE=transients_grow (twin): uploads outside a frame never flush, as before the fix.
++bool TransientsGrowMutated() {
++    static const bool on = [] {
++        const char *v = std::getenv("DC_GFX_MUTATE");
++        return v != nullptr && std::strstr(v, "transients_grow") != nullptr;
++    }();
++    return on;
++}
++
++// Whether an allocation of size at alignment takes a new chunk (no chunk from current on has room).
++bool NeedsNewChunk(const std::vector<TransientChunk> &chunks, uint32_t current, VkDeviceSize size, VkDeviceSize alignment) {
+=374 bbcbaa0de1963b3e
++    for (uint32_t i = current; i < chunks.size(); i++) {
++        if (AlignUp(chunks[i].used, align) + size <= chunks[i].buffer.size) {
++            return false;
++        }
++    }
++    return true;
++}
++
++// coop-gfxleak (Jep): only a frame advances the slot ring (AdvanceSlot), and only that returns a slot's chunks. Uploads made
++// outside any frame (UpdateTextureNow, UpdateMeshVertices and loads with no frame drawn: a no-draw copy's every tick; a
++// catch-up's replay) grew the current slot by a chunk per allocation past the kept ones, never given back (PC-01 cand57's
++// no-draw host ran the 256-set descriptor pool out after 44690 ticks on Kazarov 611182d6). Outside a frame, a slot whose kept
++// chunks are full submits its uploads, waits and moves on, as a frame would: each span's copy is recorded before the next
++// span is asked for, so none is in use here.
++bool FlushOutsideFrame(const std::vector<TransientChunk> &chunks, uint32_t current, size_t kept, VkDeviceSize size,
++                       VkDeviceSize alignment) {
++    if (g.in_frame || !CurrentFrame().upload_open || chunks.size() < kept || TransientsGrowMutated() ||
++        !NeedsNewChunk(chunks, current, size, alignment)) {
++        return false;
++    }
++    SubmitUploadsAndWait();
++    return true;
++}
+@@ -394,0 +446,1
++    CountChunks(1);
+@@ -399,0 +452,1
++    CountChunks(-1);
+@@ -428,0 +482,3
++    if (FlushOutsideFrame(frame.chunks, frame.chunk, kKeptChunks, size, alignment)) {
++        return AllocateTransient(size, alignment);
++    }
+@@ -450,0 +507,3
++    if (FlushOutsideFrame(frame.staging_chunks, frame.staging_chunk, kKeptStagingChunks, size, 16)) {
++        return AllocateStaging(size);
++    }

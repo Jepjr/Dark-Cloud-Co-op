@@ -1,0 +1,32 @@
+# port/src/input/mouse_look.cpp from Chronicle's port/src/input/mouse_look.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/input/mouse_look.cpp
+base port/src/input/mouse_look.cpp
+from 17268aa38d54e571118b0fb42985f96da1237696
+to bb67306c1a0871a7255eb9f821a8f694eb86f9b0
+@@ -16,0 +17,2
++#include "coop/netplay.hpp"      // Jep (co-op), coop-localfix: linked, no mouse look on the game's camera
++#include "coop/netplay_test.hpp" // coop-localfix: NetplayMutated
+@@ -100,0 +103,5
++    // coop-localfix: linked, the game's camera turns by the agreed pad alone (a copy's own mouse look, touchpad, gyro or look
++    // keys would turn it on that copy only). DC_NETPLAY_MUTATE=linked_mouse_return (twin): as before.
++    if (NetplayLocalPlayer() != 0 && !NetplayMutated("linked_mouse_return")) {
++        return stick;
++    }
+@@ -112,0 +120,4
++    if (NetplayLocalPlayer() != 0 && !NetplayMutated("linked_mouse_return")) { // coop-localfix: as MouseLookTurn
++        g_height = {};
++        return stick;
++    }
+@@ -139,0 +151,8
++    // coop-localfix (Jep's 2026-10-26 retest, note 2: a resync as Toan came out of the house, the town camera's height
++    // apart on the two copies): linked, the camera's height steps as retail's. A mouse look on one copy (before the link,
++    // or a touchpad, gyro or look keys after it) left its "native" mark here, and that copy alone eased the camera's descent.
++    // DC_NETPLAY_MUTATE=linked_mouse_return (twin): as before.
++    if (NetplayLocalPlayer() != 0 && !NetplayMutated("linked_mouse_return")) {
++        g_height = {};
++        return delta;
++    }
+@@ -260,0 +280,3
++    if (NetplayLocalPlayer() != 0 && !NetplayMutated("linked_mouse_return")) { // coop-localfix: as MouseLookTurn
++        return;
++    }

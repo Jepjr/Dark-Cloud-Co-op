@@ -1,0 +1,188 @@
+# port/src/render/texture_registry.cpp from Chronicle's port/src/render/texture_registry.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/render/texture_registry.cpp
+base port/src/render/texture_registry.cpp
+from d74856d4393d49010fac5eb61f90a43ca37f3872
+to aa395ecd6a1d981c4a95fb974b236cc01f05a7f4
+@@ -6,0 +7,2
++#include <cstdlib> // Jep (co-op)
+=27 05d09b56e108ae93
+@@ -746,0 +749,177
++// Jep (co-op), coop-floorjoin2: the rebuild's primitives (texture_registry.hpp).
++namespace {
++
++unsigned long g_misses = 0;
++
++bool KeyUsable(unsigned key) {
++    return key < kKeyCount && !Reserved(key);
++}
++
++// Whatever lives at the key goes (another owner's entry too: the table's keys win), so the key is free for the table's use.
++void Evict(unsigned key) {
+~738 7f853b1cae41f5ae|    |
++}
++
++void FillPalette(Entry &entry, const std::array<uint32_t, 256> &rgba, bool four_bit, PortTextureOwner owner) {
+~209 52b8ee57494fa0b9|    |
++    entry.kind = EntryKind::Palette;
+~211 a020fa7132dadb17|    |
+=226 73cae9bf2afaca4d
+=227 81d5b88caf13c710
+=228 4307863a9805b9cf
+=229 58a742e82a890dbb
+=230 5e56271098dd7954
+=231 88a685020b422e5c
+=232 1b4d60264b07f2dd
+=233 6a5669862176bf72
+=234 0e6bf555bf8ede0c
++        }
++    }
++}
++
++void FillImage(Entry &entry, const PortDecodedTexture &decoded, PortTextureOwner owner) {
++    // As PortCreateTexture's entry.
+~209 52b8ee57494fa0b9|    |
++    entry.kind = EntryKind::Image;
+~211 a020fa7132dadb17|    |
+=651 89f5c7c113416110
+=652 ef65e65f3a598805
+=653 597ef814f19b1930
+=654 901454f76924f56b
+=230 5e56271098dd7954
+=656 04cbdbb6803ca39a
+=657 7c07331cd521d2a3
+=658 8607c5d3d344944c
+=659 bd4b7389d6719618
+=660 c31a8f78b49f4f2e
+=661 0f4c5155f5f02fe7
+=662 654a284bea83478b
+=232 1b4d60264b07f2dd
+=664 94dd878477fba0b7
+=665 9874ee47cfa4b934
+=666 2f1b3019e9c8ee98
+=667 c8f9f596f60a6569
+=668 13795318fb740e08
++        }
++    }
++}
++
++} // namespace
++
++bool PortCreateTextureAt(unsigned tbp, unsigned cbp, const PortDecodedTexture &decoded, PortTextureOwner owner) {
++    const bool indexed = decoded.format == gfx::TextureFormat::Index8;
++    if (!KeyUsable(tbp) || decoded.levels.empty() || (indexed && (!KeyUsable(cbp) || cbp == tbp))) {
++        return false;
++    }
++    Evict(tbp);
++    FillImage(Reg().entries[tbp], decoded, owner);
++    if (indexed) {
++        Evict(cbp);
++        FillPalette(Reg().entries[cbp], decoded.palette, decoded.four_bit, owner);
++        Reg().entries[tbp].palette = cbp;
++    }
++    return true;
++}
++
++bool PortRegisterNamedTargetAt(unsigned tbp, std::string_view name, unsigned width, unsigned height, bool has_alpha,
+~682 ba03c012dbfdf1a5|                               |
++    if (!KeyUsable(tbp)) {
++        return false;
++    }
++    Evict(tbp);
++    Entry &entry = Reg().entries[tbp];
+~209 52b8ee57494fa0b9|    |
++    entry.kind = EntryKind::Image;
+~211 a020fa7132dadb17|    |
+=685 f825fc7c8ee09fed
+=686 82e569d34a600877
+=687 3a0adbebcd14ba0c
+=688 a1d2bf40e7e736de
+=230 5e56271098dd7954
+=690 d574fa57aac7387f
++    }
++    return true;
++}
++
++bool PortCreatePlaceholderAt(unsigned tbp, unsigned cbp, std::string_view name, unsigned width, unsigned height, int bpp,
+~682 ba03c012dbfdf1a5|                             |
++    if (bpp < 2) {
+=701 b2c893b22f577f81
+=702 aef3aa715f7506ec
+=703 15d835c854a7b65a
+=704 4998cf259a7437a2
+=705 5671fd7e8139719d
+=706 828c1aab6bb3500a
++        return PortCreateTextureAt(tbp, cbp, blank, owner);
++    }
++    return PortRegisterNamedTargetAt(tbp, name, width, height, bpp != 3, owner);
++}
++
++bool PortMoveKeys(unsigned from_tbp, unsigned to_tbp, unsigned from_cbp, unsigned to_cbp) {
++    Entry *image = Live(from_tbp);
++    if (image == nullptr || image->kind != EntryKind::Image || !KeyUsable(to_tbp)) {
++        return false;
++    }
++    Entry *palette = from_cbp != 0 ? Live(from_cbp) : nullptr;
++    if (from_cbp != 0 && (palette == nullptr || palette->kind != EntryKind::Palette || !KeyUsable(to_cbp) || to_cbp == to_tbp)) {
++        return false;
++    }
++    if (to_tbp != from_tbp) {
++        Evict(to_tbp);
++        Reg().entries[to_tbp] = std::move(*image);
++        *image = Entry{};
++    }
++    if (palette != nullptr && to_cbp != from_cbp) {
++        Evict(to_cbp);
++        Reg().entries[to_cbp] = std::move(*palette);
++        *palette = Entry{};
++    }
++    if (palette != nullptr) {
++        Reg().entries[to_tbp].palette = to_cbp;
++    }
++    return true;
++}
++
++// coop-pt1108f (Jep's 11-09 playtest, a real join between two PCs: P2's menu and name boxes without their pictures): the moves of
++// a state set's rebuild, all at once. One at a time, a move evicted what sat at its target: on a joiner whose keys differ from the
++// host's (a headless pair's never do), that could be a sheet still waiting for its own move, which then became a blank placeholder.
++bool PortCanMoveKeys(unsigned from_tbp, unsigned to_tbp, unsigned from_cbp, unsigned to_cbp) {
++    const Entry *image = Live(from_tbp);
++    if (image == nullptr || image->kind != EntryKind::Image || !KeyUsable(to_tbp)) {
++        return false;
++    }
++    if (from_cbp != 0) {
++        const Entry *palette = Live(from_cbp);
++        return palette != nullptr && palette->kind == EntryKind::Palette && KeyUsable(to_cbp) && to_cbp != to_tbp;
++    }
++    return true;
++}
++
++void PortMoveKeysTogether(const std::vector<PortKeyMove> &moves) {
++    struct Lifted {
++        Entry image, palette;
++    };
++    std::vector<Lifted> lifted(moves.size());
++    for (std::size_t i = 0; i < moves.size(); i++) {
++        lifted[i].image = std::move(Reg().entries[moves[i].from_tbp]);
++        Reg().entries[moves[i].from_tbp] = Entry{};
++        if (moves[i].from_cbp != 0) {
++            lifted[i].palette = std::move(Reg().entries[moves[i].from_cbp]);
++            Reg().entries[moves[i].from_cbp] = Entry{};
++        }
++    }
++    for (std::size_t i = 0; i < moves.size(); i++) {
++        Evict(moves[i].to_tbp);
++        Reg().entries[moves[i].to_tbp] = std::move(lifted[i].image);
++        if (moves[i].from_cbp != 0) {
++            Evict(moves[i].to_cbp);
++            Reg().entries[moves[i].to_cbp] = std::move(lifted[i].palette);
++            Reg().entries[moves[i].to_tbp].palette = moves[i].to_cbp;
++        }
++    }
++}
++
++unsigned long PortTextureMisses() {
++    return g_misses;
++}
++
+@@ -760,0 +940,1
++        g_misses++; // coop-floorjoin2: counted for the tests

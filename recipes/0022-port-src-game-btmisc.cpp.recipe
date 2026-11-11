@@ -1,0 +1,41 @@
+# port/src/game/btmisc.cpp from Chronicle's port/src/game/btmisc.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/btmisc.cpp
+base port/src/game/btmisc.cpp
+from 19ea6bca4cacea94d12bd3175fc1c535a526d26a
+to f10067c7e117d8bcd7a2fac39954fc64777a0af9
+@@ -32,2 +32,1
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): external linkage, as coop/coop_audio.cpp's BtBattleMusic_Init and BtBattleMusic_Stop use them.
+@@ -37,0 +37,2
++namespace {
++
+@@ -182,11 +183,1
+- 6508099989e1f4f5
+- 19d51b8e9ee855a7
+- e3b0c44298fc1c14
+- 568005590d1b0f23
+- becd66bcca8792d5
+- d625d7ab43bcf189
+- ba96f919912f4f06
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 508152a01b09f7c9
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_worlds.cpp, which replaces this function.
+@@ -214,5 +205,1
+- d6af8c8100412166
+- d8ed355cbd2542a9
+- a302c371dd94b5b0
+- 0aafcde0972d8a58
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.
+@@ -220,7 +207,1
+- 0367ea96706fccba
+- 6d29e4a42c081b9f
+- d98b7412d099c463
+- 5bad4b174000aaab
+- 574d4e6df9c83240
+- 28d86778615f6af4
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.

@@ -1,0 +1,20 @@
+# port/src/text/gametext.cpp from Chronicle's port/src/text/gametext.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/text/gametext.cpp
+base port/src/text/gametext.cpp
+from d7ebb509aa4ecc51020e43c0f143996cbd04c61d
+to fcbf483592019ffd6c2ce9679132747dfe0b99a9
+@@ -9,0 +10,1
++#include "editloop.hpp" // Jep (co-op): PortMessageCachesReset
+@@ -590,0 +592,12
++
++namespace dc::game {
++
++// Jep (co-op), coop: netplay: a resync (TakeState) starts the town's message windows over on both copies, so a window one
++// copy made before the join and the other never did is rebuilt on both alike.
++void PortMessageCachesReset() {
++    for (ClsMes *message : {&EditMes1, &EditEventMes1, &EditNameMes, &EditSystemMes, &EditMes2, &EditEventMes2, &EditHelpMes}) {
++        message->mes_made = -1;
++    }
++}
++
++} // namespace dc::game

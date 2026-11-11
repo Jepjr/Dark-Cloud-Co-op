@@ -1,0 +1,323 @@
+# port/src/game/dun/movechara.cpp from Chronicle's port/src/game/dun/movechara.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dun/movechara.cpp
+base port/src/game/dun/movechara.cpp
+from f0d0e889df26e7fd443c1596e41561a6084363f1
+to cf9b642d7b7bc13a07d9dd3b3905ebc2854d1a1e
+@@ -26,0 +27,10
++#include "coop/coop.hpp"
++#include "coop/coop_worlds.hpp" // coop-worlds
++#include "coop/netplay.hpp"       // coop-dungeonp2: NetplayMenuOwner
++#include "coop/coop_combat.hpp"
++#include "coop/coop_core.hpp"
++#include "coop/coop_fullmenu.hpp" // coop-fullmenu // coop: Mutated (the first-person twin)
++#include "coop/coop_menu.hpp" // coop-menus
++#include "coop/coop_interact.hpp" // coop-keypick
++#include "coop/coop_opener.hpp" // coop-opt7
++bool CoopKnockoutEndsForPartner(); // coop-kojoin (port/src/coop/coop_combat.cpp)
+@@ -29,0 +40,1
++#include "debug_start.hpp" // debug start
+@@ -93,0 +105,5
++bool CoopOwnWheels();        // coop-wheelcrash (port/src/coop/coop_wheel.cpp)
++bool CoopGameWheelBlocked(); // coop-wheelcrash
++int  CoopPartnerWall(float *pos, const float *velocity, dc::game::CCPoly *out); // coop-nopush (coop_party.cpp)
++void CoopP1WalkIntoForTest(const float *pos, float angle, float *lx, float *ly); // coop-nopush test hook (coop_party.cpp)
++
+@@ -100,0 +117,24
++// The town a dungeon's way out (an Escape, the exit) leads to.
++int DungeonExitMap() {
+~2011 bdb08d67a0975566|    |
+~2012 888eabc798067015|        |
++            return 0;
+~2015 5bd00a61eb9097fc|        |
++            return 1;
+~2018 36ae050618a916de|        |
++            return 0x13;
+~2021 f7bbce4f332a9338|        |
++            return 0x2A;
+~2024 8482459e317e1693|        |
++            return 0x17;
+~2027 826bd6c3ae6164cd|        |
++            return 0x26;
+~2030 e743d08c13ad9570|        |
++            return 0x3C;
++        default:
++            break;
++    }
++
++    return 0;
++}
++
+@@ -142,1 +181,0
+- f27ad4335430db31
+@@ -143,0 +183,2
++    CoopP1WalkIntoForTest(pos, angle, &lx, &ly); // coop-nopush test hook
++    inputH1 = lx;
+@@ -177,0 +219,6
++            // coop-opt7: player 1 in a chest of his own: the world half's pose on every copy, his free play skipped as retail's
++            // presentation task skips it, and on his copy alone the presentation's engine.
++            if (coop::PresentPlayTick()) {
++                break;
++            }
++
+@@ -180,1 +227,12
+- 264e4a0e029cfe21
++            } else if (coop::MenuOpensGameMenu()) {
++                // coop-menus: Triangle opens the game's menu standing or not (Start, with game.coop_menu_panel's
++                // overlay on Triangle), as Triangle does below standing.
+~261 6c8c0a0ceb2b165b|                |
+~262 092c24a8ce80a38c|                |
+~263 9fe1c765a19910cf|                |
+=183 7d14100ea9e88e54
+~265 4de287af823eaac6|                |
+~266 7045e985d714bef8|                |
+=2841 ff00683a91b6c00a
+=187 cdf2f4847c1c3de6
++            } else if (GamePad.Down(PAD_START) != 0 || coop::MenuTakePause()) { // coop-menus: the overlay's pause
+@@ -200,1 +258,3
+- 974255aab7a0bf49
++                // coop: combat: a player lying down stays locked through the whole tick (no attack, item or action
++                // from pad 1; Jep's 2026-10-24 retest), not only from coop::PlayerDownStep at its end.
++                BtActStatus.movement_locked = coop::PlayerLiesDown() && !coop::Mutated("p1act") ? 1 : 0;
+@@ -301,1 +361,2
+- 9bd39e150613ad9d
++                        // coop: combat: a player lying down (coop::PlayerLiesDown) does not turn with the stick.
++                        if ((move_x != 0.0f || move_z != 0.0f) && (BtActStatus.action_on == 0 || UserStatus->cur_chara == CHARA_OSMOND) && !coop::PlayerLiesDown()) {
+@@ -326,1 +387,3
+- 91a8a40f9e646f18
++                        // coop-wheelcrash: each linked player has a ring of their own (coop_wheel.cpp), and beside a menu open next to
++                        // the world this wheel would take the menu's texture block: it stays shut then.
++                        bool party = GamePad.Down(PAD_SELECT) != 0 && UserStatus->party_size >= 2 && !CoopOwnWheels() && !CoopGameWheelBlocked();
+@@ -328,1 +391,1
+- a5c5b586bb9ecd74
++                                        ElementPickerHasChoice() && !CoopGameWheelBlocked();
+@@ -667,2 +730,5
+- 9391e0519ba8eff3
+- e7ef986fa2d3a5e5
++                                                // coop-keypick: his own picker beside the running game, else the window as retail's.
++                                                if (!coop::OpenKeyPickFor(1, state)) {
+~543 23d0269a300f8f69|                                                    |
+~668 e7ef986fa2d3a5e5|                                                    |
++                                                }
+@@ -735,1 +801,3
+- 2eda71189773fd8f
++                                                                    if (!coop::PresentStartFor(1, iventActive)) { // coop-opt7: linked, his chest's presentation is his copy's alone; the world stays in play
+~735 2eda71189773fd8f|                                                                        |
++                                                                    }
+@@ -740,1 +808,6
+- 94ac415987504b2b
++                                                                // coop-hischest: his trapped or clown chest asks him in his own prompt beside the
++                                                                // running game, not in the floor's script (event mode held her and showed her his
++                                                                // camera); else the script, as retail's.
++                                                                else if (coop::OpenChestPrompt(1, iventActive, entry_no)) {
++                                                                    done = 1;
++                                                                } else if (NowDngMap->boxes[entry_no].trap_no == 5) {
+@@ -767,1 +840,3
+- d53fca84e3b15f3c
++                                                                if (!coop::PresentStartFor(1, iventActive)) { // coop-opt7
+~767 d53fca84e3b15f3c|                                                                    |
++                                                                }
+@@ -779,2 +854,5
+- d9c11ce8995d3a6e
+- 642b2a04b12dde83
++                                                                // coop-atlaapart: her own player on her copy apart takes it as any member.
++                                                                if (UserStatus->cur_chara == CHARA_TOAN || coop::OwnPlayerTakesAtla()) {
++                                                                    if (!coop::PresentStartFor(1, iventActive)) { // coop-opt7: his copy's alone
+~780 642b2a04b12dde83|                                                                        |
++                                                                    }
+@@ -1096,1 +1174,3
+- f0fc0be1768bdc4c
++                                                        if (UserStatus->CheckLife() <= 0 && BtActStatus.invincible_frames == 0 && BtActStatus.action_on != 5 &&
++                                                            coop::PlayerGoesDown()) { // coop: combat (the player lies down, P2 plays on)
++                                                        } else if (UserStatus->CheckLife() <= 0 && BtActStatus.invincible_frames == 0 && BtActStatus.action_on != 5) {
+@@ -1222,0 +1303,1
++                                                                    colPolyNum += CoopPartnerWall(pos, velo__2, &polys[colPolyNum]); // coop-nopush: player 2's body stops him
+@@ -1320,0 +1402,1
++                                                                    colPolyNum += CoopPartnerWall(pos, velo__2, &polys[colPolyNum]); // coop-nopush: player 2's body stops him
+@@ -1570,0 +1653,6
++            // coop-worlds: the door vote: a floor's exit gate asks the other player first.
++            // coop-worlds: join on the next floor: an apart copy's exit gate waits while the other player comes to the entrance.
++            if (CoopWorldsGateVote(BtEventInfo.script_no) || CoopWorldsHoldFloorChange(BtEventInfo.script_no)) {
++                break;
++            }
++
+@@ -1629,1 +1717,2
+- 95504591c2b47710
++            // coop-cutscenejoin: the floor's script stands still while its "go dungeon" is held (below).
++            if (!(BtEventInfo.request == BT_REQUEST_GO_DUNGEON && CoopWorldsFloorStartHeld()) && EdEventMode(NowCamera__3, 0) > 0) {
+@@ -1647,1 +1736,8
+- 3e23decd7a32a96e
++                    // coop-worlds: player 2's copy stays on the floor (a floor change or a way out by script).
++                    if (CoopWorldsTakeExit(NextMapNo)) {
++                        existFlag = 1;
++                    } else {
++                        NextMapNo = -1;
++                        EdFadeIn(30, 0.0f, 0.0f, 0.0f);
++                        CoopWorldsStayOnFloor();
++                    }
+@@ -1655,0 +1752,7
++
++                    // coop-keypick: her pick, made beside the running game, answers the window; it never opens.
++                    if (coop::KeyPickAnswer()) {
+~1724 70a350534c0792f5|                        |
++                        break;
++                    }
++
+@@ -1665,1 +1768,5
+- 4d725895c099ec74
++                    {
++                        const int resume_floor = app::GameTakeResumeFloor();
++                        const int jump_floor = dc::app::GameTakeJumpFloor(); // debug start: a dungeon:<n>:<floor> jump's floor
++                        InitDunEnterMenu(0x17, selectMapNo, jump_floor >= 0 ? jump_floor : resume_floor);
++                    }
+@@ -1673,0 +1781,5
++                    // coop-cutscenejoin: arriving on a floor whose opening scene the other copy plays: held until it is over.
++                    if (CoopWorldsHoldFloorStart()) {
+~1724 70a350534c0792f5|                        |
++                        break;
++                    }
+@@ -1709,0 +1822,1
++                    NetplayFloorStarted(); // coop-snapshot: the floor-start checkpoint
+@@ -1988,0 +2102,9
++            // coop-worlds: an Escape is player 1's way out, so the pair splits as it starts: player 2's copy, which
++            // stays on the floor, never plays the Escape's effect and fade (Jep, 2026-10-20: a black flash on player
++            // 2's screen). DC_WORLDS_MUTATE=late_escape_split splits at the fade's end, as before (twin).
++            if (!CoopWorldsMutated("late_escape_split") && !CoopWorldsTakeExit(DungeonExitMap())) {
+=1622 a53c874c422eb72a
++                CoopWorldsStayOnFloor();
++                break;
++            }
++
+@@ -2009,1 +2131,1
+- 37bb279e17bcf9d7
++                int map_no = DungeonExitMap();
+@@ -2011,25 +2133,26
+- bdb08d67a0975566
+- 888eabc798067015
+- 8dbbb6ba0249c3a7
+- a0b9ed8d21b4c94b
+- 5bd00a61eb9097fc
+- 612c50d5eb066642
+- a0b9ed8d21b4c94b
+- 36ae050618a916de
+- 03b991cd74cb966a
+- a0b9ed8d21b4c94b
+- f7bbce4f332a9338
+- 20fbd71143ce8e07
+- a0b9ed8d21b4c94b
+- 8482459e317e1693
+- ded930d05c74d1c6
+- a0b9ed8d21b4c94b
+- 826bd6c3ae6164cd
+- bb2a4351d6a73e23
+- a0b9ed8d21b4c94b
+- e743d08c13ad9570
+- 0218d24fe361dd9f
+- a0b9ed8d21b4c94b
+- 784066da4f44bf56
+- a0b9ed8d21b4c94b
+- 0bf0a088a649c22d
++                // coop-worlds: linked and apart from here, player 2's copy stays on the floor.
++                if (CoopWorldsTakeExit(map_no)) {
+~2037 cc5a8941dee79452|                    |
++                    existFlag = 2;
++                } else {
++                    DispFade__3.FadeInStart(8.0f);
+=1707 60064f38b6fd9a0b
++
++                    // An Escape (GAME_TASK_ESCAPE_INIT/LOOP) that player 1 took: the copy that stays undoes what
++                    // BtEscape_Init and BtEscape_Loop set for the way out, which the map jump would have cleared.
++                    // Its effect lives in the load buffer, which the next load reuses: stepped on, it crashed
++                    // player 2's copy at its next menu (Jep, 2026-10-20). DC_WORLDS_MUTATE=keep_escape (twin).
++                    if (EscapeFlag != 0 && !CoopWorldsMutated("keep_escape")) {
++                        EscapeFlag = 0;
+~2617 851f6964a46c4a91|                        |
+~1814 8238777f33e24d48|                        |
+~2047 d063b3e19705df6b|                        |
+~1815 3c4320341f2178da|                        |
+~2049 eeb3ef824cacd4d3|                        |
++                        BtActStatus.in_presentation = 0;
+=2547 77dbd7aed9710cfb
++                        SetMIniMapStatus(1);
++                        EdFadeIn(30, 0.0f, 0.0f, 0.0f);
++                        std::fprintf(stderr, "worlds: staying: player 1's Escape undone on this copy\n");
++                        std::fflush(stderr);
++                    }
+@@ -2037,2 +2160,2
+- cc5a8941dee79452
+- 153902f4481629fe
++                    CoopWorldsStayOnFloor();
++                }
+@@ -2324,1 +2447,5
+- 52aa2e197b91439b
++                    if (UserStatus->CheckLife() <= 0 && BtActStatus.invincible_frames == 0 &&
++                        coop::PlayerGoesDown()) { // coop: combat (the player lies down, P2 plays on)
++                        next_task = GAME_TASK_PLAY;
++                        leaving = 1;
++                    } else if (UserStatus->CheckLife() <= 0 && BtActStatus.invincible_frames == 0) {
+@@ -2417,0 +2545,1
++            coop::FullMenuBegin(); // coop-fullmenu: the menu beside the running world
+@@ -2440,0 +2569,3
++                if (NetplayMenuOwner() == 2) {
++                    CoopWorldsExitBy(2); // coop-dungeonp2: player 2 chose the Escape in the game menu she held
++                }
+@@ -2570,0 +2702,4
++            if (coop::FullMenuLoading()) { // coop-dungeonsuite: the other's menu still reads its pack
++                break;
++            }
++
+@@ -2580,0 +2716,4
++            if (coop::FullMenuLoading()) { // coop-dungeonsuite: the other's menu still reads its pack
++                break;
++            }
++
+@@ -2590,0 +2730,4
++            if (coop::FullMenuLoading()) { // coop-dungeonsuite: the other's menu still reads its pack
++                break;
++            }
++
+@@ -2690,1 +2833,2
+- 74eb17ce4494faa0
++                    // coop: combat (every player down: the game over, not another member)
++                    if (static_cast<CDngStatusData *>(UserStatus)->GetLiveUnit() != 0 && UserStatus->party_size > 1 && !coop::BothDown()) {
+@@ -2747,0 +2892,11
++            // coop-kojoin: P2 came to the floor of a knocked-out P1: no member change, he lies down (CoopKnockoutEndsForPartner).
++            if (CoopKnockoutEndsForPartner()) {
+=2044 37c27059bf1a3091
+=2617 851f6964a46c4a91
+=2657 fd3ad142032c4bb8
+=1642 3051f0f780f981fb
+=1622 a53c874c422eb72a
+=2442 48b16a25d6f03958
++                break;
++            }
++
+@@ -2853,0 +3009,20
++    coop::CombatTestTick(); // coop: combat (test bot, DC_COOP_TEST only)
++
++    // coop: combat (the player down while P2 plays on; both down, the game's death)
++    int player_down = gameTask == GAME_TASK_PLAY ? coop::PlayerDownStep() : 0;
++
++    // coop: combat: a player lying down is on the fall (the death motion, 0x17), as the game's death has it;
++    // motionDrive lets it play on (coop::PlayerLiesDown).
++    if (player_down == 1) {
+~308 07ac756211ab1f4b|        |
++    }
++
++    if (player_down == 2) {
+~1097 80bdf640bf82c082|        |
+~1098 32e6640db95750ae|        |
+~1099 6a57d05e5d9f36b1|        |
+~1103 dadcb2652dfc9d60|        |
+~1104 6d01ec9057ec6318|        |
++    }
++
++    CoopBeforeMotion();
+@@ -2854,0 +3030,8
++    static bool eye_logged = false; // coop: for the first-person test (k-first-person)
++    if ((gameTask == GAME_TASK_EYE_CAMERA) != eye_logged) {
++        eye_logged = !eye_logged;
++        std::printf("coop: first-person view %s\n", eye_logged ? "on" : "off");
++    }
++    // coop: the player's first-person view (GAME_TASK_EYE_CAMERA) stops only the player: the partner plays on.
++    // DC_COOP_MUTATE=eyefreeze stops the partner too, as before (the twin).
++    CoopStep((gameTask == GAME_TASK_PLAY || (gameTask == GAME_TASK_EYE_CAMERA && !coop::Mutated("eyefreeze")) || coop::PartnerPlaysThrough(gameTask)) && driveStepHold == 0 && (BtActStatus.movement_locked == 0 || player_down == 1)); // coop: combat

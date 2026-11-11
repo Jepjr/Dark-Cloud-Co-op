@@ -1,0 +1,11 @@
+# port/include/game/cloth.hpp from Chronicle's port/include/game/cloth.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/cloth.hpp
+base port/include/game/cloth.hpp
+from 146908d73978a9707646553f7126cc42941594da
+to 6caadd6fb964860365a550358f86308b34d51d4a
+@@ -172,0 +173,5
++// Jep (co-op): forgets what each cloth took from the body when it settled (Enhanced cloth's clearances, keyed by the cloth's
++// address), so each settles again on its next step. A state set (a join's snapshot) puts other cloths at those addresses:
++// what this copy settled before is not theirs (coop/netplay.cpp StateSetAfterApply).
++void ClothForgetSettled();
++

@@ -1,0 +1,58 @@
+# port/src/game/btsysscript.cpp from Chronicle's port/src/game/btsysscript.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/btsysscript.cpp
+base port/src/game/btsysscript.cpp
+from 08ba60f02159ac8b5f6aed7f7b76355350925a65
+to f2c0d697797e31defa932f937d9dd8f21a41ca1e
+@@ -46,0 +47,2
++void NetplayFloorBuilding(); // coop-floorsnap (port/src/coop/netplay.cpp)
++
+@@ -564,10 +566,1
+- fd4bcb6d3a76c6ec
+- 04e9d9f9acd99b77
+- db2e875652d12519
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 75150bd2e30d5a6c
+- 48617dd701c4e107
+- ed85891f1c34099b
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_useprompt.cpp, which replaces this function.
+@@ -600,0 +594,2
++// coop-floorsnap: the floor's build, with netplay told first (NetplayFloorBuilding: a catch-up joiner builds the host's
++// floor from the host's random state).
+@@ -601,0 +597,2
++    NetplayFloorBuilding();
++
+@@ -912,22 +909,1
+- 3d8270f86e6f4157
+- 0b6f5aa5e99beb30
+- beacfd11d65e6950
+- 59216c055e9ba64b
+- e3b0c44298fc1c14
+- 61315b2631c34e80
+- 2c0656dd78cc7ab5
+- 3bd1eca4ea8d98a6
+- 1178e80f5747d2fc
+- e3b0c44298fc1c14
+- 8da0a54656eebf5a
+- c851c11f241c6a94
+- 5abe1e8c483de41c
+- 4cf6c5ff572bacbb
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- add4135852703e04
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- cebd53ab4dda5206
+- 0b6f5aa5e99beb30
++// Jep (co-op): defined in src/coop/coop_combat.cpp, which replaces this function.
+@@ -935,6 +911,1
+- d5f78acea1afe0cc
+- 61315b2631c34e80
+- 2c0656dd78cc7ab5
+- 6289e25fdedd2bc8
+- 3b8c4802a7eb36a6
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_combat.cpp, which replaces this function.

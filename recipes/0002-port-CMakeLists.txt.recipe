@@ -1,0 +1,34 @@
+# port/CMakeLists.txt from Chronicle's port/CMakeLists.txt (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/CMakeLists.txt
+base port/CMakeLists.txt
+from 5a0b2fc1ca14f725b7fcc2ae0ee18eba8547d48f
+to 22d6cdc7935851b599ac4dea282af15b2c587758
+@@ -212,0 +213,17
++# coop-snapshot: two copies of one build hold the game's memory at the same addresses,
++# the executable at its preferred base and each arena at an address fixed by its owner (port/src/coop/snapshot.cpp).
++option(DC_FIXED_LAYOUT "Keep the executable at its preferred address and pin the arenas (co-op snapshots)" OFF)
++if(DC_FIXED_LAYOUT)
++    set_property(SOURCE ${PORT_DIR}/coop/snapshot.cpp APPEND PROPERTY COMPILE_DEFINITIONS DC_FIXED_LAYOUT)
++    if(WIN32)
++        list(APPEND DC_LINK_OPTIONS -Wl,--disable-dynamicbase)
++    endif()
++endif()
++
++# coop-snapshot stage 1: the link map, from which tools\coop-qa\netplay\snapregions.py
++# writes the snapshot's state set (darkcloud.snapregions, read by port/src/coop/snapshot_state.cpp).
++option(DC_LINK_MAP "Write the link map next to the executable (co-op snapshots)" OFF)
++if(DC_LINK_MAP AND WIN32)
++    list(APPEND DC_LINK_OPTIONS -Wl,-Map=${CMAKE_BINARY_DIR}/darkcloud.map)
++endif()
++
+@@ -219,0 +237,4
++    if(WIN32)
++        # port/src/coop/netplay.cpp links two copies of the game over UDP.
++        target_link_libraries(${target} PRIVATE ws2_32)
++    endif()
+@@ -286,1 +307,4
+- 867022e68c6067e9
++# Jep (co-op): dcdata (the disc extractor) is the only target that links Kazarov's Rust core, so a build with
++# DC_BUILD_DCDATA=OFF needs no Rust toolchain at all (the player's bootstrapper can use a prebuilt dcdata.exe).
++option(DC_BUILD_DCDATA "Build dcdata (needs Rust)" ON)
++if(DC_BUILD_DCDATA AND NOT ANDROID AND NOT NINTENDO_SWITCH)

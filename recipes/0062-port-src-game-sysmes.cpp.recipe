@@ -1,0 +1,54 @@
+# port/src/game/sysmes.cpp from Chronicle's port/src/game/sysmes.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/sysmes.cpp
+base port/src/game/sysmes.cpp
+from dab4bf3feadb0c599663f8fe05b7376cdd47444a
+to 114592a498688d97ec10233d9d9e6d34c3337153
+@@ -18,0 +19,6
++// coop-itemprompt (port/src/coop/coop_message.cpp, global scope): whose a system message is, and whether this copy draws it.
++void CoopSystemMesItem(int item);
++void CoopSystemMesSet(int message_no);
++bool CoopSystemMesShown();
++bool CoopSystemMesCross(bool game_pad); // coop-closetitem: its owner's Cross
++
+@@ -91,1 +97,3
+- bbef8e6f678e6132
++// Jep (co-op), repin: a fixed buffer, as retail's (Chronicle made it a heap one): SystemMessage.tex_buff points at it and is
++// in the state set, so the address must be the same on every copy (docs\upstream-divergences.md).
++alignas(16) std::array<char, 65536> mes_buff;
+@@ -93,1 +100,0
+- de712cf165fd41f5
+@@ -95,3 +101,0
+- fc2354ee90a19d7a
+- 04719b955d443a34
+- 9f84b9217024f2f8
+@@ -100,0 +105,7
++// Jep (co-op): out of the anonymous namespace; src/coop reads and sets the message state (coop_message.cpp,
++// coop_interact.cpp).
+=93 de712cf165fd41f5
+=95 fc2354ee90a19d7a
+=97 9f84b9217024f2f8
++int SystemMesWait; // read by editloop.cpp's coop-town draw
++
+@@ -119,4 +129,0
+- 87323109b96775fc
+- fa8937a663de891c
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+@@ -135,1 +142,1
+- e9a0c923de14aab2
++    SystemMessage.tex_buff = mes_buff.data();
+@@ -169,1 +176,4
+- 6156176130cae4dd
++    // coop-closetitem: a message waiting for a button waits for its owner's Cross (read each tick: a press is new on one)
++    const bool cross = CoopSystemMesCross(GamePad.Down(PAD_CROSS) != 0);
++
++    if ((SystemMesInputKey == 0 || SystemMesCount != 2 || cross) && SystemMesCount > 0) {
+@@ -184,0 +195,4
++    if (!CoopSystemMesShown()) { // coop-itemprompt: the other player's got-item message is not drawn here
++        return;
++    }
++
+@@ -200,0 +215,1
++    CoopSystemMesItem(item_no); // coop-itemprompt
+@@ -305,0 +321,1
++    CoopSystemMesSet(message_no); // coop-itemprompt: whose it is

@@ -1,0 +1,16 @@
+# port/include/game/gamepad.hpp from Chronicle's port/include/game/gamepad.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/gamepad.hpp
+base port/include/game/gamepad.hpp
+from 3cd95c0ac1270a081e7d06e7ef1aa88f0f304dab
+to 9dfbf291eae723c7057f86537684dd2e86ec8dde
+@@ -4,0 +5,2
++struct InputPadState; // Jep (co-op): PadUpdateFrom (platform/input.hpp)
++
+@@ -341,0 +344,7
++// Jep (co-op): the pad's menu mode (MenuModeOn's stick threshold; 0 off): past it the left stick presses the d-pad.
++int PadMenuThreshold();
++
++// A game pad of a player's own (a second menu's): its UpDate (the copy to its previous pad, the read, the menu mode's
++// stick to d-pad, the repeats) with now, that player's agreed pad, on port 0, and nothing on port 1.
++void PadUpdateFrom(CGamePad &pad, const ::InputPadState &now);
++
