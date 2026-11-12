@@ -1,3 +1,4 @@
+#include "coop/coop_zonechara.hpp" // coop-pt1111k
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_audio.hpp" // coop-menuse
@@ -1958,7 +1959,8 @@ void TakeHits() {
     // Jep's rule (2026-10-30 playtest: she died while her Atla opened): a chest's, an Atla's or a gate key's presentation is
     // a cutscene for its opener, so she takes no blow until control comes back. PartnerPresenting is game state on both
     // copies, so they agree. DC_COOP_MUTATE=openhurt (twin): the blows land as before.
-    if (PartnerPresenting() && !Mutated("openhurt")) {
+    // coop-pt1111d: and in her own prompt at a chest or gate (its questions are her opening: coop_pause.cpp, InOwnPrompt).
+    if ((PartnerPresenting() || (UsePromptOpen(2) && !Mutated("prompt_runs"))) && !Mutated("openhurt")) {
         return;
     }
 
@@ -2210,7 +2212,8 @@ void LogStats() {
 bool SitsOutFightZone() {
     int zone = UserStatus->res_limit_zone_current;
 
-    return zone >= RES_LIMIT_ZONE_TOAN && zone <= RES_LIMIT_ZONE_OSMOND && zone != g_partner.loaded_chara && !Mutated("fightzone");
+    // coop-pt1111k/n: the sit-out of a player not on the floor's member, one switch, off by Jep's 11-11 decision (ZoneNonHoldersSitOut): the same rule as player 1's (ZoneSitsOut).
+    return zone >= RES_LIMIT_ZONE_TOAN && zone <= RES_LIMIT_ZONE_OSMOND && ZoneSitsOut(1) && !Mutated("fightzone");
 }
 
 namespace {
@@ -2478,6 +2481,7 @@ bool CombatInput(const InputPadState &live_pad, bool live_cross_pressed) {
                 SndSePlay(MENU_SOUND_REFUSE, -1, 0);
                 std::printf("coop: P2 sits out this floor (zone %d)\n", (int) UserStatus->res_limit_zone_current);
             } else if (AttackReady()) { // coop-xiaostamina: a shot waits for her full gauge
+                ZoneNoteSwing(1);
                 StartAttack();
             }
         }
@@ -2786,7 +2790,7 @@ void StepThirst() {
         s32 &ailments = UserStatus->ailments[chara];
 
         // Jep's rule: no poison bite through her own presentation either (its clock waits, as for blows in TakeHits).
-        bool opening = PartnerPresenting() && !Mutated("openhurt");
+        bool opening = (PartnerPresenting() || (UsePromptOpen(2) && !Mutated("prompt_runs"))) && !Mutated("openhurt");
 
         if ((ailments & AILMENT_POISON) != 0 && !opening && ++g_combat.poison_ticks >= 180) {
             g_combat.poison_ticks = 0;
@@ -2956,7 +2960,30 @@ void StepParts() {
     }
 }
 
+// coop-pt1111f test hook (DC_COOP_TEST_LIMIT_ZONE=Z): once a state file is put back, the floor is in limited zone Z
+// (res_limit_zone_current, as a floor's zone script sets it) and its message is raised (CDngMessageMan::LimmitZone, as the
+// floor's start does: 10, "Limited zone / Cannot disarm weapon"). Both linked copies on the same tick.
+static void LimitZoneForTest() {
+    static const int zone = TestEnvInt("DC_COOP_TEST_LIMIT_ZONE", -1);
+    static bool      done = false;
+
+    if (zone < 0 || done || UserStatus == nullptr || !NetplayStateFileLoaded()) {
+        return;
+    }
+    done = true;
+    UserStatus->res_limit_zone_current = zone;
+    // coop-pt1111h: DC_COOP_TEST_LIMIT_ZONE_QUIET=1: the zone alone, no message (the players on the floor without its start:
+    // arrived on it, as a merge or a join brings them).
+    if (static const bool quiet = TestEnvOn("DC_COOP_TEST_LIMIT_ZONE_QUIET"); !quiet) {
+        DngMessMan.LimmitZone();
+    }
+    std::fprintf(stderr, "coop-test: limited zone %d: the dungeon's message %d raised (timer %d) at link tick %lld\n", zone, (int) DngMessMan.message,
+                 (int) DngMessMan.timer, (long long) NetplayLinkTick());
+    std::fflush(stderr);
+}
+
 void CombatFace() {
+    LimitZoneForTest(); // coop-pt1111f
     StepThirst();
     StepParts();
 
@@ -3509,3 +3536,27 @@ bool CoopKnockoutEndsForPartner() {
     std::fprintf(stderr, "coop: P2 is here with the knocked-out player: his member change ends (task %d), he lies down\n", (int) gameTask);
     return true;
 }
+
+namespace coop {
+
+// coop-pt1111b (item 14, DC_COOP_DEBUG): a thunder hit's bolts as this copy drew them (weaponelement.cpp's Draw_Thunder), summed
+// over its frames and said once every 30 frames it drew any: how many it drew, how many had an end behind this copy's view and
+// how many of those it drew all the same (0 unless DC_COOP_MUTATE=bolts_behind, retail's). The rows read it.
+void ElementBoltsDrawn(int kind, int drawn, int behind, int behind_drawn, const float *at) {
+    static const bool debug = CoopDebug();
+    static int        frames = 0, total = 0, behind_total = 0, behind_drawn_total = 0;
+
+    if (!debug || drawn + behind == 0) {
+        return;
+    }
+    frames++;
+    total += drawn;
+    behind_total += behind;
+    behind_drawn_total += behind_drawn;
+    if (frames == 1 || frames % 30 == 0) {
+        std::fprintf(stderr, "coop-fx: p%d element %d bolts at (%.0f %.0f %.0f) over %d frames: drawn %d, an end behind the view %d, of those drawn %d\n",
+                     NetplayLocalPlayer(), kind, at[0], at[1], at[2], frames, total, behind_total, behind_drawn_total);
+    }
+}
+
+} // namespace coop

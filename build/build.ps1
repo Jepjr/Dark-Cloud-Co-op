@@ -208,14 +208,22 @@ if ($LASTEXITCODE) { Select-String -LiteralPath (Join-Path $Out 'build.log') -Pa
 # The state set beside the exe, from the link map (the game refuses a stale one, so it is remade with every link).
 $map = Join-Path $bin 'darkcloud.map'
 if (-not (Test-Path -LiteralPath $map)) { throw "no link map at $map" }
+# release7 (Jep 11-11): on a PC without py.exe, "if/else { @('-I') }" gave the STRING '-I', which @pyArgs splatted as
+# characters ("python.exe - I snapregions.py": the program read from stdin, waiting forever). $pyArgs is always an
+# array now, and python's stdin is empty (@() piped in), so nothing it runs can wait on input. Test switch
+# DCO_BUILD_MUTATE=unwrapped_pyargs (row l-setup-nopy's twin): the old string.
 $py = Get-Command py.exe -ErrorAction SilentlyContinue
-$pyArgs = if ($py) { @('-3', '-I') } else { $py = Get-Command python.exe -ErrorAction SilentlyContinue; @('-I') }
+[string[]]$pyArgs = @('-3', '-I')
+if (-not $py) { $py = Get-Command python.exe -ErrorAction SilentlyContinue; [string[]]$pyArgs = @('-I') }
+if ($env:DCO_BUILD_MUTATE -eq 'unwrapped_pyargs' -and -not (Get-Command py.exe -ErrorAction SilentlyContinue)) { Remove-Variable pyArgs; $pyArgs = if ($false) { @('-3', '-I') } else { @('-I') } }
 if (-not $py) { throw 'no Python 3 (py.exe or python.exe) on PATH' }
-& $py.Source @pyArgs (Join-Path $PSScriptRoot 'snapregions.py') $map --allow (Join-Path $PSScriptRoot 'snapshot-allow.txt') `
+Remove-Item -LiteralPath (Join-Path $bin 'darkcloud.snapregions') -ErrorAction SilentlyContinue   # (a stale one never passes for this link's)
+@() | & $py.Source @pyArgs (Join-Path $PSScriptRoot 'snapregions.py') $map --allow (Join-Path $PSScriptRoot 'snapshot-allow.txt') `
     --cxxfilt (Join-Path $Root "deps\llvm\$llvmName\bin\llvm-cxxfilt.exe") -o (Join-Path $bin 'darkcloud.snapregions') --src (Join-Path $src 'port\src')
 if ($LASTEXITCODE) { throw 'snapregions.py failed: no state set' }
+if (-not (Test-Path -LiteralPath (Join-Path $bin 'darkcloud.snapregions'))) { throw "snapregions.py wrote no state set ($($py.Source) $($pyArgs -join ' '))" }
 # The arenas' pin plan (pinplan.py: no two arena owners in one slot, whichever carves first)
-& $py.Source @pyArgs (Join-Path $PSScriptRoot 'pinplan.py') $map -o (Join-Path $bin 'darkcloud.pinplan')
+@() | & $py.Source @pyArgs (Join-Path $PSScriptRoot 'pinplan.py') $map -o (Join-Path $bin 'darkcloud.pinplan')
 if ($LASTEXITCODE) { throw 'pinplan.py failed: two arena owners share a pin slot no probe frees' }
 
 # game\: the game the launcher plays (both PCs must run a build of the same content: the link compares the version). The

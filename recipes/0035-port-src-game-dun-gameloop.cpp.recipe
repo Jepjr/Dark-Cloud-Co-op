@@ -2,7 +2,7 @@
 target port/src/game/dun/gameloop.cpp
 base port/src/game/dun/gameloop.cpp
 from 0e33bf793f50f825f5113006e0b97828a65c8531
-to e714046d220f35a6701934d0131f7c21b27e29bd
+to eea880f18c6d1f77c06f198d7052690f7cc7df05
 @@ -31,0 +32,10
 +#include "coop/coop.hpp"
 +#include "coop/coop_combat.hpp" // coop: combat
@@ -251,6 +251,9 @@ to e714046d220f35a6701934d0131f7c21b27e29bd
 @@ -2641,1 +2696,1
 - 64c6bee44e5b6e28
 +            int mes_no = coop::DngMesDrawn(); // coop-p2hurt: her own thirst's message on her copy
+@@ -2643,1 +2698,1
+- 20a66982fa5be0f5
++            DngMes1.mes_no[0] = coop::DngMesInsert1(); // coop-pt1111h: the name its drawn message inserts (an arrival's notice on its own copy)
 @@ -2698,0 +2754,2
 +    coop::MenuDrawPromptCover(); // coop-menus: P2's prompt, on P1's linked copy
 +

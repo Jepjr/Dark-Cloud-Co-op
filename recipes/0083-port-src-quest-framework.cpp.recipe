@@ -1,0 +1,50 @@
+# port/src/quest/framework.cpp from Chronicle's port/src/quest/framework.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/framework.cpp
+base port/src/quest/framework.cpp
+from 58daed7f26d9109f68243fd74f91349d454b496d
+to 679857921d4505c7888b15f9e7fa400d26ba4187
+@@ -168,1 +168,7
+- df3b1a700c148db3
++    // Jep (co-op, coop-pt1111e): a choice a conversation carried to another copy cannot bind again unless declared.
++    const std::string id = QuestId() + "." + std::string(label.key);
++    const Definition *quest = Find(QuestId());
++    if (quest == nullptr || !std::ranges::any_of(quest->Choices(), [&](const auto &choice) { return choice.first == id; })) {
++        std::print(stderr, "quests: LINT: choice {} is not declared (Builder::Choice): a co-op merge cannot carry its conversation\n", id);
++    }
++    return MakeChoice(QuestId(), id, label, std::move(on_select), color);
+@@ -303,0 +310,5
++Builder &Builder::Choice(Text label, SceneFn on_select) {
++    quest.choices.emplace_back(quest.id + "." + std::string(label.key), std::move(on_select));
++    return *this;
++}
++
+@@ -411,0 +423,29
++bool ResolveChoice(dialog::ChoiceItem &item) {
+=45 0e5f948e8f4b686d
++        const std::string &quest_id = entry->quest.Id();
++        if (item.id.size() <= quest_id.size() || item.id.compare(0, quest_id.size(), quest_id) != 0 || item.id[quest_id.size()] != '.') {
++            continue;
++        }
++        const std::string_view rest = std::string_view(item.id).substr(quest_id.size() + 1);
+=401 43603415bce98c6a
++        if (rest.starts_with("option")) {
++            const std::string number(rest.substr(6));
++            if (!number.empty() && std::ranges::all_of(number, [](char c) { return c >= '0' && c <= '9'; })) {
++                const std::size_t index = std::stoul(number);
++                if (index < options.size()) {
+~403 988accfea60ea498|                    |
++                    item.on_select = MakeChoice(quest_id, item.id, option.label, option.on_select, option.color).on_select;
++                    return true;
++                }
++            }
++        }
++        for (const auto &[id, on_select] : entry->quest.Choices()) {
++            if (id == item.id) {
++                item.on_select = MakeChoice(quest_id, item.id, Text{}, on_select, item.color).on_select;
++                return true;
++            }
++        }
++    }
++    return false;
++}
++

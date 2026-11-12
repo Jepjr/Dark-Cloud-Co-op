@@ -7,12 +7,14 @@
 #include "coop/coop_georama.hpp" // coop-town: her own Georama
 #include "coop/coop_worlds.hpp" // coop-bagapart: CoopWorldsTestPadButtons
 #include "coop/coop_town.hpp"  // coop-doorfix: CoopTownCaveHoldsGamePad
+#include "coop/coop_zonechara.hpp" // coop-pt1111n
 
 #include <algorithm>
 #include <utility>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -716,6 +718,13 @@ void StepPanel(int player, const InputPadState &pad) {
             panel.opened++;
             SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
             std::printf("coop-menu: P%d overlay open (%s)\n", player + 1, mode == kTownMode ? "town" : "floor");
+            if (player != 0) {
+                // coop-pt1111p: what its Items and Status pages read, beside the party's (player 1's: the same pack and purse when
+                // the bags are shared)
+                int mine[128], party[128];
+                std::printf("coop-menu: P%d overlay's bag %d items, %d G; the party's %d items, %d G (bags %s)\n", player + 1,
+                            Items(player, mine, 128), PartnerGilda(), Items(0, party, 128), (int) Status()->money, OwnBags() ? "own" : "shared");
+            }
         }
 
         return;
@@ -810,8 +819,39 @@ void TestSetup() {
 
 } // namespace
 
+// coop-pt1111o (pt1111m's find: two players with different game.coop_menus desynced every tick on MenuHash): one setting per game,
+// the host's. A joiner takes the host's (the Hello's, netplay_hello.cpp) for this run only: config.json is not written. Same for
+// game.coop_menu_panel, which moves Triangle/Start and the pauses. DC_COOP_MUTATE=menus_own (twin): the joiner keeps its own.
+namespace {
+std::optional<bool> g_host_menus, g_host_panel;
+} // namespace
+
+bool MenusSetting() {
+    return g_host_menus.value_or(dc::platform::ConfigGet().coop_menus);
+}
+
+bool MenuPanelSetting() {
+    return g_host_panel.value_or(dc::platform::ConfigGet().coop_menu_panel);
+}
+
+void MenusAdopt(bool menus, bool panel) {
+    if (Mutated("menus_own")) {
+        return;
+    }
+    g_host_menus = menus;
+    g_host_panel = panel;
+    std::printf("coop-menus: this run plays by the host's settings: game.coop_menus %s, game.coop_menu_panel %s (this copy's own: %s, %s; config.json unchanged)\n",
+                menus ? "on" : "off", panel ? "on" : "off", dc::platform::ConfigGet().coop_menus ? "on" : "off",
+                dc::platform::ConfigGet().coop_menu_panel ? "on" : "off");
+}
+
+void MenusAdoptEnd() {
+    g_host_menus.reset();
+    g_host_panel.reset();
+}
+
 bool MenusOn() {
-    return Enabled() && dc::platform::ConfigGet().coop_menus;
+    return Enabled() && MenusSetting();
 }
 
 bool MenuOpen(int player) {
@@ -902,6 +942,11 @@ void MenuFilterPort(int port, PAD_STATUS *status) {
     // run each tick in reach, takes it as a new Cross and shows the message again).
     if (port == 0 && mode == kTownMode) {
         status->button &= ~TownNoteHeldAfter(1) & 0xFFFF;
+    }
+
+    // coop-pt1111n: a non-holder of a character-limited floor sits out its fights, player 1 as player 2 (Square and R2 off the pad).
+    if (port == 0) {
+        ZoneFilterPort(status);
     }
 
     if (!MenusOn() || port != 0) {
@@ -1164,7 +1209,7 @@ bool MenuTownWalk() {
 }
 
 bool MenuPanelOn() {
-    return MenusOn() && dc::platform::ConfigGet().coop_menu_panel;
+    return MenusOn() && MenuPanelSetting();
 }
 
 bool MenuOpensGameMenu() {

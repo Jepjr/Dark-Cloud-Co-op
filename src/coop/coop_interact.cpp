@@ -54,6 +54,7 @@
 #include "gameutil.hpp"
 #include "hitvalue.hpp"
 #include "itemdata.hpp"
+#include "editmapscript.hpp" // coop-pt1111b: the town's mode (GameMode)
 #include "menu_draw.hpp"
 #include "language.h" // coop-usebands2: LANG_JAPANESE
 #include "main.hpp"     // coop-usebands2: SystemMes
@@ -744,6 +745,8 @@ struct AtlaFx {
     int            pictures = 0;        // coop-atlalight: how many it entered into its block ...
     char           picture[32] = {};    // ... and the first one's name, to tell they are still its own (AtlaOwnsBlock)
     int            said = -1;           // coop-atlalight: the drawn line's last word (-1 none yet this presentation)
+    int            opener = 0;          // coop-pt1111b: whose Atla it plays on this copy (1 up; 0 none or her old path's)
+    int            drawn = 0;           // coop-pt1111b: frames it was drawn this presentation (the end line)
 };
 
 constexpr int   kAtlaPackBytes = 1024 * 1024;
@@ -916,7 +919,7 @@ void AtlaPoseStart() {
 // coop-opt7 (others): her own presentation is her copy's engine; the other copies draw its effect alone (no chime or pose: her
 // pose is the world's, AtlaPoseStart). coop-opt7 step 4: no copy gives it a camera any more (coop-atlaopen's camera and zoom on
 // her copy, coop-openercam: her copy shows retail's own; unlinked, the one screen is player 1's, which never took it).
-void StartAtlaFx(const float *ball, bool others = false) {
+void StartAtlaFx(const float *ball, bool others = false, const float *turn = nullptr) {
     // (x-dungeon-p2 p2atla's camtwin, DC_COOP_MUTATE=atlacam, takes hers just before his: plain, so the twin's frames of his
     // presentation are not her own Atla's.)
     if (Mutated("atlacam") || !LoadAtlaFx()) {
@@ -926,7 +929,7 @@ void StartAtlaFx(const float *ball, bool others = false) {
     sceVu0FVECTOR at = {ball[0], ball[1], ball[2], 1.0f};
 
     g_atla->chara->SetPosition(at);
-    g_atla->chara->SetRotation(0.0f, g_atla_turn, 0.0f);
+    g_atla->chara->SetRotation(0.0f, turn != nullptr ? *turn : g_atla_turn, 0.0f);
     g_atla->chara->SetMotion(0, 6);
     // (coop-atlaopen: the effect's motion carries a camera's zoom, MOTION_KEY_CAMERA_FOV, which sets the game's one projection:
     // with no camera it never moves anyone's view)
@@ -934,6 +937,8 @@ void StartAtlaFx(const float *ball, bool others = false) {
     g_atla->ticks = 1;
     g_atla->naming = false; // coop-closetitem
     g_atla->said = -1;      // coop-atlalight
+    g_atla->opener = 0;     // coop-pt1111b (the others' start says whose)
+    g_atla->drawn = 0;
     if (others) {
         std::printf("coop: partner Atla effect drawn on this copy (her presentation is her copy's)\n");
         return;
@@ -947,7 +952,8 @@ void StartAtlaFx(const float *ball, bool others = false) {
 
 // Each tick of it: the effect's next frame; true while it plays (she stands still).
 bool StepAtlaFx() {
-    if (g_atla == nullptr || g_atla->ticks == 0) {
+    // (coop-pt1111b: hers alone; another opener's effect drawn on this copy holds nobody: OthersAtlaFxStep steps it)
+    if (g_atla == nullptr || g_atla->ticks == 0 || (g_atla->opener != 0 && g_atla->opener != 2)) {
         return false;
     }
 
@@ -1092,7 +1098,9 @@ bool AtlaLight(const float *stood, sceVu0FMATRIX light, sceVu0FMATRIX colour) {
         g_atla->lit = 0.0f;
     }
 
-    if (g_atla == nullptr || g_atla->ticks == 0 || (!DrawsPartnerPresentation() && Mutated("atlafx_hers")) || Mutated("atlalight")) {
+    // (coop-pt1111b: her body lit by her own Atla's effect alone, not another opener's drawn on this copy)
+    if (g_atla == nullptr || g_atla->ticks == 0 || (g_atla->opener != 0 && g_atla->opener != 2) || (!DrawsPartnerPresentation() && Mutated("atlafx_hers")) ||
+        Mutated("atlalight")) {
         return false;
     }
 
@@ -1675,6 +1683,7 @@ void DrawPartnerPresentation() {
         }
         TexManager.ReloadTexture(Vif1Packet, AtlaBlock());
         g_atla->chara->Draw();
+        g_atla->drawn++; // coop-pt1111b
     }
 
     // coop-p2hurt: her gate key in her hand, as DrawDungeon draws the player's (gateItemFlag).
@@ -2045,6 +2054,47 @@ void PartnerPresentChest(int entry, bool big, int item, bool posed, bool others)
     std::printf("coop: partner opens %s box %d: item %d (her presentation on her copy)\n", big ? "large" : "small", entry, item);
 }
 
+// coop-pt1111b (Jep's 11-11 playtest, item 12: "P1 opens an Atla: on P2's screen the Atla vanishes instantly instead of staying
+// until the end of the opening animation"): the world takes the ball at the press on every copy (StartAtla: retail's step 0 sets
+// its used to 0, and the effect on the ball stands in its place on the opener's screen until the presentation ends). The others'
+// copies drew that effect for player 2's Atla alone (PartnerPresentAtla); for player 1's, the game's player, nothing stood in the
+// ball's place there and it vanished. Any opener's now, on every copy but the opener's: the effect on the ball, turned as the
+// opener's, stepped by the world's tick and drawn until the presentation ends. One such effect a copy (one other opener at a time
+// with two players; a third player's Atla while another's plays on this copy is said and not drawn here).
+// DC_COOP_MUTATE=atlafx_partner_only (twin): player 2's alone, as before.
+void OthersAtlaFxStart(int opener, int entry, float turn) {
+    if (opener == 1 && Mutated("atlafx_partner_only")) {
+        return;
+    }
+    if (g_atla != nullptr && g_atla->ticks > 0 && g_atla->opener != opener) {
+        std::printf("coop: player %d's Atla effect not drawn on this copy: player %d's plays\n", opener, g_atla->opener);
+        return;
+    }
+    StartAtlaFx(NowDngMap->atra[entry].pos, true, &turn);
+    if (g_atla != nullptr && g_atla->ticks > 0) {
+        g_atla->opener = opener;
+        std::printf("coop: player %d's Atla effect drawn on this copy from link tick %lld (its presentation is its opener's copy's)\n", opener,
+                    (long long) NetplayLinkTick());
+    }
+}
+
+void OthersAtlaFxStep(int opener) {
+    if (g_atla != nullptr && g_atla->ticks > 0 && g_atla->opener == opener) { // (draw only: its frame for the next draw)
+        g_atla->chara->Step();
+        g_atla->ticks++;
+    }
+}
+
+void OthersAtlaFxEnd(int opener) {
+    if (g_atla == nullptr || g_atla->ticks == 0 || (g_atla->opener != 0 && g_atla->opener != opener)) {
+        return;
+    }
+    std::printf("coop: player %d's Atla effect ends on this copy at link tick %lld after %d ticks, drawn %d times\n", opener,
+                (long long) NetplayLinkTick(), g_atla->ticks, g_atla->drawn);
+    g_atla->ticks = 0;
+    g_atla->opener = 0;
+}
+
 void PartnerPresentAtla(int entry, bool others, float *turn) {
     const ATRA_BOLL &ball = NowDngMap->atra[entry];
 
@@ -2053,6 +2103,11 @@ void PartnerPresentAtla(int entry, bool others, float *turn) {
     *turn = g_atla_turn;
     if (others) {
         StartAtlaFx(ball.pos, true);
+        if (g_atla != nullptr && g_atla->ticks > 0) {
+            g_atla->opener = 2; // (the partner's body is player 2's)
+            std::printf("coop: player 2's Atla effect drawn on this copy from link tick %lld (its presentation is its opener's copy's)\n",
+                        (long long) NetplayLinkTick());
+        }
     }
     // (the tests' line, as her old path's: x-atla-open reads the ball, her place, her facing and her step back)
     std::printf("coop: partner Atla presentation starts at (%.1f %.1f %.1f), she stands (%.1f %.1f) facing %.3f, effect turned %.3f, steps to (%.1f %.1f) (her presentation on her copy, member %d)\n",
@@ -2063,9 +2118,8 @@ void PartnerPresentAtla(int entry, bool others, float *turn) {
 
 bool PartnerPresentStep(int kind, int ticks, bool others) {
     if (kind == kPresentAtla) {
-        if (others && g_atla != nullptr && g_atla->ticks > 0) { // (draw only: its frame for the next draw)
-            g_atla->chara->Step();
-            g_atla->ticks++;
+        if (others) {
+            OthersAtlaFxStep(2);
         }
         if (g_atla_slide > 0) { // coop-actorswap: her step back to retail's distance
             const float t = (float) (kAtlaSlideTicks - --g_atla_slide) / (float) kAtlaSlideTicks;
@@ -2126,9 +2180,7 @@ bool PartnerPresentStep(int kind, int ticks, bool others) {
 
 void PartnerPresentEnd(int kind, bool posed) {
     if (kind == kPresentAtla) {
-        if (g_atla != nullptr) {
-            g_atla->ticks = 0; // (the others' effect)
-        }
+        OthersAtlaFxEnd(2); // (the others' effect)
         if (g_partner.motion == kAtlaGrab || g_partner.motion == kAtlaHold || g_atla_pose) {
             PlayMotion(0, 0);
         }
@@ -2702,6 +2754,9 @@ bool UseGateKey(const PickEntry &entry) {
     PickNote("The gate opens.");
     return true;
 }
+
+int  ScriptWantedItem(int script_no); // (below)
+bool g_item_scene_go = false;        // pt1111c: StartPickedItemScene's own start (every player said yes)
 
 // Any other slot: its script in item mode, as InteractItem starts it, with her pick as the window's answer.
 bool StartWithAnswer(const PickEntry &entry) {
@@ -3391,6 +3446,18 @@ void BoneDoorTest() {
 void KeyDoorTick() {
     BoneDoorTest();
 
+    // coop-pt1111b (item 20, DC_COOP_DEBUG): the town's mode (the town loop's own static) on each floor's first tick: the way in from
+    // the town is its entrance event, and nothing on a floor sets it again (the rows' line; x-dungeon-message -TownMode puts it).
+    if (static const bool debug = CoopDebug(); debug && UserStatus != nullptr) {
+        static int floor_was = -1000, map_was = -1000;
+
+        if (UserStatus->cur_floor != floor_was || selectMapNo != map_was) {
+            floor_was = UserStatus->cur_floor;
+            map_was = selectMapNo;
+            std::fprintf(stderr, "coop-debug: the town's mode on map %d floor %d: %d (game mode %d)\n", map_was, floor_was, (int) ::GameMode, (int) mode);
+        }
+    }
+
     if (gameTask == GAME_TASK_PLAY) {
         g_her_script_start = false;
     }
@@ -3466,6 +3533,48 @@ bool DoorRefusing(int player) {
 
 bool OpenKeyPick() {
     return OpenKeyPickFor(2, nullptr);
+}
+
+// A pick in a dungeon at its slot (Cur()), routed as its slot wants: a lock's key, a key door, any other slot's script with the
+// pick as its window's answer. pt1111c (Jep, 2026-11-11): first, the item an item scene's script wants (a story scene that needs
+// every player, CoopWorldsItemSceneAsk) is held and every other player asked, whatever the slot (Wise Owl Forest floor 9's
+// switch is an event slot, Shipwreck floor 17's music box lock a gatekey one); the yes starts it by StartPickedItemScene.
+void RouteDungeonPick(const PickEntry &entry) {
+    SoundOwner sound(Mutated("picksound") ? 0 : g_who); // coop-picksound: the picker's (also from the item scene's test hook)
+
+    if (static const bool trace = TestEnv("DC_COOP_TEST_ITEM_SCENE") != nullptr; trace) { // (x-item-scene: the route's own guards)
+        std::fprintf(stderr, "coop: test: item scene route: go %d event %d wanted %d held %d\n", g_item_scene_go ? 1 : 0, Cur().event != nullptr ? 1 : 0,
+                     Cur().event != nullptr ? ScriptWantedItem(Cur().event->script_no) : -1, Holds(PickPack(entry.shared), entry.item) ? 1 : 0);
+    }
+
+    if (!g_item_scene_go && Cur().event != nullptr && ScriptWantedItem(Cur().event->script_no) == entry.item &&
+        Holds(PickPack(entry.shared), entry.item) && CoopWorldsItemSceneAsk(g_who, Cur().slot, entry.item, entry.shared)) {
+        std::printf("coop: %s key picker: item %d at event %s waits for every player's yes\n", g_who == 1 ? "player 1's" : "partner's", entry.item,
+                    Cur().event->name);
+        return;
+    }
+    if (OtherFloorsOnly(PickPack(entry.shared), entry.item)) {
+        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+    } else if (!Cur().gate) {
+        if (!(DoorScript(Cur().event->script_no) ? StartDoorBeside(entry) : StartWithAnswer(entry))) { // coop-keydoor
+            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        }
+    } else if (GateDoorScript(Cur().event->script_no) && !Mutated("gatekeyno")) {
+        // coop-gateflow: the lock's own script, its doors opening beside the game. coop-gatekeyno: whatever the pick, as
+        // retail's window answers its script: the script takes its key and plays its refusal on the user for anything else.
+        if (!StartDoorBeside(entry)) {
+            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        }
+    } else if (entry.item != LockKey(Cur().event)) { // coop-gatekeyno: the lock's own key
+        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        PickNote("Nothing happens.");
+    } else if (GateDoorScript(Cur().event->script_no)) {
+        if (!StartDoorBeside(entry)) {
+            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        }
+    } else if (!UseGateKey(entry)) {
+        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+    }
 }
 
 bool OpenKeyPickFor(int player, CDungeonEventData *state) {
@@ -3773,27 +3882,8 @@ bool StepKeyPickFor(int player, const InputPadState &pad) {
                 CoopTownCaveRefusal(player);
                 return true;
             }
-        } else if (OtherFloorsOnly(PickPack(entry.shared), entry.item)) {
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-        } else if (!Cur().gate) {
-            if (!(DoorScript(Cur().event->script_no) ? StartDoorBeside(entry) : StartWithAnswer(entry))) { // coop-keydoor
-                SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            }
-        } else if (GateDoorScript(Cur().event->script_no) && !Mutated("gatekeyno")) {
-            // coop-gateflow: the lock's own script, its doors opening beside the game. coop-gatekeyno: whatever the pick, as
-            // retail's window answers its script: the script takes its key and plays its refusal on the user for anything else.
-            if (!StartDoorBeside(entry)) {
-                SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            }
-        } else if (entry.item != LockKey(Cur().event)) { // coop-gatekeyno: the lock's own key
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            PickNote("Nothing happens.");
-        } else if (GateDoorScript(Cur().event->script_no)) {
-            if (!StartDoorBeside(entry)) {
-                SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            }
-        } else if (!UseGateKey(entry)) {
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        } else {
+            RouteDungeonPick(entry); // pt1111c: (out of here, shared with the item scene's test hook)
         }
 
         ClosePick();
@@ -3830,6 +3920,104 @@ void LogFloorGateKey() {
             return;
         }
     }
+}
+
+// pt1111c test hook (DC_COOP_TEST_ITEM_SCENE=<who>[:<script>], x-item-scene, both copies): the pick of an item scene's item, made
+// as the key picker makes one (RouteDungeonPick, its Cross), so the vote (or, as before, the script) follows from the game's own
+// path. <script>: the slot's program (300, Wise Owl Forest floor 9's switch, the default; 400, Shipwreck floor 17's music box
+// lock). <who> 1 or 2: once the row's fixture is loaded and the floor plays (the same link tick on every copy), that player
+// picks; apart: once this copy stays on its floor apart as its own member (its player the game's), this copy's player picks.
+// The item the script wants goes into the world key ring first (a story item: outside both bags, as coop-worldkeys keeps it),
+// and the user is put on the slot. Says whether the user still holds it, each 60 ticks after (the rows that keep it).
+void ItemSceneTest() {
+    static const char *const spec = TestEnv("DC_COOP_TEST_ITEM_SCENE");
+    static int               done = 0;
+    static int               user = 0;
+    static int               wanted = -1;
+    static int               ticks = 0;
+    static bool              shared = false;
+
+    if (spec == nullptr || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || NowEventMan == nullptr) {
+        return;
+    }
+    if (done == 1 && wanted > 0 && ++ticks % 60 == 0) {
+        std::fprintf(stderr, "coop: test: item scene: player %d holds item %d: %d\n", user, wanted,
+                     Holds(shared ? SharedRing() : user == 1 ? UserStatus->item_pack : PartnerPack(), wanted) ? 1 : 0);
+        std::fflush(stderr);
+    }
+    if (done != 0 || gameTask != GAME_TASK_PLAY) {
+        return;
+    }
+
+    const bool apart = std::strncmp(spec, "apart", 5) == 0;
+    const char *colon = std::strchr(spec, ':');
+    const int   script = colon != nullptr ? std::atoi(colon + 1) : 300;
+
+    // cand1111b: apart, the pick once the other copy is heard (CoopWorldsItemSceneAsk calls only a copy it has heard; one tick after
+    // the split it had not, and the scene was the user's alone: x-item-scene-apart)
+    if (apart ? !(CoopWorldsApart() && CoopWorldsPeerHeard() && UserStatus->cur_chara != CHARA_TOAN) : !NetplayStateFileLoaded()) {
+        return;
+    }
+    done = 1;
+    user = apart ? 1 : std::atoi(spec); // (apart: the game's player is this copy's own, the picker's player 1)
+    if (user != 1 && user != 2) {
+        return;
+    }
+
+    for (int slot = 0; slot < 96; slot++) {
+        CDungeonEventData &data = NowEventMan->event[slot];
+
+        if (data.event == nullptr || !data.enabled || data.event->script_no != script || (wanted = ScriptWantedItem(script)) <= 0) {
+            continue;
+        }
+
+        shared = SharedItem(wanted);
+        ITEM_PACK &pack = shared ? SharedRing() : user == 1 ? UserStatus->item_pack : PartnerPack();
+
+        for (int i = 0; i < pack.num && i < 103; i++) {
+            if (pack.item[i] <= 0) {
+                pack.item[i] = (s16) wanted;
+                pack.item_vol[i] = 0;
+                break;
+            }
+        }
+
+        sceVu0FVECTOR at = {data.pos[0], user == 1 ? CharaMain.pos[1] : g_partner.pos[1], data.pos[2], 1.0f};
+
+        if (user == 1) {
+            CharaMain.SetPosition(at);
+            sceVu0CopyVector(CharaMain.pos, at);
+        } else if (g_partner.chara != nullptr) {
+            sceVu0CopyVector(g_partner.pos, at);
+            g_partner.chara->frame->SetPosition(at);
+            g_partner.chara->SetPosition(at);
+        }
+        g_who = user;
+        Cur().slot = slot;
+        Cur().event = data.event;
+        Cur().gate = std::strncmp(data.event->name, "gatekey", 7) == 0; // (as OpenKeyPickFor sets it for the slot)
+        std::fprintf(stderr, "coop: test: item scene: player %d picks item %d at %s (script %d) at link tick %lld (%s)\n", user, wanted, data.event->name,
+                     script, (long long) NetplayLinkTick(), apart ? "apart" : "together");
+        std::fflush(stderr);
+        RouteDungeonPick(PickEntry{(std::int16_t) wanted, shared});
+        return;
+    }
+    std::fprintf(stderr, "coop: test: item scene: no slot with script %d on this floor\n", script);
+    std::fflush(stderr);
+}
+
+bool StartPickedItemScene(int player, int slot, int item, bool shared) {
+    if (player < 1 || player > 2 || NowEventMan == nullptr || slot < 0 || slot >= 96 || NowEventMan->event[slot].event == nullptr) {
+        return false;
+    }
+
+    g_who = player;
+    Cur().slot = slot;
+    Cur().event = NowEventMan->event[slot].event;
+    g_item_scene_go = true;
+    const bool started = StartWithAnswer(PickEntry{(std::int16_t) item, shared});
+    g_item_scene_go = false;
+    return started;
 }
 
 bool KeyPickAnswer() {

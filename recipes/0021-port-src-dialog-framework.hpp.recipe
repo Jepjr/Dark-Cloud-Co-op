@@ -1,0 +1,54 @@
+# port/src/dialog/framework.hpp from Chronicle's port/src/dialog/framework.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/dialog/framework.hpp
+base port/src/dialog/framework.hpp
+from 68c795f793f463af053727765e053d4ffd184a24
+to 8ff2b9d1fa234c804e6093b8a510d32082569e67
+@@ -439,0 +440,48
++// Jep (co-op, coop-pt1111e): a session as data, one per talker. A linked pair steps every talk on every copy, and a copy that
++// joins mid-talk takes the others' state as a block of memory; the session is this process's heap (its pages, and each
++// choice's callback), so it is written out as data (WriteSessions) and read back with each choice's callback bound again from
++// its id (ReadSessions), never run again. "builtin.talk" and "builtin.leave" bind here; a provider's choices bind through the
++// resolvers it registers. A choice no resolver binds cannot be carried (SessionsRebindable names it).
++
++/**
++ * Binds item.on_select from item.id (and the session's NPC), returning false for an id it does not know.
++ */
++using ChoiceResolverFn = std::function<bool(const NpcContext &ctx, ChoiceItem &item)>;
++
++/**
++ * Adds a resolver ReadSessions and SessionsRebindable ask, in order, for each choice that is not the framework's own.
++ */
++void RegisterChoiceResolver(ChoiceResolverFn resolver);
++
++/**
++ * How many sessions are kept beside the open one, one for each talker.
++ */
++constexpr int kSessionSlots = 8;
++
++/**
++ * Exchanges the open session with the one kept in slot (0 to kSessionSlots - 1): each talker's own.
++ */
++void SwapSession(int slot);
++
++/**
++ * Appends the open session and every slot's, as data.
++ */
++void WriteSessions(std::vector<uint8_t> &out);
++
++/**
++ * Replaces the open session and every slot's with WriteSessions' data, each choice bound by its id; false (with why) for data
++ * that does not read or a choice no resolver binds, the sessions then closed.
++ */
++bool ReadSessions(const uint8_t *data, size_t size, std::string &why);
++
++/**
++ * Whether every choice of the open session and every slot's binds again by its id; the first that does not in missing.
++ */
++bool SessionsRebindable(std::string &missing);
++
++/**
++ * Jep (co-op, coop-pt1111e): puts the open session's selection on choice index (counted from the page's first choice), for a
++ * pointer's click that every copy applies on one tick; false when the page shows no such enabled choice.
++ */
++bool SelectChoice(int32_t index);
++

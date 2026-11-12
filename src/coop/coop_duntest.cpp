@@ -68,6 +68,8 @@
 #include "dungeonmap.hpp"
 #include "frame.hpp"
 #include "itemdata.hpp"
+#include "weaponelement.hpp" // coop-pt1111b: CWeaponElement
+#include "editmapscript.hpp" // coop-pt1111b: the town's mode (GameMode)
 #include "dataread.hpp"      // coop-chestworld: read_buffer
 #include "mainitemmodel.hpp" // coop-chestworld: activeItem
 #include "main.hpp"
@@ -90,6 +92,7 @@
 #include "coop/coop_worlds.hpp"
 
 namespace dc::game {
+extern CWeaponElement CWeaponElFx[4]; // coop-pt1111b: a thunder hit's effect (gameloop.cpp)
 extern s32 gameTask;
 extern s32 mode;
 extern s32 itemNowSel;                             // coop-chestworld: the quick slot in hand (gameloop.cpp)
@@ -444,11 +447,48 @@ bool Place() {
         return true;
     }
 
+    // coop-pt1111b (item 14): thunder: the user's thunder hit (its weapon element's effect, CWeaponElFx, as a hit sets it in
+    // retail's MonsterDamage) 200 behind the other player, along the way the other faces (whose camera follows behind, facing
+    // that way): the hit is behind the other's view on the other's copy. The user stands at it, as the hitter would.
+    if (o == "thunder") {
+        const int     other = 3 - g_test.who;
+        const float  *there = UserPos(other);
+        float         yaw = 0.0f;
+        sceVu0FVECTOR ahead = {0.0f, 0.0f, 1.0f, 0.0f};
+
+        if (other == 1) {
+            sceVu0FVECTOR turn;
+
+            CharaMain.GetRotation(turn);
+            yaw = turn[1];
+            ahead[0] = sinf(yaw);
+            ahead[2] = cosf(yaw);
+        } else {
+            sceVu0CopyVector(ahead, g_partner.heading);
+        }
+        g_test.spot[0] = there[0] - 200.0f * ahead[0];
+        g_test.spot[1] = there[1] + 10.0f;
+        g_test.spot[2] = there[2] - 200.0f * ahead[2];
+        g_test.spot[3] = 1.0f;
+        PutAt(g_test.who, g_test.spot);
+        CWeaponElFx[0].Set(&g_test.spot, g_test.spot, 60.0f, WEAPON_ELEMENT_THUNDER, 12.0f);
+        std::fprintf(stderr, "duntest: put p%d on thunder: its hit at (%.0f %.0f %.0f), 200 behind p%d facing (%.2f %.2f)\n", g_test.who, g_test.spot[0],
+                     g_test.spot[1], g_test.spot[2], other, ahead[0], ahead[2]);
+        return true;
+    }
+
     if (o == "gold" || o == "item" || o == "gatekey") {
         sceVu0FVECTOR at;
 
         sceVu0CopyVector(at, user);
-        g_test.item = o == "item" ? (int) ITEM_BREAD : o == "gatekey" ? NowDngMap->gate_key_no : -1;
+        // (coop-pt1111b: DC_COOP_DUNTEST_ITEM=N drops item N for item, a Prickly from a monster as item 20 had it)
+        g_test.item = o == "item" ? TestEnvInt("DC_COOP_DUNTEST_ITEM", (int) ITEM_BREAD) : o == "gatekey" ? NowDngMap->gate_key_no : -1;
+        // coop-pt1111b (item 20): DC_COOP_DUNTEST_TOWNMODE=N puts the town's mode (::GameMode, the town loop's own static) at N as the
+        // drop falls, as the town's way into the dungeon leaves it (its entrance event, ED_MODE_EVENT 14; nothing on a floor sets it)
+        if (const int town_mode = TestEnvInt("DC_COOP_DUNTEST_TOWNMODE", -1); town_mode >= 0) {
+            std::fprintf(stderr, "duntest: the town's mode was %d on the floor, put at %d\n", (int) ::GameMode, town_mode);
+            ::GameMode = town_mode;
+        }
         RandomItem->Set(at, 101, o == "gold" ? 50 : -1, o == "gold" ? -1 : g_test.item);
         sceVu0CopyVector(g_test.spot, at);
         std::fprintf(stderr, "duntest: put p%d on %s: dropped at (%.0f %.0f %.0f), item %d, other %.0f away\n", g_test.who, what, at[0], at[1], at[2],

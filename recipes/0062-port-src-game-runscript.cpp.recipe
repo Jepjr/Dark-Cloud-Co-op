@@ -2,12 +2,14 @@
 target port/src/game/runscript.cpp
 base port/src/game/runscript.cpp
 from d20b1b1c151a85cdb3a276fc5812c6a955658aad
-to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
+to 6ac5e2a0239cc22100743fc4b593487f85fa48dc
 @@ -5,0 +6,1
 +#include <cstdlib>
-@@ -15,0 +17,1
+@@ -15,0 +17,3
 +#include "platform/arena.hpp" // coop-snapshot: the VM's heap in a pinned arena
-@@ -54,0 +57,9
++
++void CoopScriptExtTrace(const void *script, int index, const dc::game::RS_STACKDATA *args, int count); // coop-eventslots (port/src/coop/coop_eventslots.cpp)
+@@ -54,0 +59,9
 +// coop-snapshot (port/src/coop/snapshot_state.cpp): the VM's host-side state, each
 +// interpreter's stacks and the decoded function records, lived on the C heap, where two copies of the game hold it at
 +// different addresses; a snapshot taken on one copy then put the other's script objects onto memory that was not there
@@ -17,7 +19,7 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +constexpr std::size_t kVmArenaBytes = 48u << 20;
 +int                   g_vm_arena_owner; // the block's owner (its address picks the pinned slot)
 +
-@@ -56,4 +67,33
+@@ -56,4 +69,4
 - 33fc08f5b4df3327
 - 68b3a9a24d4e788e
 - 102477bdb0029cf4
@@ -26,8 +28,7 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    int           stack_num = 0;
 +    RS_CALLDATA  *call = nullptr;
 +    int           call_num = 0;
-+};
-+
+@@ -61,0 +75,55
 +// coop-scenejoin: the VM's bookkeeping lives in its arena too, at the block's start: how much of it is used, which record
 +// (by its address in the loaded file) was decoded where, and each interpreter's stacks. It was a global count and two C-heap
 +// maps, which a state set did not carry: after another copy's set went in, this copy's maps still named its own places in
@@ -55,7 +56,8 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    std::size_t   stacks;
 +    RecordSlot    record[kRecordSlots];
 +    StackSlot     stack[kStackSlots];
-@@ -61,0 +102,26
++};
++
 +VmBook *Book() {
 +    auto *book = reinterpret_cast<VmBook *>(ArenaBlock(&g_vm_arena_owner, kVmArenaBytes));
 +    if (book->magic != kVmMagic) {
@@ -82,7 +84,7 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    return out;
 +}
 +
-@@ -64,3 +130,13
+@@ -64,3 +132,13
 - dc265a03bcb13050
 - d00e01c8ece0fb70
 - 86531b91b855f083
@@ -99,7 +101,7 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +        book->record[at].key = record;
 +    }
 +    return book->record[at].slot;
-@@ -69,3 +145,13
+@@ -69,3 +147,13
 - 36515bd693a694a2
 - 113daea45cea957b
 - c8f863199817a0f0
@@ -116,17 +118,17 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +        book->stack[at].key = script;
 +    }
 +    return book->stack[at].host;
-@@ -79,3 +165,3
+@@ -79,3 +167,3
 - 3dde8a4846c877fe
 - 0781df50aa1048ea
 - 8887b7988ef17a13
 +    funcdata *&slot = RecordSlotFor(record);
 +    if (slot == nullptr) {
 +        slot = static_cast<funcdata *>(VmAlloc(sizeof(funcdata)));
-@@ -87,1 +173,1
+@@ -87,1 +175,1
 - 5808923de2b56ac4
 +    return slot;
-@@ -161,0 +248,9
+@@ -161,0 +250,9
 +// coop-snapshot (port/src/coop/snapshot_state.cpp): the VM's state that lives on the C heap, each interpreter's
 +// host-sized stacks and every decoded function record, so a snapshot taken and put back in one copy covers a script
 +// under way. The blocks stay where they are while no script is loaded between the take and the restore.
@@ -136,7 +138,7 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    (void) context;
 +}
 +
-@@ -169,0 +265,137
+@@ -169,0 +267,137
 +int ScriptPrograms(const RS_PROG_HEADER *prog, int *nos, int max) {
 =343 2fde6a590e4e44e0
 +        return 0;
@@ -274,19 +276,21 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    return count;
 +}
 +
-@@ -299,3 +531,3
+@@ -289,0 +524,1
++    CoopScriptExtTrace(this, index, &args[1], argc - 1); // coop-eventslots: test trace of a script's ext calls
+@@ -299,3 +534,3
 - 4f7d4f08ed70a8ec
 - 48785e6e8e55226a
 - 1424ca33b5b359a7
 +    HostStacks &host = StacksFor(this);
 +    if (host.stack_num < stack_num) {
 +        host.stack = static_cast<RS_STACKDATA *>(VmAlloc(sizeof(RS_STACKDATA) * static_cast<size_t>(stack_num)));
-@@ -304,2 +536,2
+@@ -304,2 +539,2
 - e1f655ca9e777af4
 - 9ab2344ac1631f70
 +    if (host.call_num < call_num) {
 +        host.call = static_cast<RS_CALLDATA *>(VmAlloc(sizeof(RS_CALLDATA) * static_cast<size_t>(call_num)));
-@@ -308,1 +540,6
+@@ -308,1 +543,6
 - 683c54ac4897814f
 +    // Cleared at every load: the heap's fresh allocations were zero, and a block kept from an earlier script holds that
 +    // script's leavings, which two copies that played apart hold differently (w-world-split next-floor after a merge: the
@@ -294,6 +298,21 @@ to 1f2c8e12b398bdf9539ddeb4e3a664384f8fa65e
 +    std::memset(host.stack, 0, sizeof(RS_STACKDATA) * static_cast<size_t>(host.stack_num));
 +    std::memset(host.call, 0, sizeof(RS_CALLDATA) * static_cast<size_t>(host.call_num));
 +    this->stack = host.stack;
-@@ -310,1 +547,1
+@@ -310,1 +550,1
 - 76e605d4684c2a3e
 +    this->call = host.call;
+@@ -842,0 +1083,14
++// coop-eventslots: a script's own state outside its CRunScript (the host-sized operand and call stacks the VM keeps for it, and
++// the last run's result), as ranges for a parked event slot (port/src/coop/coop_eventslots.cpp) to exchange around its steps.
++void RunScriptStateRanges(const CRunScript *script, void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++    HostStacks &host = StacksFor(script);
++
++    if (host.stack != nullptr) {
++        add(host.stack, sizeof(RS_STACKDATA) * static_cast<std::size_t>(host.stack_num), "vm stack", context);
++    }
++    if (host.call != nullptr) {
++        add(host.call, sizeof(RS_CALLDATA) * static_cast<std::size_t>(host.call_num), "vm calls", context);
++    }
++    add(&g_run_result, sizeof g_run_result, "g_run_result", context);
++}
++

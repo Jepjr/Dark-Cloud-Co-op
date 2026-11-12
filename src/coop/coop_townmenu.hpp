@@ -19,6 +19,7 @@ bool CoopTownMenuRunsFor(int player);
 bool CoopTownMenuRunsLocalHere(int player);
 int  CoopTownMenuCloseJump(int player);
 void CoopTownMenuClosedByCommand(int player, int code, long long tick);
+void CoopTownMenuQuestShopTick(); // coop-pt1111e: each tick, every copy: the open quest shop's first good, for its close's line
 // coop-stage4 4b: his battle menu from his walk (editloop, edit_in) opens local (true: the town stays in its walk; his bit on
 // every copy, the engine on his); its close command's map jump for the town's walk to take (-1 none), and indoors the room's way
 // out (true: MenuMapJumpMode and the room's out flag set as retail's close leaves them). Whether his local menu is open (the bit).

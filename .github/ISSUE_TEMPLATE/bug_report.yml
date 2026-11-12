@@ -1,0 +1,61 @@
+name: Bug report
+description: Something went wrong while playing or setting up.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The logs from **both** players help the most: `save\log.txt` in each player's `mods\Dark Cloud Co-op` folder. They stay on your PC unless you attach them here.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release you're both on, for example v0.1.1. It's on the Releases page you downloaded from.
+      placeholder: v0.1.1
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How were you connected?
+      options:
+        - IP address
+        - NAT code
+        - Steam
+        - Local (split-screen or multi-screen)
+        - Single player
+        - Didn't get that far (setup or connecting)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead. Say which player saw it (player 1 is the host).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How did it happen?
+      description: Where you both were and what each of you was doing just before. If you can make it happen again, the steps.
+      placeholder: |
+        1. Player 1 in the mayor's house, talking to the mayor
+        2. Player 2 walks in
+        3. The zone reloads
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag in `save\log.txt` from both players. For a crash, also the newest `darkcloud.exe.*.dmp` in `%LOCALAPPDATA%\CrashDumps` if there is one.
+    validations:
+      required: false
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else?
+      description: Screenshots or a clip help a lot.
+    validations:
+      required: false

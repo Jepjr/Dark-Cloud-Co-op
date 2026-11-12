@@ -1,0 +1,20 @@
+# port/src/quest/custom_shop.hpp from Chronicle's port/src/quest/custom_shop.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/custom_shop.hpp
+base port/src/quest/custom_shop.hpp
+from 0e7abf191148407c8d3bbaeac5cd82f285fac0c0
+to d7f38c14f7c5ae6bcba113b8cfc2428f71f96f60
+@@ -6,0 +7,1
++#include <string_view>
+@@ -56,0 +58,12
++/**
++ * Jep (co-op, coop-pt1111e): the open custom shop as data (empty when none), for a copy that joins mid-visit: its goods, its
++ * shopkeeper and lines, and the retail prices it laid over (to put back at its end).
++ */
++void CustomShopWrite(std::string &out);
++
++/**
++ * Replaces this copy's open custom shop with CustomShopWrite's data (empty: none), without touching the price table (the joining
++ * copy takes that with the rest of the other's state); false for data that does not read.
++ */
++bool CustomShopRead(std::string_view data);
++

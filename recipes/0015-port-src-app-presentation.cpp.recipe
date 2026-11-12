@@ -2,7 +2,7 @@
 target port/src/app/presentation.cpp
 base port/src/app/presentation.cpp
 from c4048c904f0fdb6fce5c548ce5da2349cbe8d72c
-to 4f33993b64f26c7f843b0fa69976d276df9d191c
+to 7e761b59c719269ce0ccb249a58fd7acf8eda92e
 @@ -19,0 +20,6
 +#include "character.hpp"   // coop: DC_SCREENSHOT_ALPHA's player position
 +#include "editloop.hpp"    // coop: (Chara)
@@ -113,15 +113,21 @@ to 4f33993b64f26c7f843b0fa69976d276df9d191c
 ~502 2fc19d9d75f9828b|        |
 +        return;
 +    }
-@@ -586,0 +689,22
+@@ -586,0 +689,28
 +    // coop-pilot: under DC_QA_NO_DRAW the tick's list is rendered here, once and on demand, so a captured frame is the tick's own.
 +    if (g_list_unrendered && g_list) {
 +        gfx::RenderList(*g_list, 1.0f, {.canonical = true});
 +        g_list_unrendered = false;
 +    }
 +    // coop-localfix2: what the window shows while the arriving copy holds its fade (GamePresentBetweenTicks).
++    // coop-basereds (x-floor-join-reverse-seamless/latefall red since train 57's re-pin): Kazarov b619d1aa's ReadbackFrame reads
++    // the display image only after a presented list (g.presented_display), else the game's own last frame, so the black
++    // rendered unpresented here was never read: under the hold a capture showed the floor's arrival fade, then the floor once
++    // that ended before the catch-up. Presented, as the window's own black is (PresentBlackFrame), the capture reads it.
++    // DC_NETPLAY_MUTATE=hold_shot_unpresented (twin): unpresented, as before.
 +    if (NetplayArrivalHold() && BlackList()) {
-+        return gfx::RenderList(*BlackList(), 1.0f, {.present = false, .host = true}) && gfx::ReadbackFrame(rgba, width, height);
++        const bool present = !NetplayMutated("hold_shot_unpresented");
++        return gfx::RenderList(*BlackList(), 1.0f, {.present = present, .host = true}) && gfx::ReadbackFrame(rgba, width, height);
 +    }
 +    // coop: DC_SCREENSHOT_ALPHA=F: the display frame F of the way from the previous tick to the last, as an
 +    // interpolating window shows it between ticks (tests of the interpolation), and where the player

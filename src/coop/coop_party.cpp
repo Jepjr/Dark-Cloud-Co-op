@@ -1,3 +1,4 @@
+#include "coop/coop_zonechara.hpp" // coop-pt1111k
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_audio.hpp" // coop-menuse
@@ -184,6 +185,14 @@ void PartyTestHooks(bool apply) {
 
 int PickPartner() {
     PartyTestHooks(true);
+
+    // coop-pt1111k: her own pick (her ring, menu, L3) is taken here, on every copy on one tick: on a character-limited floor one
+    // that would leave its member unplayed is refused on her screen and she keeps her member (ZonePickLegal; Jep 11-11).
+    if (g_partner.loaded_chara >= 0 && g_partner.choice >= 0 && g_partner.choice != g_partner.loaded_chara && g_partner.choice != UserStatus->cur_chara &&
+        g_partner.down == 0 && !ZonePickLegal(1, g_partner.choice)) {
+        ZonePickRefused(1, g_partner.choice, "her pick");
+        g_partner.choice = g_partner.loaded_chara;
+    }
 
     int current = UserStatus->cur_chara;
     int party = std::min<int>(UserStatus->party_size, 6);
@@ -1993,6 +2002,11 @@ int g_presence_absent = 0; // calls in a row without a controller or link
 int g_presence_calls = 0;
 
 } // namespace
+
+// coop-pt1111k: whether player 2 counts as there now (StepPresence's last answer), loaded or not yet (a floor's start).
+bool PartnerCounted() {
+    return g_presence_was == 1;
+}
 
 bool StepPresence(bool *rejoined) {
     bool present;

@@ -89,16 +89,70 @@ function Run([string]$Exe, [string[]]$Arguments, [string]$What) {
 # $Status gives (text, percent or -1) for a bar (Write-Progress) and, for consoles that draw no bar, a plain line when the
 # percent moves 5 points or 15 s pass ("Building the game: 812 / 1450 (56%)", or the text and the time so far).
 function Format-Elapsed([double]$Secs) { '{0}:{1:00}' -f [int][math]::Floor($Secs / 60), [int][math]::Floor($Secs % 60) }
-function Run-Watched([string]$Exe, [string[]]$Arguments, [string]$What, [string]$Activity, [scriptblock]$Status) {
+# release7 (Jep 11-11: a tester's setup sat 20 min after the link, its python waiting on input that never came, and said
+# nothing): with -StallSecs the program's process tree is walked every 3 s (Win32_Process by parent) into
+# $script:treeProcs for $Status, and a leaf of it (a program waiting on no program of its own) whose CPU time does not grow
+# for StallSecs, while no file right inside $StallFolders changes, ends the run: the tree killed, $script:stalled set to
+# that leaf, an error thrown. Test switch DCO_SETUP_MUTATE=no_stall_check: never ends it (row l-setup-hold's twin).
+function Get-ProcessTree([int]$RootId) {
+    # (WMI through .NET, not Get-CimInstance: its module can be missing when Windows PowerShell inherits another's modules)
+    Add-Type -AssemblyName System.Management
+    $q = New-Object Management.ManagementObjectSearcher 'SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, KernelModeTime, UserModeTime FROM Win32_Process'
+    try { $all = @($q.Get()) } finally { $q.Dispose() }
+    $kids = @{}
+    foreach ($q in $all) { $k = [int]$q.ParentProcessId; if ($k -ne [int]$q.ProcessId) { if (-not $kids.ContainsKey($k)) { $kids[$k] = @() }; $kids[$k] += $q } }
+    $found = @(); $seen = @{ $RootId = $true }; $todo = New-Object Collections.Queue; $todo.Enqueue($RootId)
+    while ($todo.Count) {
+        $id = $todo.Dequeue()
+        if (-not $kids.ContainsKey($id)) { continue }
+        foreach ($c in $kids[$id]) {
+            if ($seen.ContainsKey([int]$c.ProcessId)) { continue }
+            $seen[[int]$c.ProcessId] = $true; $todo.Enqueue([int]$c.ProcessId)
+            $found += [pscustomobject]@{ Id = [int]$c.ProcessId; Parent = $id; Name = "$($c.Name)"; Path = "$(if ($c.ExecutablePath) { $c.ExecutablePath } else { $c.Name })"
+                                         Command = "$($c.CommandLine)"; Cpu = [uint64]$c.KernelModeTime + [uint64]$c.UserModeTime; Leaf = $false }
+        }
+    }
+    $parents = @{}; foreach ($f in $found) { $parents[$f.Parent] = $true }
+    foreach ($f in $found) { $f.Leaf = (-not $parents.ContainsKey($f.Id)) -and $f.Name -ne 'conhost.exe' }
+    return $found
+}
+# The newest write time of the files right inside some folders (not their subfolders), or [DateTime]::MinValue.
+function Get-NewestWrite([string[]]$Folders) {
+    $t = [DateTime]::MinValue
+    foreach ($d in $Folders) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $d -File -Force -ErrorAction SilentlyContinue)) { if ($f.LastWriteTimeUtc -gt $t) { $t = $f.LastWriteTimeUtc } }
+    }
+    return $t
+}
+function Run-Watched([string]$Exe, [string[]]$Arguments, [string]$What, [string]$Activity, [scriptblock]$Status, [int]$StallSecs = 0, [string[]]$StallFolders = @()) {
     Add-Content -LiteralPath $Log -Value "> $Exe $($Arguments -join ' ')"
     $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]' -or $_ -eq '') { '"' + (($_ -replace '"', '\"') -replace '\\$', '\\') + '"' } else { $_ } }) -join ' '
     $outFile = [IO.Path]::GetTempFileName(); $errFile = [IO.Path]::GetTempFileName()
     $p = Start-Process -FilePath $Exe -ArgumentList $quoted -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $null = $p.Handle   # (keeps the exit code readable once it ends)
     $s = Get-Date; $lastPct = -100; $lastSaid = $s; $saved = $ProgressPreference; $ProgressPreference = 'Continue'
+    $script:treeProcs = @(); $script:stalled = $null; $treeAt = [DateTime]::MinValue; $cpuSeen = @{}; $newest = [DateTime]::MinValue
     try {
         while (-not $p.WaitForExit(500)) {
             $secs = ((Get-Date) - $s).TotalSeconds
+            if ($StallSecs -gt 0 -and ((Get-Date) - $treeAt).TotalSeconds -ge 3) {
+                $treeAt = Get-Date
+                $script:treeProcs = @(Get-ProcessTree $p.Id)
+                $n = Get-NewestWrite $StallFolders
+                $fileMoved = $n -gt $newest; $newest = $n
+                $now = Get-Date; $next = @{}
+                foreach ($q in @($script:treeProcs | Where-Object { $_.Leaf })) {
+                    $was = $cpuSeen[$q.Id]
+                    $at = if (-not $was -or $q.Cpu -gt $was.Cpu -or $fileMoved) { $now } else { $was.At }
+                    $next[$q.Id] = @{ Cpu = $q.Cpu; At = $at }
+                    if ($env:DCO_SETUP_MUTATE -ne 'no_stall_check' -and ($now - $at).TotalSeconds -ge $StallSecs) {
+                        $script:stalled = $q; $ErrorActionPreference = 'Continue'
+                        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /T /F /PID $p.Id 2>&1 | Out-Null
+                        throw "$What waited $([int]($now - $at).TotalSeconds) s on $($q.Path) doing nothing"
+                    }
+                }
+                $cpuSeen = $next
+            }
             $st = @(& $Status $outFile $secs)
             $text = "$($st[0])"; $pct = if ($st.Count -gt 1) { [int]$st[1] } else { -1 }
             if ($pct -ge 0) { Write-Progress -Activity $Activity -Status $text -PercentComplete ([Math]::Min(100, $pct)) }
@@ -357,12 +411,34 @@ $kTools = @(
 )
 $k7zr = @{ Url = 'https://github.com/ip7z/7zip/releases/download/24.08/7zr.exe'; Sha = '1B16C41AE39B679384B06F1492B587B650716430FF9C2E079DCA2AD1F62C952D' }
 
+# The python.exe a Python 3 launch really runs (its sys.executable), or '' (no Python 3, or the Store alias).
+function Get-PythonExe([string]$Exe, [string[]]$Pre = @()) {
+    try {
+        $ErrorActionPreference = 'Continue'
+        $v = @(& $Exe @Pre -I -c 'import sys; print(sys.version_info[0]); print(sys.executable)' 2>$null)
+        if ($LASTEXITCODE -or $v.Count -lt 2 -or "$($v[0])".Trim() -ne '3') { return '' }
+        $p = "$($v[1])".Trim()
+        if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return $p }
+    } catch { }
+    return ''
+}
 # This PC's own tool, or $null: on PATH, new enough where it matters (PowerShell 7, CMake 3.28).
 function Find-OwnTool([hashtable]$T) {
     if ($portable) { return $null }
     $c = Get-Command $T.Exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $c -and $T.Name -eq '7z' -and (Test-Path 'C:\Program Files\7-Zip\7z.exe')) { return 'C:\Program Files\7-Zip' }
-    if (-not $c -and $T.Name -eq 'python') { $c = Get-Command py.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($T.Name -eq 'python') {
+        # release7 (Jep 11-11): the python.exe found first can be Windows' Store alias (WindowsApps), which runs no
+        # Python; each candidate (python.exe, then py.exe -3) is run, and the folder of the interpreter itself (its
+        # sys.executable) is this PC's python.
+        foreach ($cand in @(@('python.exe'), @('py.exe', '-3'))) {
+            $cc = Get-Command $cand[0] -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $cc) { continue }
+            $exe = Get-PythonExe $cc.Source @($cand | Select-Object -Skip 1)
+            if ($exe) { return Split-Path $exe }
+        }
+        return $null
+    }
     if (-not $c) { return $null }
     try {
         if ($T.Name -eq 'pwsh') { $v = & $c.Source -NoProfile -Command '$PSVersionTable.PSVersion.Major'; if ([int]"$v" -lt 7) { return $null } }
@@ -472,6 +548,9 @@ $peak = 0
 # an exclusion itself (that needs admin and changes Windows). Test switch DCO_SETUP_TEST_REMOVE_EXE=1: game\darkcloud.exe
 # deleted after the build, as an antivirus would (row l-setup-defender); DCO_SETUP_MUTATE=no_game_check (its twin): no check.
 $avFolder = Join-Path $chronicle 'mods'
+$avTools = Join-Path $chronicle '.kazarov'   # (release7: the toolchain's programs)
+$avHelp = "   Add two folder exclusions: Windows Security > Virus & threat protection > Manage settings > Exclusions > Add an exclusion > Folder > $avFolder`n" +
+          "   and the same again for $avTools`n"
 function Get-MissingGameFile([string]$Game) {
     if ($env:DCO_SETUP_MUTATE -eq 'no_game_check') { return '' }
     $exe = Join-Path $Game 'darkcloud.exe'
@@ -486,8 +565,39 @@ function Get-MissingGameFile([string]$Game) {
 }
 function Stop-Antivirus([string]$Why) {
     Stop-Setup ("Windows Defender (or your antivirus) removed the game while it was being built ($Why). This is a false alarm on a freshly built, unsigned program.") (
-        "   Add this folder as an exclusion: Windows Security > Virus & threat protection > Manage settings > Exclusions > Add an exclusion > Folder > $avFolder`n" +
-        "   Then run the setup again; it carries on from here.")
+        $avHelp + "   Then run the setup again; it carries on from here.")
+}
+# release7: a program of the build that stopped doing anything, or is missing: named, with its command line.
+function Stop-Held([string]$Program, [string]$Why, [string]$Command = '') {
+    Stop-Setup "The build stopped making progress: it waited on $Program, which $Why." (
+        "   The program: $Program`n$(if ($Command) { "   Its command line: $Command`n" })" +
+        "   If your antivirus holds or removed it:`n" + $avHelp +
+        "   Then run the setup again; it carries on from here (what is built is kept). Otherwise please report it with setup-log.txt.")
+}
+# release7: each program the build runs, started once with a harmless argument before the build (cheap), so one that
+# is missing or will not start is named here, never a silent wait inside the build. Over 10 s: said; over the limit
+# (3 min; test switch DCO_SETUP_WARMUP_SECS): stopped. Test switch DCO_SETUP_TEST_MISSING=<file name>: that one counts as
+# missing (row l-setup-warmup); DCO_SETUP_MUTATE=no_warmup_check (its twin): no missing-file check.
+function Invoke-WarmUp([string]$Program, [string[]]$Arguments) {
+    if ($env:DCO_SETUP_MUTATE -ne 'no_warmup_check' -and ((-not (Test-Path -LiteralPath $Program -PathType Leaf)) -or ($env:DCO_SETUP_TEST_MISSING -and (Split-Path $Program -Leaf) -eq $env:DCO_SETUP_TEST_MISSING))) {
+        Stop-Held $Program 'is missing'
+    }
+    if (-not (Test-Path -LiteralPath $Program -PathType Leaf)) { return }
+    $limit = if ($env:DCO_SETUP_WARMUP_SECS) { [int]$env:DCO_SETUP_WARMUP_SECS } else { 180 }
+    $in = [IO.Path]::GetTempFileName(); $o = [IO.Path]::GetTempFileName(); $e = [IO.Path]::GetTempFileName()
+    try {
+        $q = Start-Process -FilePath $Program -ArgumentList $Arguments -NoNewWindow -PassThru -RedirectStandardInput $in -RedirectStandardOutput $o -RedirectStandardError $e
+        $s = Get-Date; $said = $false
+        while (-not $q.WaitForExit(500)) {
+            $secs = ((Get-Date) - $s).TotalSeconds
+            if (-not $said -and $secs -ge 10) { Say "   $(Split-Path $Program -Leaf) is slow to start (Windows or your antivirus may be checking it)"; $said = $true }
+            if ($secs -ge $limit) {
+                try { $q.Kill() } catch { }
+                Stop-Held $Program "did not start in $([int]$secs) s" "$Program $($Arguments -join ' ')"
+            }
+        }
+        if ($said) { Say "   $(Split-Path $Program -Leaf) ran after $([int]((Get-Date) - $s).TotalSeconds) s" }
+    } finally { foreach ($f in $in, $o, $e) { [IO.File]::Delete($f) } }
 }
 Say ''
 Say 'Some antivirus programs flag freshly built games; if yours does, the setup will tell you what to do.'
@@ -533,11 +643,57 @@ Step '5/8 The build' {
     Copy-Item -LiteralPath $dcdata -Destination (Join-Path $work 'game\dcdata.exe') -Force
     $jobs = if ($env:DCO_SETUP_JOBS) { [int]$env:DCO_SETUP_JOBS } else { [Math]::Max(2, [Environment]::ProcessorCount) }
     $buildLog = Join-Path $work 'out\build\build.log'
-    $script:lastStep = ''; $script:lastStepAt = Get-Date
+    # release7: the python the build runs is the interpreter the setup checked (Find-OwnTool: the python.exe it really
+    # runs; or the portable one). build\build.ps1 takes py.exe, else python.exe, from PATH: for the build that
+    # interpreter's folder comes FIRST on PATH (ahead of WindowsApps, where Windows' Store alias python.exe lives beside
+    # pwsh.exe) and every other folder holding a py.exe leaves it. What the build will find is then run and must be that
+    # interpreter, else the setup stops before the build. Test switch DCO_SETUP_MUTATE=python_by_path (row
+    # l-setup-storepy's twin): the first test zip's way (no interpreter first, no check).
+    $realPy = Join-Path $have.python 'python.exe'
+    $pre = @()
+    if ($env:DCO_SETUP_MUTATE -eq 'python_by_path') {
+        $env:PATH = @($env:PATH -split ';' | Where-Object { $_ -and ($_ -eq $have.python -or -not (Test-Path -LiteralPath (Join-Path $_ 'py.exe') -ErrorAction SilentlyContinue)) }) -join ';'
+        $py = Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    } else {
+        if (-not (Test-Path -LiteralPath $realPy -PathType Leaf)) { throw "no python.exe in $($have.python)" }
+        $env:PATH = (@($have.python) + @($env:PATH -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $have.python.TrimEnd('\') -and -not (Test-Path -LiteralPath (Join-Path $_ 'py.exe') -ErrorAction SilentlyContinue) })) -join ';'
+        $py = Get-Command py.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        $pre = @('-3')
+        if (-not $py) { $py = Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1; $pre = @() }
+        if (-not $py) { throw "the build finds no python.exe (the setup's is $realPy)" }
+        $got = Get-PythonExe $py.Source $pre
+        if ($got -ne $realPy) { throw "the build would run $($py.Source), which is $(if ($got) { $got } else { 'not a working Python 3' }), not the setup's $realPy" }
+    }
+    $pyArgs = @($pre) + @('-I', '-c', 'pass')
+    Say "   the build's python: $($py.Source)"
+    # release7: every program the build runs, started once first (Invoke-WarmUp).
+    $llvmBin = Join-Path $deps 'deps\llvm\llvm-mingw-20260922-ucrt-x86_64\bin'
+    $cmakeExe = if ($env:DCO_CMAKE) { $env:DCO_CMAKE } else { (Get-Command cmake.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+    $warm = @(@((Join-Path $llvmBin 'clang++.exe'), '--version'), @((Join-Path $llvmBin 'ld.lld.exe'), '--version'), @((Join-Path $llvmBin 'llvm-cxxfilt.exe'), '--version'),
+              @((Join-Path $llvmBin 'llvm-strip.exe'), '--version'), @((Join-Path $deps 'deps\ninja\ninja.exe'), '--version'), @($cmakeExe, '--version'))
+    $glslang = Join-Path $deps 'deps\glslang\bin\glslang.exe'
+    if (Test-Path -LiteralPath $glslang) { $warm += , @($glslang, '--version') }
+    Say '   starting each build program once'
+    foreach ($w in $warm) { Invoke-WarmUp $w[0] @($w[1]) }
+    Invoke-WarmUp $py.Source $pyArgs
+    $script:lastStep = ''; $script:lastStepAt = Get-Date; $script:buildStart = Get-Date
+    # release7: after ninja's last step, what the build runs then, by the program in its process tree.
+    # (a program's name, else its command line: python's names llvm-cxxfilt.exe too)
+    $kSteps = @(@('^llvm-cxxfilt\.exe ', 'Decoding names (llvm-cxxfilt)'), @('snapregions\.py', 'Writing the state set (python)'), @('pinplan\.py', 'Making the pin plan'),
+                @('^llvm-strip\.exe ', 'Stripping the game exe'), @('dcsteam\.cpp', 'Building the Steam helper'), @('launcher\.(cpp|rc)', 'Building the launcher'))
     $watch = { param($o, $secs)
                # (ninja writes "[N/M] ..." per step into out\build\build.log; before it come the stage and CMake's configure)
                $n = if (Test-Path -LiteralPath $buildLog) { Get-LastLine $buildLog '^\[\d+/\d+\]' } else { '' }
                if ($n -ne $script:lastStep) { $script:lastStep = $n; $script:lastStepAt = Get-Date }
+               $procs = @($script:treeProcs)
+               # (build.ps1 rewrites build.log as its ninja starts; once that has ended, the post-link steps run)
+               $linked = (Test-Path -LiteralPath $buildLog) -and (Get-Item -LiteralPath $buildLog).LastWriteTime -gt $script:buildStart -and
+                         -not @($procs | Where-Object { $_.Name -match '^(ninja|cmake)\.exe$' })
+               if ($procs -and ($linked -or $env:DCO_SETUP_TEST_HOLD)) {
+                   $label = 'Copying the game files'
+                   foreach ($k in $kSteps) { if (@($procs | Where-Object { "$($_.Name) $($_.Command)" -match $k[0] })) { $label = $k[1]; break } }
+                   "Building the game: $label"; -1; return
+               }
                # release6: no new ninja step for 3 minutes is said, never a silent wait (the link of a 200 MB exe while an
                # antivirus scans it is the usual one)
                $stuck = ((Get-Date) - $script:lastStepAt).TotalMinutes
@@ -545,9 +701,24 @@ Step '5/8 The build' {
                        elseif ($stuck -ge 3) { " - no new step for $([int]$stuck) min, still working" } else { '' }
                if ($n -match '^\[(\d+)/(\d+)\]') { $a = [int]$Matches[1]; $b = [int]$Matches[2]; "Building the game: $a / $b ($([int](100 * $a / $b))%)$wait"; [int](100 * $a / $b) }
                else { $l = Get-LastLine $o; "Preparing the build$(if ($l) { ": $($l.Substring(0, [Math]::Min(60, $l.Length)))" })$wait"; -1 } }
+    # release7: a program of the build doing nothing for 3 min (test switch DCO_SETUP_STALL_SECS) stops the setup naming it.
+    # Test switch DCO_SETUP_TEST_HOLD=cxxfilt (row l-setup-hold): instead of the build, a stand-in pwsh that starts the real
+    # llvm-cxxfilt.exe on a pipe it never writes, so it waits with no CPU as the tester's held program did.
+    $stall = if ($env:DCO_SETUP_STALL_SECS) { [int]$env:DCO_SETUP_STALL_SECS } else { 180 }
+    $buildArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $work 'build\build.ps1'), '-Root', $deps, '-Jobs', "$jobs", '-NoDcdata')
+    if ($env:DCO_SETUP_TEST_HOLD -eq 'cxxfilt') {
+        $hold = "`$i = New-Object Diagnostics.ProcessStartInfo '$(Join-Path $llvmBin 'llvm-cxxfilt.exe')'; `$i.UseShellExecute = `$false; `$i.RedirectStandardInput = `$true; " +
+                "`$c = [Diagnostics.Process]::Start(`$i); `$c.WaitForExit(); exit 1"
+        $buildArgs = @('-NoProfile', '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hold)))
+        Add-Content -LiteralPath $Log -Value 'test: a held llvm-cxxfilt.exe stands in for the build (DCO_SETUP_TEST_HOLD)'
+    }
     try {
-        $lines = Run-Watched $pwsh @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $work 'build\build.ps1'), '-Root', $deps, '-Jobs', "$jobs", '-NoDcdata') "the build (its log: $work\out\build\build.log)" 'Building Dark Cloud Co-op' $watch
+        $lines = Run-Watched $pwsh $buildArgs "the build (its log: $work\out\build\build.log)" 'Building Dark Cloud Co-op' $watch $stall @((Join-Path $work 'out\build\bin'), (Join-Path $work 'game'))
     } catch {
+        if ($script:stalled) {
+            if (Test-Path -LiteralPath $buildLog) { Add-Content -LiteralPath $Log -Value (Get-Content -LiteralPath $buildLog) }
+            Stop-Held $script:stalled.Path "did nothing for $([int]($stall / 60)) min $($stall % 60) s (no CPU time, no new file in the build's bin\ or game\)" $script:stalled.Command
+        }
         if (Test-Path -LiteralPath $buildLog) { Add-Content -LiteralPath $Log -Value (Get-Content -LiteralPath $buildLog) }
         # (a link that cannot write or find its output, or a strip or copy denied: the antivirus took the exe)
         $said = "$($_.Exception.Message)`n$(if (Test-Path -LiteralPath $buildLog) { Get-Content -LiteralPath $buildLog -Tail 30 | Out-String })"

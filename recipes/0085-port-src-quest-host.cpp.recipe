@@ -1,0 +1,8 @@
+# port/src/quest/host.cpp from Chronicle's port/src/quest/host.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/host.cpp
+base port/src/quest/host.cpp
+from f36ae24118df31ff69ef5a26e1f8e831409a3adb
+to bc07fc6c5423936ccb3f4f32fccdc70b967286a3
+@@ -340,0 +341,2
++    // Jep (co-op, coop-pt1111e): a conversation carried to another copy binds the quests' choices again by their ids.
++    dialog::RegisterChoiceResolver([](const dialog::NpcContext &, dialog::ChoiceItem &item) { return ResolveChoice(item); });

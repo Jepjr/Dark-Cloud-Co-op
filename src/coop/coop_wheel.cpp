@@ -40,6 +40,7 @@ extern s32 gameTask;
 #include "coop/coop_prompt.hpp"
 #include "coop/coop_town.hpp"
 #include "coop/coop_worlds.hpp" // coop-wheelcrash
+#include "coop/coop_zonechara.hpp" // coop-pt1111k
 #include "coop/netplay.hpp"
 
 namespace coop {
@@ -130,21 +131,52 @@ bool PlayerPickable(int chara) {
            UserStatus->chara_weapons[chara][slot].item_no > 0;
 }
 
-void OpenPlayer() {
-    Wheel &w = g_wheels[0];
-    int    loaded = UserStatus->cur_chara;
+// coop-pt1111k: the members player 1's ring offers: his own at the top, the partner's (a trade, asked), and the joined ones he
+// may take; on a character-limited floor not one that would leave its member unplayed (ZonePickLegal, the offer's check:
+// the pick is checked again as it is taken, WheelConfirm).
+int PlayerMembers(int *out) {
+    int loaded = UserStatus->cur_chara;
+    int count = 0;
 
-    w.count = 0;
-    w.town = false;
-    w.members[w.count++] = loaded;
-
+    out[count++] = loaded;
     for (int k = 1; k < 6; k++) {
         int chara = (loaded + k) % 6;
 
         if (chara == g_partner.loaded_chara ? chara < UserStatus->party_size && !Mutated("wheelask") : PlayerPickable(chara)) {
-            w.members[w.count++] = chara;
+            if (chara != g_partner.loaded_chara && !ZonePickLegal(0, chara, false)) {
+                continue;
+            }
+            out[count++] = chara;
         }
     }
+    return count;
+}
+
+// coop-pt1111k: Jep 11-11, an open ring follows the others' members (its own screen): when what it may offer changes, its
+// entries change, the hand kept on the member it was on (else the top).
+void Refresh(Wheel &w, const int *members, int count, int player) {
+    if (count == w.count && std::equal(members, members + count, w.members)) {
+        return;
+    }
+    const int on = w.members[w.selected];
+
+    std::copy(members, members + count, w.members);
+    w.count = count;
+    w.selected = 0;
+    for (int i = 0; i < count; i++) {
+        if (members[i] == on) {
+            w.selected = i;
+        }
+    }
+    std::fprintf(stderr, "coop-wheel: player %d's ring now offers %d members (the others' members changed) at link tick %lld\n", player, count,
+                 (long long) NetplayLinkTick());
+}
+
+void OpenPlayer() {
+    Wheel &w = g_wheels[0];
+
+    w.town = false;
+    w.count = PlayerMembers(w.members);
 
     if (w.count < 2) {
         std::fprintf(stderr, "coop-wheel: player 1's wheel has nobody else to offer\n");
@@ -163,6 +195,26 @@ void OpenPlayer() {
                  (int) gameTask);
 }
 
+// Pad 2's ring's members: her own at the top, then in town the members pad 2 may play there (never Toan); in a dungeon the
+// player's member too (picking it asks the player to swap), and (coop-pt1111k) not one that would leave a character-limited
+// floor's member unplayed.
+int PadMembers(int loaded, bool town, int *out) {
+    int count = 0;
+
+    out[count++] = loaded;
+    for (int k = 1; k < 6; k++) {
+        int chara = (loaded + k) % 6;
+
+        if (town ? TownMemberPickable(chara) : Pickable(chara) || (chara == UserStatus->cur_chara && loaded < UserStatus->party_size && !Mutated("wheelask"))) {
+            if (!town && chara != UserStatus->cur_chara && !ZonePickLegal(1, chara, false)) {
+                continue;
+            }
+            out[count++] = chara;
+        }
+    }
+    return count;
+}
+
 void Open(int loaded, bool town) {
     std::printf("coop-wheel: opened\n");
     g_wheel.count = 0;
@@ -170,17 +222,7 @@ void Open(int loaded, bool town) {
     g_wheel.ticks = 0;
     g_wheel.opens++;
     std::copy(CharaMain.pos, CharaMain.pos + 3, g_wheel.other_at);
-    g_wheel.members[g_wheel.count++] = loaded;
-
-    for (int k = 1; k < 6; k++) {
-        int chara = (loaded + k) % 6;
-
-        // In town, the members pad 2 may play there (never Toan). In a dungeon the player's member is
-        // offered too: picking it asks the player to swap.
-        if (town ? TownMemberPickable(chara) : Pickable(chara) || (chara == UserStatus->cur_chara && loaded < UserStatus->party_size && !Mutated("wheelask"))) {
-            g_wheel.members[g_wheel.count++] = chara;
-        }
-    }
+    g_wheel.count = PadMembers(loaded, town, g_wheel.members);
 
     if (g_wheel.count < 2) {
         std::printf("coop: pad 2's wheel has nobody else to offer\n");
@@ -338,6 +380,13 @@ bool StepPlayerWheel(const InputPadState &pad) {
         return false;
     }
 
+    {
+        int members[6];
+        int count = PlayerMembers(members);
+
+        Refresh(w, members, count, 1);
+    }
+
     if (w.turn > 0) {
         w.turn--;
     }
@@ -355,13 +404,7 @@ bool StepPlayerWheel(const InputPadState &pad) {
         int chosen = w.members[w.selected];
 
         close("picked");
-        if (chosen == g_partner.loaded_chara) {
-            AskSwap(0, chosen);
-        } else if (chosen != UserStatus->cur_chara && PlayerPickable(chosen)) {
-            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
-            std::fprintf(stderr, "coop-wheel: player 1 picks %d on his wheel\n", chosen);
-            PromptChangePlayer(chosen);
-        }
+        WheelConfirm(0, chosen);
         return true;
     }
 
@@ -404,6 +447,13 @@ bool StepWheel(const InputPadState &pad) {
         return false;
     }
 
+    if (!g_wheel.town) { // coop-pt1111k: its entries follow the others' members
+        int members[6];
+        int count = PadMembers(g_partner.loaded_chara, false, members);
+
+        Refresh(g_wheel, members, count, 2);
+    }
+
     if (g_wheel.turn > 0) {
         g_wheel.turn--;
     }
@@ -420,15 +470,7 @@ bool StepWheel(const InputPadState &pad) {
     if ((pressed & kInputCross) != 0) {
         int chosen = g_wheel.members[g_wheel.selected];
 
-        // The player's member is asked for, not taken (the same-character rule, coop_prompt).
-        if (chosen == UserStatus->cur_chara && chosen != g_partner.loaded_chara) {
-            AskSwap(1, chosen);
-        } else if (chosen != g_partner.loaded_chara && Pickable(chosen)) {
-            g_partner.choice = chosen;
-            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
-            std::printf("coop: pad 2 picks %d on the wheel\n", chosen);
-        }
-
+        WheelConfirm(1, chosen);
         CloseWheel("picked");
         return true;
     }
@@ -563,6 +605,64 @@ void DrawRing(const Wheel &w, const float pos[3]) {
 }
 
 } // namespace
+
+// coop-pt1111k: a ring's Cross on chosen, as it is taken (every copy on one tick): the other's member is asked for (a trade);
+// another is the player's own pick, checked here against the floor's rule (ZonePickLegal), whatever the ring offered when
+// it was drawn. A pick that would leave a character-limited floor's member unplayed is refused on the picker's screen.
+void WheelConfirm(int index, int chosen) {
+    SoundOwner sound(index + 1);
+
+    if (index == 0) {
+        if (chosen == g_partner.loaded_chara) {
+            AskSwap(0, chosen);
+        } else if (chosen != UserStatus->cur_chara && PlayerPickable(chosen)) {
+            if (!ZonePickLegal(0, chosen)) {
+                ZonePickRefused(0, chosen, "radial");
+                return;
+            }
+            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
+            std::fprintf(stderr, "coop-wheel: player 1 picks %d on his wheel\n", chosen);
+            PromptChangePlayer(chosen);
+        }
+        return;
+    }
+    // The player's member is asked for, not taken (the same-character rule, coop_prompt).
+    if (chosen == UserStatus->cur_chara && chosen != g_partner.loaded_chara) {
+        AskSwap(1, chosen);
+    } else if (chosen != g_partner.loaded_chara && Pickable(chosen)) {
+        if (!ZonePickLegal(1, chosen)) {
+            ZonePickRefused(1, chosen, "radial");
+            return;
+        }
+        g_partner.choice = chosen;
+        SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
+        std::printf("coop: pad 2 picks %d on the wheel\n", chosen);
+    }
+}
+
+bool WheelOffersForTest(int index, int chara) {
+    int members[6];
+    int count = index == 0 ? PlayerMembers(members) : PadMembers(g_partner.loaded_chara, false, members);
+
+    return std::find(members + 1, members + count, chara) != members + count;
+}
+
+bool WheelOpenForTest(int index, int chara) {
+    Wheel &w = g_wheels[index == 0 ? 0 : 1];
+
+    if (index == 0) {
+        OpenPlayer();
+    } else {
+        Open(g_partner.loaded_chara, false);
+    }
+    for (int i = 1; i < w.count; i++) {
+        if (w.members[i] == chara) {
+            w.selected = i;
+            return w.open;
+        }
+    }
+    return false;
+}
 
 } // namespace coop
 

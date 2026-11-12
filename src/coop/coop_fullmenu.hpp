@@ -55,6 +55,8 @@ int FullMenuOwner();
 bool FullMenuOpenFor(int player);
 // coop-localmenu: whether this copy's menu engine runs that player's menu now (what the open and close commands report).
 bool FullMenuRunsFor(int player);
+// coop-pt1111n: inside her menu's view (UserStatus->cur_chara is her member) player 1's member, which the view kept; else -1.
+int FullMenuViewPlayerChara();
 // coop-localmenu stage 3a: the game menu on its player's copy alone (coop_fullmenu.cpp says how).
 // Whether this copy runs that player's menu as a local one.
 bool FullMenuRunsLocalFor(int player);
@@ -106,6 +108,8 @@ void FullMenuStepping(int player);
 // coop-localmenu 3c: a member picked in that player's local menu (the Characters page, MenuCharaChange) goes to every copy as a
 // command (kCmdPick) when this copy runs it; true when it went (the caller then changes nothing here).
 bool FullMenuLocalPick(int player, int wanted);
+// coop-pt1111k test hook: that pick taken on this tick, as its command is on every copy.
+void FullMenuApplyPickForTest(int player, int wanted);
 bool FullMenuQuitHere();
 // coop-quittitle (Jep's rule, 2026-11-10): the menu owner's Quit Game (Yes), on its copy, in a netplay session: the quit goes to
 // every copy as a command (kCmdQuit) and the title return comes on the tick it applies (netplay.cpp ApplyQuit,
@@ -185,8 +189,15 @@ void MenuCameraSwap(MenuCameraOwn &own);
 // them it holds (only the 16 the world reads, since their removal) and a hash of the others' bytes on this copy.
 void MenuWorkCensus(std::size_t *held, std::size_t *total, std::uint32_t *own_hash);
 void MenuWorkRegionsAll(void (*add)(void *at, std::size_t size, void *context), void *context);
-// (DC_COOP_MUTATE=merge_menu_retail, the retail lockstep menu through a merge: its twins need the menu state carried, as before)
+// (DC_COOP_MUTATE=merge_menu_retail or scriptmenu_merge_retail, a retail menu stepped in the lockstep through a merge: their twins
+// need the menu state carried, as before)
 bool MenuRetailLockstepMutated();
+// coop-pt1111m: the menus are retail's, in the lockstep (game.coop_menus off): their working globals are world state, in the set
+bool MenuWorkInSet();
+bool          MenuWorkKeptMutated(); // (DC_COOP_MUTATE=menusoff_menu_out, the twin: a link's apply keeps this copy's own)
+void          MenuWorkSave(std::vector<unsigned char> &out);
+void          MenuWorkRestore(const std::vector<unsigned char> &in);
+std::uint32_t MenuWorkHash();
 
 } // namespace coop
 

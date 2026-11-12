@@ -117,9 +117,10 @@ bool ReadGlobals(std::vector<Region> &out) {
         }
         // coop-offthread: DC_SNAPSHOT_MUTATE=menu_in_set (twin, x-town-stayermenu~menuset): the battle menu's working globals that
         // snapshot-allow.txt took out (the swap list's, coop_fullmenu.cpp) put back in, as before.
-        // (and DC_COOP_MUTATE=merge_menu_retail: retail's menu stepped in the lockstep through the merge, which the taker can only
+        // (and DC_COOP_MUTATE=merge_menu_retail or scriptmenu_merge_retail: retail's menu stepped in the lockstep through the merge, which the taker can only
         // step with the sender's menu state, as before: its twins' rows fail on their checks, not on a stale pointer)
-        if (Mutated("menu_in_set") || coop::MenuRetailLockstepMutated()) {
+        // (and coop-pt1111m: the menus in the lockstep, game.coop_menus off: every copy steps them alike, so the taker needs them: MenuWorkInSet)
+        if (Mutated("menu_in_set") || coop::MenuRetailLockstepMutated() || coop::MenuWorkInSet()) {
             struct Add {
                 std::vector<Region> *list;
             } add{&fresh};

@@ -1,0 +1,2163 @@
+# port/src/game/ebattle.cpp from Chronicle's port/src/game/ebattle.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/ebattle.cpp
+base port/src/game/ebattle.cpp
+from 62cd592460400ebbe5360023cae0d61b19da29b9
+to b6df517b91a2c6a9460479cfad136a78305a6fd2
+@@ -45,0 +46,4
++int CoopTownPartnerWall(float *pos, const float *velocity, dc::game::CCPoly *out); // coop-nopush (port/src/coop/coop_town.cpp)
++void CoopTownToanWalkIntoForTest(const float *pos, float angle, float *lx, float *ly); // coop-nopush test hook (coop_town.cpp)
++bool CoopTownHisTalkWaits(); // coop-talks2: twin talks_one, his talk waits for hers (coop_town.cpp)
++
+@@ -50,0 +55,7
++// coop-soakfix5 (the soak's leave seeds 1031 and 1247: OUT OF SYNC at tick 60, view apart from link tick 40): EdMoveChara's
++// swing of the camera round behind Toan (rot_count, retail's function static: 30 frames of 0.1 a frame from his button 0x20)
++// outlived a resync. The rejoin's link runs ticks 1-33 on two copies that are not alike before its resync, and on hers his
++// pad pressed it; her copy then went on swinging the reloaded town's camera at tick 40, his did not. At file scope so the
++// resync zeroes it on every copy (netplay.cpp TakeState); DC_NETPLAY_MUTATE=keep_town_swing (twin) leaves each copy's.
++int EdMoveCharaRotCount = 0;
++
+@@ -1382,12 +1393,9
+- b2d4daa80725fde0
+- 8547bc4c93f81638
+- e3b0c44298fc1c14
+- 7d12d71e3f3d173a
+- 016cb67fc0d9fe66
+- df70354ca7598bda
+- 5c0f2916230f4fce
+- 4e86273e05e807a3
+- 3a5036ace16789ca
+- f9a04aef799aa254
+- 79736c1d6d115ca3
+- 2abe684fbe4e22dc
++// coop-housecam (Jep, 2026-11-04: "I would prefer P2+ to operate as closely as possible to P1 does in the decompile"):
++// EdMoveChara's camera walls as a routine of their own, so player 2's town camera (coop_town.cpp TownCamStep) runs the same
++// code on her camera. EdMoveChara calls it as before (turn_at_once 1); the clears and keep_distance come back in info.
++struct EdCameraWallInfo {
++    int left_clear;
++    int right_clear;
++    int keep_distance;
++    int turned;
++};
+@@ -1395,2 +1403,62
+- 3a639845611a6e24
+- db418c7c4daa34b2
++void EdCameraWalls(CCameraFollow *camera, CEditGround *ground, int shallow, int fishing, int turn_at_once, EdCameraWallInfo *info) {
++    float         left_distance;
++    float         right_distance;
++    float         span;
++    int           wall_count;
++    int           hits;
++    int           wall_hit;
++    CCPoly       *walls;
++    int           last;
++    float         away;
++    int           floor_poly;
++    float        *normal;
++    int           i;
++    int           left_clear = 1;
++    int           right_clear = 1;
++    int           keep_distance = 1;
++
++    info->turned = 0;
++
+~1653 31528d78ce714221|    |
+~1629 6fc72a8cfc06dc08|    |
+~1655 ae78e7ed7f58a48f|    |
+~1656 6efb7bdd918898b4|    |
+~1657 6e99b02665879339|    |
+~1658 84256a4d7be2f233|    |
+~1659 f5ff23dd4a87915a|    |
+~1660 31d417662d4011c4|    |
+~1661 c47258a55c79c3aa|    |
+~1662 c4345da564b05d8a|    |
+~1663 43b9f08b52cb4008|    |
+~1664 f1bf8486a99cd006|    |
+~1665 79c8ceec5d7b8fdf|    |
+~1666 9b7a7d579e9693a6|    |
+~1667 fd49e321ad0e6e94|    |
+~1668 7be50051f6872a98|    |
+~1669 4069dd4e90a46ab2|    |
+~1670 b47ab43174d07424|    |
+~1671 df9facbe43fe23fa|    |
+~1672 60aaebed17a5251e|    |
+~1673 78bdafcf0502aa75|    |
+~1674 00e868773c1f8e36|    |
+~1675 7ba6ab85d68bb0f3|    |
+~1676 ed7038c105667785|    |
++
++    right_distance = left_distance = 1000000;
+~1631 770ac3d5eb76332c|    |
+~1681 b93b0c582d40a16a|    |
+~1682 26c941f28d317afb|    |
+~1683 0d7a0376cfe5462a|    |
+~1684 c576b41757145ad1|    |
+=1516 c022d7223736cc95
++    walls = reinterpret_cast<CCPoly *>(WorkBuffer->Alloc(0x7D0));
++    span = DistVector(behind, look);
+~1688 b6fbef973ded571f|    |
+~1689 aeb427e24b084737|    |
+~1690 bcc64084f331e4b9|    |
+~1691 88588cb681d4bfa5|    |
+~1692 d4925cbf625babf0|    |
+~1693 fe68e4d79cc46fe8|    |
++
++    if (fishing != 0) {
+~1698 9539ab085f7318bd|        |
+@@ -1398,1 +1466,1
+- 23f12f29426686e0
+~1700 5e37e90164f51d05|        |
+@@ -1401,10 +1469,10
+- 0b6f5aa5e99beb30
+- 42c93cdb0b91b8c9
+- 4619fb9a22e89b24
+- 266f6ce0c053974f
+- 52d0af48db8b08c9
+- 634c14afe84d8ffa
+- e3b0c44298fc1c14
+- 08588d9cb4f5e21f
+- 83d4683fcd7214a1
+- f9317234ac14a980
+~1703 2805522fb7d193fc|    |
+~1704 7baed197c3553dc3|    |
+~1705 13a764f87afd7ad9|        |
+~1706 3d5db14e49b7370d|        |
+~1707 701f17aa395712ea|        |
+~1708 65a777f9a0dd44ad|        |
+~1709 e370bf46b9f4923a|        |
+~1710 f940cdb7533cb7cf|        |
+~1711 48db267220f49f3e|        |
+~1712 22be4dc8ad626dc7|        |
+@@ -1412,3 +1480,3
+- eece11b8eb4eb82b
+- cc7e8229d47e1dbf
+- 28d86778615f6af4
+~1714 a5cb8331f5c3eed7|        |
+~1715 2e3303e0bd27485b|            |
++        }
+@@ -1416,7 +1484,2
+- 9cb03f19cdd05d74
+- 5b056d1b003fbb4b
+- 59355f2cdbe4d2ad
+- d48c34b650754670
+- 77885ad5ce27a0ac
+- 0249b0cddf5c1f88
+- 34743f0f1fcc356c
+~1718 368fb36d4639b0af|        |
+~1719 1f9114db51a1f0ec|            |
+@@ -1426,2 +1489,9
+- c5e9ef5e9d8d4d94
+- d12ed6663f4139fb
++    hits = CheckHits(walls, wall_count, look, behind, 32, hit_poly, hit_point, 1, 0);
+~1724 e1db0bc8f3877c3b|    |
+~1725 1fa9c37569792042|    |
+~1726 3e9320ef1344d744|    |
+~1727 9b2ebb01841fa75e|    |
+~1728 1f20bc91c24aa1f4|    |
+~1729 5729788baf744d90|    |
+~1730 4ca87fb5e8a3ac50|    |
++    wall_hit = CheckHit(walls, wall_count, origin, left_end, hit, 1, 0);
+@@ -1429,3 +1499,3
+- fa60985dfb9aa282
+- 98c1f211ab1348f8
+- d9cf648b1ce6b6d2
+~1733 0950590f3a9a3d5d|    |
++        normal = walls[wall_hit].normal;
+~1735 da8c932a03373491|        |
+@@ -1433,6 +1503,4
+- 6370ddbbb9b11851
+- fa6917b299cd2f4e
+- 7936f3a9b66b6ddc
+- 77885ad5ce27a0ac
+- eb46053a4b6a9975
+- a96c52de1d1fb2ac
+~1737 4893bbf6e6f7350a|        |
+~1738 59ae772a69bb71a0|            |
+~1739 07848158fd014341|        |
+~1715 2e3303e0bd27485b|            |
+@@ -1439,0 +1508,1
++    }
+@@ -1441,7 +1510,16
+- a713794639b81cc7
+- f7b78687c5b21a71
+- b7a84fcf220678e9
+- b622dc34829ecd82
+- 3226ae9e10846701
+- 7826f252fa829361
+- 975badc9e2332c84
+~1744 ba2e7c9942e47e68|    |
+~1745 c38eb0f70eb631a5|    |
+~1746 8a53632aeb3d91aa|    |
+~1747 0026b73eab63e152|    |
+~1748 51d018fbd0e6f8e2|    |
+~1749 516921a6841b36d2|    |
+~1750 6968e7e0ef8ca524|    |
++
+~1733 0950590f3a9a3d5d|    |
++        normal = walls[wall_hit].normal;
+~1735 da8c932a03373491|        |
++
+~1756 8b2e7b38faa459aa|        |
+~1757 58fc4f978d95bb2b|            |
+~1739 07848158fd014341|        |
+~1719 1f9114db51a1f0ec|            |
+@@ -1448,0 +1527,1
++    }
+@@ -1450,2 +1529,3
+- 3c2afafaebb8209e
+- 2cce97a177eeb349
+~1763 2e4dce83860c74ed|    |
+~1764 d062c224e41ecfce|        |
++        last = -1;
+@@ -1453,5 +1533,2
+- c1afea8252d87146
+- d27acec99fb0fd34
+- 084e1512c6c04485
+- b1a7c77feab3bd5b
+- 06dd8b0382a946b8
++        for (i = 0; i < hits; i++) {
+~1768 d66bfc71e3a3775c|            |
+@@ -1459,1 +1536,2
+- 7830713473f7c000
+~1770 4e2de00e5f782984|            |
++                break;
+@@ -1461,3 +1538,0
+- 77885ad5ce27a0ac
+- d149dd3d09ceae6e
+- 2a44168318e224e1
+@@ -1465,6 +1540,1
+- 28677b4ec942c5eb
+- c6aa1724666d01c6
+- 2a44168318e224e1
+- e6bc250a9932edad
+- fd10e2041ec0f9cc
+- d3c192daec0c0f11
++            last = i;
+@@ -1473,7 +1543,3
+- f199e93145d364bf
+- f32d794942e860e0
+- cc46245308289e33
+- e3b0c44298fc1c14
+- cefe37370da2d6b9
+- f493cc82fb0b64c8
+- 2a44168318e224e1
+~1777 e19e0cd40bf00f8f|        |
+~1778 c4ddef0655b688f0|            |
+~1779 c3df885c9d8397a9|            |
+@@ -1481,3 +1547,3
+- 9f4fa4f2c59b3707
+- 716bc445d18432e4
+- 2a44168318e224e1
+~1781 bd8100739c4edba6|            |
+~1782 92c6e4f22aab7941|                |
++                    away = DistVector(eye_pos, hit_point[last + 1]);
+@@ -1485,7 +1551,12
+- 22bb982920c0ca40
+- 86e595030853a17d
+- 4da6fe8abb40366a
+- d7345f27b19f164c
+- d4281d5f20f89827
+- a1d3fb65f983c784
+- 107fc25503346ec3
+~1785 132a9dbba9f4576b|                    |
+~1786 0bd279ec4f174f0e|                        |
++                    } else {
+=1791 f0f862b69541e3a0
++                    }
++                } else {
+~1788 0f67656b38686ef4|                    |
+~1792 f41c0f68664fb50c|                    |
++                }
++            }
++        } else {
+~1796 a9a59ac933690748|            |
+@@ -1493,6 +1564,4
+- f7b78687c5b21a71
+- b7a84fcf220678e9
+- b622dc34829ecd82
+- 3226ae9e10846701
+- 7826f252fa829361
+- 975badc9e2332c84
+~1798 2dc7a49290e89b0a|            |
+~1799 3e78ed368df0fae0|                |
+=1778 c4ddef0655b688f0
++            }
+@@ -1502,4 +1571,4
+- 1440f58ae3d2dbe3
+- e0928a78e9cdf9be
+- d12a6effd6dd1974
+- 28d86778615f6af4
+~1805 a469f92e2e48f223|    |
+~1806 905ac66842e6575d|    |
+~1807 ae979b0805b8cfee|    |
++    floor_poly = CheckHitVertical(walls, wall_count, behind, -100.0f, hit, 0);
+@@ -1507,5 +1576,7
+- fbeebe013ebda08b
+- 7354d1a348260421
+- 0832be6651442747
+- 9fd3b20aceb508fb
+- 1a7612e3b08fa9b7
+~1810 5b3b4443aff2834c|    |
+~1811 270bc0ca11c37926|        |
++
+~1813 fc4a9973b332ab60|        |
+~1814 8c982cc1babd1e43|            |
+~1815 5d492503520c44b8|            |
++        }
+@@ -1514,5 +1585,1
+- 67b19da074d42061
+- 2f7ab80844472790
+- c022d7223736cc95
+- 7b3f18fb26d43810
+- 02844e1908c990a3
+~1819 1dc53c3c1b1a8f95|    |
+@@ -1520,10 +1587,4
+- 228789b9b949f169
+- 7ca869bd226a9cf9
+- d625d7ab43bcf189
+- d1290bb11e497a12
+- 1014b6171a077c98
+- 9521dc7bd20a4817
+- 502693b7eab8581e
+- df7870ce313b8597
+- 838bc4378e1aed88
+- 279f458b9f6352c3
+~1821 9aad19ace2153dcd|    |
+=1285 bd165ec3574bac40
+~1823 56f2dc14cefd8514|        |
++        info->turned = 1;
+@@ -1531,2 +1592,4
+- 5829d48c3b97c4dd
+- 4548e363674f2e2a
++        // (coop-housecam: player 2's camera swings the half turn round itself, turn_at_once 0)
++        if (turn_at_once != 0) {
+=1824 0874bd264f2b9913
+=1825 d70d6cd1458c3ab5
+@@ -1534,2 +1597,2
+- 1b9a9af5ae119bb8
+- 613c6733946f96b4
+=1827 fdbddaa0dbe6dd13
+=1828 b12841c59fda5dc4
+@@ -1536,0 +1600,2
++
+=1831 db3aa4ea80d0e24b
+@@ -1540,1 +1605,23
+- 94417334372e1555
++    info->left_clear = left_clear;
++    info->right_clear = right_clear;
++    info->keep_distance = keep_distance;
++}
++
++// coop-eventslots (Jep's 11-11 item 1: each player fishes on their own): EdMoveChara's fishing, split out as retail runs it for
++// the walk's player, so another player's fishing runs the same code on their own body and camera (port/src/coop/coop_eventslots.cpp,
++// p2-like-p1). Its function statics are file statics now (EdFishingStateRanges lists them with chara_fishing and fishing_mes).
++struct EdFishingWeights { // (port/src/coop/coop_eventslots.cpp declares it alike)
++    float float_weight;
++    float hook_weight;
++};
++
++namespace {
++int fishing_bgm_vol = 0;
++int fishing_st_cnt = 0;
++int fishing_wait_cnt = 0;
++} // namespace
++
++void EdFishingStepIn(CCharacter *chara, CCameraFollow *camera, float *pos, EdFishingWeights *out) {
++    float float_weight = -1.0f;
++    float hook_weight = -1.0f;
++    int   follow_line = 0;
+@@ -1543,2 +1630,1
+- 54c263af43b2ee92
+- 28d86778615f6af4
+=2081 a2af57655bc976a6
+@@ -1546,3 +1632,2
+- 3253a6f237be6bd7
+- 7d5800d82d603582
+- 7795ea0437c9cb6e
+=2083 c7e002df830171d5
+=2084 58e3442606652fe9
+@@ -1550,1 +1634,0
+- 28d86778615f6af4
+@@ -1552,3 +1636,8
+- 62fecea2bf5806e2
+- 5182a2b3eddf85f7
+- 28d86778615f6af4
+=2087 44c86e741fcc29b5
+=1674 00e868773c1f8e36
+=2089 7d8d9d4b1c406e48
+=2090 634dfefa76703d7e
+=2091 353c4660b6843dbb
+=2092 91ecfc89b96c5eca
+=2093 9e28287d71e757ca
+=2094 c2c140275af3d8a3
+@@ -1556,4 +1645,12
+- f8888edc5fc17b4a
+- 401a39c70f77729c
+- 7ed65e9d7cf162d4
+- 16252fa24ca300f0
+=2098 4a12eebc81aa9a7e
+=2099 a74a2a1af06be428
+=2100 804d5ffd7e916443
+=2101 48dd3338e698a5f6
+=2102 ef8621731d5cda41
++                fishing_wait_cnt = 0;
++                fishing_st_cnt = 0;
++                break;
+=2106 2859e544cb19ac9b
++                if (fishing_st_cnt > 120) {
+=2108 7d5e4bf224dce52f
++                }
+@@ -1561,4 +1658,1
+- 1fad5faabe2adfe5
+- b7053788b2d3f400
+- 3301da3db2a10dc2
+- 28d86778615f6af4
+=2102 ef8621731d5cda41
+@@ -1566,12 +1660,4
+- 0014cd5693b1e6da
+- 0759d45ad80fd77c
+- 9e25973ecdda5a57
+- 65ab9f0409251895
+- 45baa56bc2cc71a9
+- 4a13b5e3d146d37b
+- 9e349d261153be4a
+- a3e66fcb678c553a
+- 41748146b68c0e37
+- 6577f43219919b9a
+- c0824e459642c74c
+- 6f6a42046a01987f
+=2113 9f0d05333903069f
+=2114 629641794793f736
++                    fishing_st_cnt = 0;
++                }
+@@ -1579,3 +1665,6
+- dc169da1e054cc4a
+- 5f3320139f1beee7
+- 28d86778615f6af4
+=2118 0c145e09ea75b85e
+=2119 42a31b520b35fff8
+=2120 86480f69341b5b80
+=2121 984e63f0aec76b72
+=2122 83dafa2125632901
++                }
+@@ -1583,4 +1672,6
+- bed1cecfcd6e7913
+- d7232fdd24c2e053
+- 209f9e273875afd8
+- 28d86778615f6af4
+=2125 f07bebce32506907
+=2126 067e3eed961e208e
+=2120 86480f69341b5b80
+=2121 984e63f0aec76b72
+=2122 83dafa2125632901
++                }
+@@ -1588,2 +1679,9
+- 2ac043aef62aa1cd
+- a5ccd67e5894849e
+=2132 299a0188f828a188
++                break;
+=2134 466908938fd4d4b5
+=2135 17f9a98cbf08435c
+=2136 09ba207d69d82307
++                fishing_st_cnt = 0;
++                break;
+=2139 254c1fee36c57901
+=2140 b801ca6179bdec8c
+@@ -1591,1 +1689,3
+- 750e2b1ac6aafe3e
++                if (fishing_st_cnt == 90) {
+=2143 431282b871b18ac2
++                }
+@@ -1593,1 +1693,6
+- 8d7a1009504ebfe3
+=2146 fd79167d7854edb7
+=2147 267691887c9ff3bd
+=2148 0f013de9d093e6fe
++                    fishing_st_cnt = 0;
++                    fishing_wait_cnt = 0;
++                }
+@@ -1595,3 +1700,4
+- 0bd9a64447c4de49
+- 4b5811b64e1033d4
+- 28d86778615f6af4
++                break;
+=2154 f05180e481b4ac8e
+=2155 2cdd2fba64babc5e
+=2140 b801ca6179bdec8c
+@@ -1599,42 +1705,8
+- 966331e5888f3d4e
+- 10b53ea6bfd500d0
+- b393e2a730b451f5
+- 8ba0d28cfc86c26d
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- e50eac8ab955f0f4
+- ecaa8033b975cd1c
+- d625d7ab43bcf189
+- 0aa9cbfaf3a694a7
+- e3b0c44298fc1c14
+- cfff74d50fee67bc
+- dc433b7b0670909c
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 2746abb3e063c2a9
+- d9110247c4166a84
+- 53a27be6d141cafe
+- fbf79b60511cc539
+- 7227b6a43255a12a
+- 5d3bb2013bf078a2
+- 5a3dcefa25345215
+- fbd2f002193d9a3a
+- d625d7ab43bcf189
+- f9d3420a397c202b
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- f885f3b15d437f90
+- 42b7847f8dc47a88
+- 6fc72a8cfc06dc08
+- 5c5d36f1d8d3df6a
+- 770ac3d5eb76332c
+- 54739b0e823e169f
+- 2f6b2137c44f6d76
+- 734ef642c70e3925
+- 5457d16119aab8a6
+- 66841dcebe125a62
+- 77885ad5ce27a0ac
+- 5457d16119aab8a6
+- 2a44168318e224e1
+- 28d86778615f6af4
++                if (fishing_wait_cnt < 600) {
+=2147 267691887c9ff3bd
++                } else if (fishing_wait_cnt < 1200) {
+=2161 9e6d6bc6f06a9257
++                } else {
++                    if (fishing_wait_cnt == 1200) {
+=2164 db5a99779fb76078
++                    }
+@@ -1642,1 +1714,5
+- 3364057ba1e91c0f
++                    if (fishing_wait_cnt > 1250 && chara->motion_state == 3) {
+=2168 ddc127205cf42376
++                        fishing_wait_cnt = 0;
++                    }
++                }
+@@ -1644,3 +1720,3
+- 3bda3c687fcc0e69
+- 75d7526158992281
+- 28d86778615f6af4
+=2173 c7ac72715561a3cd
+=2174 16276d7565fd82fb
+=2175 8f1e5c8b0479f9e3
+@@ -1648,3 +1724,4
+- 15a49730ee512a3b
+- e09bbfcd7eabb28c
+- b18c60b36535a7cf
+=2177 1922f4d4265538ac
++                    fishing_wait_cnt = 0;
+=2179 349cc3991df4dca5
++                }
+@@ -1652,65 +1729,8
+- 86b325be4634398e
+- 31528d78ce714221
+- ff9d8759fb24ca2b
+- ae78e7ed7f58a48f
+- 6efb7bdd918898b4
+- 6e99b02665879339
+- 84256a4d7be2f233
+- f5ff23dd4a87915a
+- 31d417662d4011c4
+- c47258a55c79c3aa
+- c4345da564b05d8a
+- 43b9f08b52cb4008
+- f1bf8486a99cd006
+- 79c8ceec5d7b8fdf
+- 9b7a7d579e9693a6
+- fd49e321ad0e6e94
+- 7be50051f6872a98
+- 4069dd4e90a46ab2
+- b47ab43174d07424
+- df9facbe43fe23fa
+- 60aaebed17a5251e
+- 78bdafcf0502aa75
+- 00e868773c1f8e36
+- 7ba6ab85d68bb0f3
+- ed7038c105667785
+- e3b0c44298fc1c14
+- 92aeff8631cb602b
+- fdcbd5bd85539999
+- 3dbb589680e42f6c
+- b93b0c582d40a16a
+- 26c941f28d317afb
+- 0d7a0376cfe5462a
+- c576b41757145ad1
+- f05aa5e86c7b71da
+- 22777195afa20116
+- 7235c72d336e6d70
+- b6fbef973ded571f
+- aeb427e24b084737
+- bcc64084f331e4b9
+- 88588cb681d4bfa5
+- d4925cbf625babf0
+- fe68e4d79cc46fe8
+- e3b0c44298fc1c14
+- b441fd0230cd42c8
+- e3b0c44298fc1c14
+- 1d57f7bf9169b864
+- 9539ab085f7318bd
+- 77885ad5ce27a0ac
+- 5e37e90164f51d05
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 2805522fb7d193fc
+- 7baed197c3553dc3
+- 13a764f87afd7ad9
+- 3d5db14e49b7370d
+- 701f17aa395712ea
+- 65a777f9a0dd44ad
+- e370bf46b9f4923a
+- f940cdb7533cb7cf
+- 48db267220f49f3e
+- 22be4dc8ad626dc7
+- e3b0c44298fc1c14
+- a5cb8331f5c3eed7
+- 2e3303e0bd27485b
+- 86afdf70a95436e8
++                if (EdPadDown(0x40, 0xFFFF) != 0 || (fishing_st_cnt > 30 && FishingCheckUkiHook() != 0)) {
+=2183 a97ca253c9d01ec0
+=2184 404577d691a03c0d
++                    fishing_st_cnt = 0;
++                } else {
+=2187 d16203b52fd87dfb
+=2188 ee38dc8825f65e14
++                    }
+@@ -1718,4 +1738,4
+- 368fb36d4639b0af
+- 1f9114db51a1f0ec
+- 86afdf70a95436e8
+- 2a44168318e224e1
+=2191 cd0416ff17ea3b52
+=2192 cccb3788ff5dfb60
++                    }
++                }
+@@ -1723,18 +1743,3
+- 046ba108e8fff0a1
+- e1db0bc8f3877c3b
+- 1fa9c37569792042
+- 3e9320ef1344d744
+- 9b2ebb01841fa75e
+- 1f20bc91c24aa1f4
+- 5729788baf744d90
+- 4ca87fb5e8a3ac50
+- c51f9b33fe699638
+- e3b0c44298fc1c14
+- 0950590f3a9a3d5d
+- 9d32fa1d4dd002b8
+- da8c932a03373491
+- e3b0c44298fc1c14
+- 4893bbf6e6f7350a
+- 59ae772a69bb71a0
+- 07848158fd014341
+- 2e3303e0bd27485b
++                fishing_wait_cnt++;
+=2197 5c85c8ba4920e1ac
++                break;
+@@ -1742,1 +1747,4
+- 2a44168318e224e1
+=2200 0454ef18e6c80e68
++                if (fishing_st_cnt == 40) {
+=2202 40368e0b04d43cb5
+=2203 c9bce2fd27cbcd4b
+@@ -1744,7 +1752,4
+- ba2e7c9942e47e68
+- c38eb0f70eb631a5
+- 8a53632aeb3d91aa
+- 0026b73eab63e152
+- 51d018fbd0e6f8e2
+- 516921a6841b36d2
+- 6968e7e0ef8ca524
+=2205 80d4549d98830b1d
+=2206 9ca036e7c38bd339
++                    }
++                }
+@@ -1752,3 +1757,5
+- 0950590f3a9a3d5d
+- 9d32fa1d4dd002b8
+- da8c932a03373491
+=2146 fd79167d7854edb7
+=2122 83dafa2125632901
+=2212 5f09bb0fab59a885
++                    fishing_wait_cnt = 0;
++                }
+@@ -1756,6 +1763,3
+- 8b2e7b38faa459aa
+- 58fc4f978d95bb2b
+- 07848158fd014341
+- 1f9114db51a1f0ec
+- 86afdf70a95436e8
+- 2a44168318e224e1
++                if (fishing_st_cnt > 30) {
++                    float_weight = 0.02f * static_cast<float>(fishing_st_cnt - 30);
++                }
+@@ -1763,3 +1767,1
+- 2e4dce83860c74ed
+- d062c224e41ecfce
+- 030b4a2751fd97f8
+=2220 4eb21ade4442a180
+@@ -1767,2 +1769,3
+- ac5e40749d331dc6
+- d66bfc71e3a3775c
++                break;
+=2223 10292cfe8f88adb1
+=2155 2cdd2fba64babc5e
+@@ -1770,2 +1773,6
+- 4e2de00e5f782984
+- b9d8d04521689979
+=2226 289ab430677b6fd4
+=2227 dcd6a8fe8175eaf3
+=2228 90d873ae4fd44be2
+=2148 0f013de9d093e6fe
++                    fishing_st_cnt = 0;
++                    fishing_wait_cnt = 0;
+@@ -1774,10 +1781,5
+- 573ee02e66f64f97
+- 86afdf70a95436e8
+- e3b0c44298fc1c14
+- e19e0cd40bf00f8f
+- c4ddef0655b688f0
+- c3df885c9d8397a9
+- e3b0c44298fc1c14
+- bd8100739c4edba6
+- 92c6e4f22aab7941
+- c569ee03d85e15e1
+=2113 9f0d05333903069f
+=2235 3ae3b653b27359de
+=2236 0255d8b549a9170f
++                    fishing_st_cnt = 0;
+=2238 f445b53c65c0c440
+@@ -1785,8 +1787,3
+- 132a9dbba9f4576b
+- 0bd279ec4f174f0e
+- add317e244bafa97
+- 0f67656b38686ef4
+- aab81fdfa3632011
+- 1f219309856310f1
+- f0f862b69541e3a0
+- f41c0f68664fb50c
+=2240 5a79692167616fea
+=2241 863e731557f71753
+=2242 c5dc5e32451cb18e
+@@ -1795,9 +1791,0
+- 084e1512c6c04485
+- a9a59ac933690748
+- e3b0c44298fc1c14
+- 2dc7a49290e89b0a
+- 3e78ed368df0fae0
+- 90ca8fe02a5c77b4
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+- 2a44168318e224e1
+@@ -1805,4 +1793,1
+- a469f92e2e48f223
+- 905ac66842e6575d
+- ae979b0805b8cfee
+- 088a426974a99295
+=2246 a31ef30e46eb5bfb
+@@ -1810,2 +1795,7
+- 5b3b4443aff2834c
+- 270bc0ca11c37926
+=2248 6d4ab882aa0da866
+=2249 3467d854e8184658
+=2250 ba0a6e0489d83551
+=2251 7e911d322d4e2e4f
+=2252 c996bf619f8444af
+=2253 4586ed2b86194a6f
++                }
+@@ -1813,3 +1803,3
+- fc4a9973b332ab60
+- 8c982cc1babd1e43
+- 5d492503520c44b8
+=2256 d943a1db94a3b830
+=2197 5c85c8ba4920e1ac
++                break;
+@@ -1817,1 +1807,2
+- 2a44168318e224e1
+=2260 cab7ef41b030575d
+=2155 2cdd2fba64babc5e
+@@ -1819,1 +1810,3
+- 1dc53c3c1b1a8f95
+=2263 bf60f9a2a0adfa67
+=2148 0f013de9d093e6fe
++                    fishing_wait_cnt = 0;
+@@ -1821,5 +1814,4
+- 9aad19ace2153dcd
+- cd07d670f576e60c
+- 56f2dc14cefd8514
+- 0874bd264f2b9913
+- d70d6cd1458c3ab5
+=2267 cf0b2bb223b3c2ea
+=2241 863e731557f71753
+=2242 c5dc5e32451cb18e
++                    }
+@@ -1827,3 +1819,8
+- fdbddaa0dbe6dd13
+- b12841c59fda5dc4
+- 86afdf70a95436e8
++                    fishing_st_cnt = 0;
++                } else {
+=2274 f870199384fd9289
+=2275 cc80fab033429bc1
+=2276 a5ede4bd3920c14d
+=2277 27058f772aaf808f
+=2278 9ae2954c3c2b543d
+=2279 cc6c839578adff3f
+@@ -1831,3 +1828,4
+- db3aa4ea80d0e24b
+- 2a44168318e224e1
+- 28d86778615f6af4
+=2281 9e72e1a617bbfb90
++                            StartReadBG();
+=2283 0e728db2bfa5651f
++                        }
+@@ -1835,4 +1833,2
+- 2746abb3e063c2a9
+- 07c5053619552141
+- 498eb69eaeae3d5b
+- ab6a687f519e2a90
++                        fishing_st_cnt = 0;
++                    }
+@@ -1840,7 +1836,1
+- eab84a4ad53295d1
+- 6bd50094e7a81c51
+- 1ce10cbb7dd0c868
+- 86afdf70a95436e8
+- 77885ad5ce27a0ac
+- 7da8f5e7d3bc325a
+- 2a44168318e224e1
+=2289 4d041d801487d041
+@@ -1848,3 +1838,3
+- 999d48bf4414f0e2
+- b1137f67f973abfd
+- 2a44168318e224e1
+=2291 6b597ca135690b90
+=2292 433d72acf96f045b
++                    }
+@@ -1852,3 +1842,3
+- e7d9c1c94c15ee37
+- b1137f67f973abfd
+- 2a44168318e224e1
+=2295 3dfc23fcef0a20d5
+=2296 ef849edc4943b639
++                }
+@@ -1856,7 +1846,1
+- 1b05327da9519c3f
+- 057c9bdc4dee1b45
+- 2673225e0749c1c0
+- d36baf8cc7ded794
+- 7f2131c9ebebbc86
+- 084e1512c6c04485
+- 945478df0c7b401a
++                break;
+@@ -1864,5 +1848,2
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- a9a693de8c16f09f
+- 9cea7dece75acdf2
+- 2a44168318e224e1
+=2301 c64ce5d632496e6b
+=2302 c706425c2f2bbd91
+@@ -1870,3 +1851,4
+- c5a79cfc5009bc67
+- ce4c78f747893fc2
+- 2a44168318e224e1
++                if (fishing_st_cnt > 120 && ReadBGSync() == 0) {
+=2305 a49e92bdbb8ca769
+=2306 5a6da2572d30c45a
+=2307 3e2689155f02b57b
+@@ -1874,3 +1856,7
+- 37d54f2e19c2d1d7
+- 0863289e39252404
+- 395686bb0a055536
+=2309 7945fffb1c0c6d59
+=2310 602575db826f3663
+=2311 338487e6ce4c9383
+=2312 9cba39dc73464253
+=2313 ae368b0de584cf8f
+=2314 e5c3c893cf644e07
++                    }
+@@ -1878,3 +1864,4
+- 91f152c506663e3e
+- 6ea2824fc8bfdac2
+- deff4013e4362693
+=2317 ffd83f43091810d4
+=2236 0255d8b549a9170f
+=2319 3549cece3dcdccb8
+=2320 9a9b0e8005e0a490
+@@ -1883,2 +1870,18
+- bc01468bfa476685
+- 423019e79a249377
+=2323 def38f4d4c2104ba
+=2197 5c85c8ba4920e1ac
++                break;
+=2326 7537d58c743de3ed
+=2327 98c0a4cca30f7beb
+=2328 ea7b3f6817e871a0
+=2329 97bf3bd3428c1156
+=2197 5c85c8ba4920e1ac
++                fishing_bgm_vol = SndGetBgmVol();
+=2332 1a26c913b963a0cf
++                break;
+=2334 2eabfcac03fb89f9
+=2146 fd79167d7854edb7
+=2212 5f09bb0fab59a885
+=2122 83dafa2125632901
+=2338 b39242be109ad39b
+=2339 e46208b076a6da50
++                    fishing_wait_cnt = 0;
+@@ -1887,2 +1890,2
+- 0a09079aea6ba39c
+- deff4013e4362693
++                if (fishing_st_cnt > 40) {
++                    float_weight = 0.02f * static_cast<float>(fishing_st_cnt - 40);
+@@ -1891,4 +1894,1
+- 913ef0f3f623662d
+- 423019e79a249377
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+=2220 4eb21ade4442a180
+@@ -1896,1 +1896,6
+- 3ef5cf85fccb37a9
++                break;
+=2350 388a6fe92d01ec6b
+=2351 028de1680626657b
+=2352 12561038b990693d
+=2353 87bb8901803d272d
+=2354 cf29233c8e32615d
+@@ -1898,2 +1903,11
+- b6e0151bd96e2c16
+- d067eb8e7dfabfde
+=2356 a724694c0c5bfd14
+=2357 b966c9db4885d5ef
+=2358 c738440d1da6494a
+=2359 593d83dd0bc09e77
++                    }
++                } else {
+=2362 fa67b08f682e0fb3
+=2363 5de33dcc8c0f432b
++                            int size;
+=2365 fe26bd81eb55e749
+=2366 eadaa072a12734a4
+@@ -1901,1 +1915,8
+- 64a2ffcc3157f916
+=2368 e84c19155088f3e9
+=2369 0a0e76ee3fe22a6a
++                            } else {
+=2371 7db53d2369216ca3
+=2372 2f428e918fb1605e
++                                    (*caught)++;
+=2374 15bd1e2fca3111cc
++                                }
+@@ -1903,2 +1924,14
+- e054a1f25cb70a27
+- 86afdf70a95436e8
+=2377 9d128b2fe1899045
+=2378 9914f5d5e2c30a8d
++                                fishing_mes++;
+=2380 15fcc71c909c5887
+=2381 eed956e266cefceb
+=2382 a9164e009f53e62e
+=2383 aae41b2155a59c20
+=2384 9e67a8cf3e6c4c96
+=2385 d5f9f7e90d6bff61
+=2386 5e26260453776acb
+=2385 d5f9f7e90d6bff61
++                                int window[4];
+=2389 fcd683f9ac4b7e7e
++                            }
+@@ -1906,2 +1939,7
+- f0ce87ab8301ebba
+- ef23c3d4f672cb85
++                            break;
++                        }
+=2394 766db794b0f26c65
+=2395 0c68fab6855bff43
+=2385 d5f9f7e90d6bff61
++                                fishing_mes++;
++                            }
+@@ -1909,1 +1947,12
+- 1184781405f976e5
++                            break;
+=2401 8a0c38f3b29d7ac8
++                            SndBgmFadeIn(60, fishing_bgm_vol, 0);
+=2403 aeb473f77c6e0315
+=2404 fb65dc80d19d5a19
+=2405 56e2743fa709fc02
++                            fishing_st_cnt = 0;
++                            break;
++                        default:
++                            break;
++                    }
++                }
+@@ -1911,2 +1960,25
+- e054a1f25cb70a27
+- 86afdf70a95436e8
+=2413 dfbf2ee0e61c6224
++                break;
+=2415 bf8b4ddb4a31c449
+=2351 028de1680626657b
+=2352 12561038b990693d
+=2418 76ce95f78c01d7aa
+=2354 cf29233c8e32615d
++
++                if (fishing_st_cnt == 120) {
+=2422 b385d123ff86c44a
+=2423 30d211e775ab58a7
++                }
++
+=2146 fd79167d7854edb7
+=2122 83dafa2125632901
+=2428 dd4ff6863a648ac4
+=2422 b385d123ff86c44a
+=2430 7aea8cca2947f5d8
+=2339 e46208b076a6da50
++                }
++
+=2434 a4aed1e37525ad5c
++                break;
++            default:
++                break;
+@@ -1915,2 +1987,7
+- e4840a2bfb231e74
+- cd07d670f576e60c
+=2440 01e0e4fee68193b2
+=2441 1c76fe56ab96509c
+=2442 32384a09aad54a80
+=2443 cd771a1b35033e2b
+=2444 d8566a7c91422662
+=2445 ed171a1ee22a4f33
+=2446 647271644ee6a52d
+@@ -1919,4 +1996,4
+- eab84a4ad53295d1
+- cb2d60a0fe245a04
+- 223458ecabb8883e
+- 86afdf70a95436e8
++        fishing_st_cnt++;
++    } else {
+=2451 b7ec5de3199ce4fd
++    }
+@@ -1924,1 +2001,3
+- b538f3160a4d159a
++    out->float_weight = float_weight;
++    out->hook_weight = hook_weight;
++}
+@@ -1926,3 +2005,3
+- 25d8804d1fcd9175
+- 2bcc43b2b601d197
+- 86afdf70a95436e8
++void EdFishingLineStep(CCharacter *chara, const EdFishingWeights &weights) {
++    const float float_weight = weights.float_weight;
++    const float hook_weight = weights.hook_weight;
+@@ -1930,2 +2009,12
+- d2fbce5f8d92b118
+- 330f14fea31c618d
+=1542 29954903128ba6a8
+=2469 90fda1ffe8535f17
+=2470 ddef3eecc4324dbb
++
+=2472 fd9248e185327a0d
+=2473 3704c6f41af62979
+=2474 2fb87160b75f7eae
+=2475 f5acd969be4edb9e
+=2476 3ce480c47bbf28c5
++
+=1534 1b9a9af5ae119bb8
+=2479 fe38aa4f9a71d09a
+@@ -1934,3 +2023,1
+- af76bcc6e28cb60c
+- 4ff7359ce5befbcd
+- e88e9a6f9c3cf80b
+=2482 3f6b3a0a7160868b
+@@ -1938,1 +2025,3
+- 62de640a037d75f5
+=1534 1b9a9af5ae119bb8
+=2485 f98ce607fd15e41b
++            }
+@@ -1940,1 +2029,1
+- 886f55d210839afd
+=2488 3c6ce7c736ecb2b6
+@@ -1942,1 +2031,2
+- 61a15b7eb37e22df
+=1534 1b9a9af5ae119bb8
+=2491 d21e7d8cbf37a9c2
+@@ -1944,3 +2034,5
+- 77885ad5ce27a0ac
+- 1664221931bace36
+- ffc46092ff4f8b6b
++
+=2494 80ebd6396e4abc36
++
+=1534 1b9a9af5ae119bb8
+=2497 9a8e7f12f237345f
+@@ -1949,2 +2041,4
+- 94b2e2b01cd9b9f8
+- d8c4089c6cb7fd6f
+=2500 189150fc95fb6dab
++
+=1534 1b9a9af5ae119bb8
+=2497 9a8e7f12f237345f
+@@ -1951,0 +2046,3
++
+=2506 0ffe1c685211928c
+=2507 3df0d495c4703d0b
+@@ -1954,2 +2051,1
+- 6a2162a71be4770f
+- 0f646dc4c9a90215
+=2510 d4962f208acbad8e
+@@ -1957,2 +2053,4
+- 99704c07f0abdc5e
+- b9bb62316ecec1b4
+=2512 e53734c1036b1eee
+=2513 9236e0185a2f4566
+=2514 712068b1d2110d4b
+=2515 acde65bacbc53763
+@@ -1961,11 +2059,8
+- b3592980241d0ab7
+- d00c2ee4177b0579
+- 38d9c7af57ef3ebc
+- e3b0c44298fc1c14
+- affbed303d080ed1
+- fde9e7ade733df78
+- acac4ce15939498c
+- 66d7035bd9d4360f
+- fc04ef596302e8b8
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+=2518 bbd9a338b218dd43
+=2519 09e30af533ae1c6d
+=2520 4863a0027a29405b
+=2521 473a28a3ab6cd2b4
+=2522 3ff72a528d95ea76
+=2523 69eaffc45a24d579
+=2524 989200c9f5317875
+=2525 e25710c2ca3c6104
+@@ -1973,7 +2068,2
+- ae59106e8d85857a
+- 66abfe2d1a0d6914
+- 0360c3134fc8c620
+- 66d7035bd9d4360f
+- fc04ef596302e8b8
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+=2527 e2d43fb1007ffdcd
+=2528 b9a5ed98c1c71d6e
+@@ -1981,2 +2071,7
+- 3c66d4e1a36bc34c
+- 0d0ed11fa21fdf22
+=2530 ef4c5cd73ff9250b
+=2531 96a04d98c6d49bf5
+=2532 2fd812bfdc3707f3
+=2533 ce8320bb727828a1
+=2534 26c4062d17c64ab2
+=2535 98fa46d72d42c541
+=2536 779d616976858cd4
+@@ -1986,1 +2081,2
+- dd7a0bb19e1c5338
+=2540 6e122a2a5ae6d9df
+=2541 756531f1a456f8b3
+@@ -1988,1 +2084,7
+- 47ee7330dc53b8e8
+=2543 05857b5c82cb35ad
+=2532 2fd812bfdc3707f3
+=2545 bfb611dec80fd14e
+=2533 ce8320bb727828a1
+=2534 26c4062d17c64ab2
++            }
++        }
+@@ -1991,1 +2093,1
+- 93c24fbbb84fbed9
++}
+@@ -1993,3 +2095,7
+- 08cc697423459a8d
+- 2a2635c04ab1b2bf
+- 28d86778615f6af4
++void EdFishingStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++    add(&chara_fishing, sizeof chara_fishing, "chara_fishing", context);
++    add(&fishing_mes, sizeof fishing_mes, "fishing_mes", context);
++    add(&fishing_bgm_vol, sizeof fishing_bgm_vol, "fishing_bgm_vol", context);
++    add(&fishing_st_cnt, sizeof fishing_st_cnt, "fishing_st_cnt", context);
++    add(&fishing_wait_cnt, sizeof fishing_wait_cnt, "fishing_wait_cnt", context);
++}
+@@ -1997,12 +2103,2
+- 76171d1ebee73eb3
+- d7e3fc1e7271957a
+- f9a48fb4216a3964
+- eafc7892f39329da
+- 918040223113e150
+- 002150ad991bc793
+- fd295316fdcc5cee
+- 0cfc5bd3947ce866
+- 51dd60a43b8660ed
+- 3812a474bb1ef2da
+- db66071f529affff
+- cfceb4a7d6842bc8
+=1382 b2d4daa80725fde0
+=1383 8547bc4c93f81638
+@@ -2010,4 +2106,9
+- 71a64953b36a4ae5
+- 5a8d44f57815bd6f
+- 5b3d86f3ba6c60ca
+- 09d5e5ee6baafbf7
+=1385 7d12d71e3f3d173a
+=1386 016cb67fc0d9fe66
+=1387 df70354ca7598bda
+=1388 5c0f2916230f4fce
+=1389 4e86273e05e807a3
+=1390 3a5036ace16789ca
+=1391 f9a04aef799aa254
+=1392 79736c1d6d115ca3
+=1393 2abe684fbe4e22dc
+@@ -2015,3 +2116,5
+- 855b413845d3e736
+- 7a164ae0e2e41cc6
+- afdb0656c8cee38c
+=1395 3a639845611a6e24
+=1396 db418c7c4daa34b2
++    } else {
+=1398 23f12f29426686e0
++    }
+@@ -2019,3 +2122,6
+- 377c8be5e1fd97a6
+- b9a6f48b8986c069
+- b8d1918176757f79
+=1401 0b6f5aa5e99beb30
+=1402 42c93cdb0b91b8c9
+=1403 4619fb9a22e89b24
+=1404 266f6ce0c053974f
+=1405 52d0af48db8b08c9
+=1406 634c14afe84d8ffa
+@@ -2023,9 +2129,4
+- 7534ee1c878b1f99
+- 8544c67035701958
+- 034feb97aaae386d
+- f6972d2fe2261ee6
+- 66d7035bd9d4360f
+- 575a3d2073ca6aa8
+- f6972d2fe2261ee6
+- 0bf0a088a649c22d
+- 86afdf70a95436e8
+=1408 08588d9cb4f5e21f
+=1409 83d4683fcd7214a1
+=1410 f9317234ac14a980
++    CoopTownToanWalkIntoForTest(pos, angle, &lx, &ly); // coop-nopush test hook
+@@ -2033,3 +2134,3
+- 8bee18d10ef84fee
+- 770635c0557b19fc
+- 86afdf70a95436e8
+=1412 eece11b8eb4eb82b
+=1413 cc7e8229d47e1dbf
++    }
+@@ -2037,2 +2138,9
+- 4c05b4c6ddc2b2df
+- 3f2e0c47f3eca944
+=1416 9cb03f19cdd05d74
+=1417 5b056d1b003fbb4b
++            lx *= 2.0f;
++            ly *= 2.0f;
++        } else {
++            lx *= 1.5f;
++            ly *= 1.5f;
++        }
++    }
+@@ -2040,4 +2148,34
+- bc086b7facc19bd3
+- ad4f1318e790363e
+- 7ac131714073bfd4
+- 0bf0a088a649c22d
+=1426 c5e9ef5e9d8d4d94
+=1427 d12ed6663f4139fb
++
+=1429 fa60985dfb9aa282
+=1430 98c1f211ab1348f8
+=1431 d9cf648b1ce6b6d2
++
+=1433 6370ddbbb9b11851
+=1434 fa6917b299cd2f4e
+=1435 7936f3a9b66b6ddc
++        } else {
+=1437 eb46053a4b6a9975
+=1438 a96c52de1d1fb2ac
++        }
++
+=1441 a713794639b81cc7
+=1442 f7b78687c5b21a71
+=1358 b7a84fcf220678e9
+=1359 b622dc34829ecd82
+=1445 3226ae9e10846701
+=1446 7826f252fa829361
+=1447 975badc9e2332c84
++        }
++
+=1450 3c2afafaebb8209e
+=1451 2cce97a177eeb349
++
+=1453 c1afea8252d87146
++                motion = 1;
++            } else {
++                motion = 2;
+=1457 06dd8b0382a946b8
++
+=1459 7830713473f7c000
+@@ -2044,0 +2183,3
++        } else {
++            motion = 0;
++        }
+@@ -2046,1 +2187,6
+- 91580ccac06c277c
+=1465 28677b4ec942c5eb
+=1466 c6aa1724666d01c6
++        }
+=1468 e6bc250a9932edad
+=1469 fd10e2041ec0f9cc
++            lx = GetRXf();
+@@ -2049,2 +2195,6
+- 38ba9d2c2d2ae59a
+- 60105e555ad6011f
+=1473 f199e93145d364bf
+=1474 f32d794942e860e0
+=1475 cc46245308289e33
++
+=1477 cefe37370da2d6b9
+=1478 f493cc82fb0b64c8
+@@ -2053,3 +2203,2
+- 61000a45f5c5f7f1
+- 42f0449538ec4d86
+- 28092e373d0c779f
+=1481 9f4fa4f2c59b3707
+=1482 716bc445d18432e4
+@@ -2058,10 +2207,14
+- a2362957049c0590
+- 6cc29b2467870193
+- 04f9e3261c3bc7da
+- 7135e113eba2129b
+- c0e306a7fd1886dd
+- 0bf0a088a649c22d
+- b855e07ecc5c0ddf
+- bf2b203dc10c1688
+- c37304e035325a16
+- 86afdf70a95436e8
+=1485 22bb982920c0ca40
+=1486 86e595030853a17d
+=1487 4da6fe8abb40366a
+=1488 d7345f27b19f164c
+=1489 d4281d5f20f89827
+=1490 a1d3fb65f983c784
+=1491 107fc25503346ec3
++
+=1442 f7b78687c5b21a71
+=1358 b7a84fcf220678e9
+=1359 b622dc34829ecd82
+=1445 3226ae9e10846701
+=1446 7826f252fa829361
+=1447 975badc9e2332c84
+@@ -2068,0 +2222,1
++    }
+@@ -2070,3 +2224,36
+- 5d7aabcf55b74941
+- b3588f533ad14437
+- c45dd0b27702fc3a
+=1502 1440f58ae3d2dbe3
+=1503 e0928a78e9cdf9be
+=1504 d12a6effd6dd1974
++    }
++
+=1507 fbeebe013ebda08b
+=1508 7354d1a348260421
+=1509 0832be6651442747
++        jump.y = 2.0f;
+=1511 1a7612e3b08fa9b7
++    }
++
+=1514 67b19da074d42061
+=1515 2f7ab80844472790
+=1516 c022d7223736cc95
+=1517 7b3f18fb26d43810
+=1518 02844e1908c990a3
++
+=1520 228789b9b949f169
+=1521 7ca869bd226a9cf9
++    } else {
++        CBoxVu0 box;
+=1524 1014b6171a077c98
+=1525 9521dc7bd20a4817
+=1526 502693b7eab8581e
+=1527 df7870ce313b8597
+=1528 838bc4378e1aed88
+=1529 279f458b9f6352c3
++
+=1531 5829d48c3b97c4dd
+=1532 4548e363674f2e2a
++
+=1534 1b9a9af5ae119bb8
+=1535 613c6733946f96b4
++            }
++        }
+@@ -2075,4 +2262,1
+- f43643939ff5de50
+- fe5962b70b93ac98
+- d62fa3c174052558
+- f73ce92b586a7a6c
+=1540 94417334372e1555
+@@ -2081,1 +2265,2
+- a2af57655bc976a6
+=1543 54c263af43b2ee92
++    }
+@@ -2083,2 +2268,3
+- c7e002df830171d5
+- 58e3442606652fe9
+=1546 3253a6f237be6bd7
+=1547 7d5800d82d603582
+=1548 7795ea0437c9cb6e
+@@ -2085,0 +2272,1
++    }
+@@ -2087,10 +2274,1
+- 44c86e741fcc29b5
+- 00e868773c1f8e36
+- 7d8d9d4b1c406e48
+- 634dfefa76703d7e
+- 353c4660b6843dbb
+- 91ecfc89b96c5eca
+- 9e28287d71e757ca
+- c2c140275af3d8a3
+- d6b30cf665b112cf
+- cc728e9db83a6f1a
++    poly_count += CoopTownPartnerWall(pos, velocity, &polys[poly_count]); // coop-nopush: player 2's body stops him
+@@ -2098,12 +2276,3
+- 4a12eebc81aa9a7e
+- a74a2a1af06be428
+- 804d5ffd7e916443
+- 48dd3338e698a5f6
+- ef8621731d5cda41
+- 9100f73049e56003
+- 566915542899abea
+- 140fd7dfb9862915
+- 2859e544cb19ac9b
+- 58d8b2b0068b1b09
+- 7d5e4bf224dce52f
+- 0bf0a088a649c22d
+=1552 62fecea2bf5806e2
+=1553 5182a2b3eddf85f7
++    }
+@@ -2111,1 +2280,4
+- ef8621731d5cda41
+=1556 f8888edc5fc17b4a
+=1557 401a39c70f77729c
+=1558 7ed65e9d7cf162d4
+=1559 16252fa24ca300f0
+@@ -2113,4 +2285,4
+- 9f0d05333903069f
+- 629641794793f736
+- 1c7a69331bad6221
+- 0bf0a088a649c22d
+=1561 1fad5faabe2adfe5
+=1562 b7053788b2d3f400
+=1563 3301da3db2a10dc2
++    }
+@@ -2118,6 +2290,12
+- 0c145e09ea75b85e
+- 42a31b520b35fff8
+- 86480f69341b5b80
+- 984e63f0aec76b72
+- 83dafa2125632901
+- 0bf0a088a649c22d
+=1566 0014cd5693b1e6da
+=1567 0759d45ad80fd77c
+=1568 9e25973ecdda5a57
+=1569 65ab9f0409251895
+=1570 45baa56bc2cc71a9
+=1571 4a13b5e3d146d37b
+=1572 9e349d261153be4a
+=1573 a3e66fcb678c553a
+=1574 41748146b68c0e37
+=1575 6577f43219919b9a
+=1576 c0824e459642c74c
+=1577 6f6a42046a01987f
+@@ -2125,6 +2303,3
+- f07bebce32506907
+- 067e3eed961e208e
+- 86480f69341b5b80
+- 984e63f0aec76b72
+- 83dafa2125632901
+- 0bf0a088a649c22d
+=1579 dc169da1e054cc4a
+=1580 5f3320139f1beee7
++    }
+@@ -2132,9 +2307,4
+- 299a0188f828a188
+- 140fd7dfb9862915
+- 466908938fd4d4b5
+- 17f9a98cbf08435c
+- 09ba207d69d82307
+- 566915542899abea
+- 140fd7dfb9862915
+- 254c1fee36c57901
+- b801ca6179bdec8c
+=1583 bed1cecfcd6e7913
+=1584 d7232fdd24c2e053
+=1585 209f9e273875afd8
++    }
+@@ -2142,3 +2312,26
+- 5fbd5a7a8c6e20fe
+- 431282b871b18ac2
+- 0bf0a088a649c22d
+=1588 2ac043aef62aa1cd
+=1589 a5ccd67e5894849e
++
+=1591 750e2b1ac6aafe3e
++
+=1593 8d7a1009504ebfe3
++
+=1595 0bd9a64447c4de49
+=1596 4b5811b64e1033d4
++    }
++
+=1599 966331e5888f3d4e
+=1600 10b53ea6bfd500d0
+=1601 b393e2a730b451f5
+=1602 8ba0d28cfc86c26d
++        }
++
+=1605 e50eac8ab955f0f4
+=1606 ecaa8033b975cd1c
++    } else {
+=1608 0aa9cbfaf3a694a7
++
+=1610 cfff74d50fee67bc
+=1611 dc433b7b0670909c
++        }
++    }
+@@ -2146,6 +2339,11
+- fd79167d7854edb7
+- 267691887c9ff3bd
+- 0f013de9d093e6fe
+- 1c7a69331bad6221
+- 87772e3c1d4ca465
+- 0bf0a088a649c22d
+=1615 2746abb3e063c2a9
+=1616 d9110247c4166a84
+=1617 53a27be6d141cafe
+=1618 fbf79b60511cc539
+=1619 7227b6a43255a12a
+=1620 5d3bb2013bf078a2
+=1621 5a3dcefa25345215
+=1622 fbd2f002193d9a3a
++    } else {
+=1624 f9d3420a397c202b
++    }
+@@ -2153,4 +2351,14
+- 140fd7dfb9862915
+- f05180e481b4ac8e
+- 2cdd2fba64babc5e
+- b801ca6179bdec8c
+=1627 f885f3b15d437f90
+=1628 42b7847f8dc47a88
+=1629 6fc72a8cfc06dc08
+=1630 5c5d36f1d8d3df6a
+=1631 770ac3d5eb76332c
+=1632 54739b0e823e169f
+=1633 2f6b2137c44f6d76
+=1634 734ef642c70e3925
+=1635 5457d16119aab8a6
+=1636 66841dcebe125a62
++        } else {
+=1635 5457d16119aab8a6
++        }
++    }
+@@ -2158,8 +2366,1
+- 81be2b901d693cd1
+- 267691887c9ff3bd
+- 88c96fddb012ccc7
+- 9e6d6bc6f06a9257
+- 66d7035bd9d4360f
+- e0bbaad729000d53
+- db5a99779fb76078
+- b8d1918176757f79
+=1642 3364057ba1e91c0f
+@@ -2167,5 +2368,3
+- 5d4848bbfc6af810
+- ddc127205cf42376
+- 7a985bf640762628
+- b8d1918176757f79
+- 0bf0a088a649c22d
+=1644 3bda3c687fcc0e69
++        shallow = 1;
++    }
+@@ -2173,3 +2372,3
+- c7ac72715561a3cd
+- 16276d7565fd82fb
+- 8f1e5c8b0479f9e3
+=1648 15a49730ee512a3b
+=1649 e09bbfcd7eabb28c
+=1650 b18c60b36535a7cf
+@@ -2177,4 +2376,2
+- 1922f4d4265538ac
+- 87772e3c1d4ca465
+- 349cc3991df4dca5
+- 0bf0a088a649c22d
+=1652 86b325be4634398e
++        EdCameraWallInfo wall_info;
+@@ -2182,8 +2379,5
+- abae1928c2ade08b
+- a97ca253c9d01ec0
+- 404577d691a03c0d
+- 1c7a69331bad6221
+- 66d7035bd9d4360f
+- d16203b52fd87dfb
+- ee38dc8825f65e14
+- b8d1918176757f79
++        EdCameraWalls(camera, ground, shallow, EdMoveCharaInfo.fishing, 1, &wall_info);
++        left_clear = wall_info.left_clear;
++        right_clear = wall_info.right_clear;
++        keep_distance = wall_info.keep_distance;
++    }
+@@ -2191,4 +2385,4
+- cd0416ff17ea3b52
+- cccb3788ff5dfb60
+- b8d1918176757f79
+- 0bf0a088a649c22d
+=1615 2746abb3e063c2a9
+=1836 07c5053619552141
+=1837 498eb69eaeae3d5b
+=1838 ab6a687f519e2a90
+@@ -2196,3 +2390,3
+- 807817caa9fe6350
+- 5c85c8ba4920e1ac
+- 140fd7dfb9862915
+=1840 eab84a4ad53295d1
+=1841 6bd50094e7a81c51
+=1842 1ce10cbb7dd0c868
+@@ -2200,9 +2394,3
+- 0454ef18e6c80e68
+- ee0426e2aebeac5e
+- 40368e0b04d43cb5
+- c9bce2fd27cbcd4b
+- e3b0c44298fc1c14
+- 80d4549d98830b1d
+- 9ca036e7c38bd339
+- b8d1918176757f79
+- 0bf0a088a649c22d
++        } else {
+=1845 7da8f5e7d3bc325a
++        }
+@@ -2210,5 +2398,3
+- fd79167d7854edb7
+- 83dafa2125632901
+- 5f09bb0fab59a885
+- 87772e3c1d4ca465
+- 0bf0a088a649c22d
+=1848 999d48bf4414f0e2
+=1849 b1137f67f973abfd
++        }
+@@ -2216,3 +2402,3
+- 98aa8a2aa1fd0891
+- f502bbb4a9b4b548
+- 0bf0a088a649c22d
+=1852 e7d9c1c94c15ee37
+=1849 b1137f67f973abfd
++        }
+@@ -2220,1 +2406,9
+- 4eb21ade4442a180
+=1856 1b05327da9519c3f
+=1857 057c9bdc4dee1b45
+=1858 2673225e0749c1c0
+=1859 d36baf8cc7ded794
+=1860 7f2131c9ebebbc86
++            } else {
++                drift = 1;
++            }
++        }
+@@ -2222,3 +2416,3
+- 140fd7dfb9862915
+- 10292cfe8f88adb1
+- 2cdd2fba64babc5e
+=1866 a9a693de8c16f09f
+=1867 9cea7dece75acdf2
++        }
+@@ -2226,7 +2420,3
+- 289ab430677b6fd4
+- dcd6a8fe8175eaf3
+- 90d873ae4fd44be2
+- 0f013de9d093e6fe
+- 1c7a69331bad6221
+- 87772e3c1d4ca465
+- 0bf0a088a649c22d
+=1870 c5a79cfc5009bc67
+=1871 ce4c78f747893fc2
++        }
+@@ -2234,5 +2424,3
+- 9f0d05333903069f
+- 3ae3b653b27359de
+- 0255d8b549a9170f
+- 1c7a69331bad6221
+- f445b53c65c0c440
+=1874 37d54f2e19c2d1d7
+=1875 0863289e39252404
+=1876 395686bb0a055536
+@@ -2240,4 +2428,3
+- 5a79692167616fea
+- 863e731557f71753
+- c5dc5e32451cb18e
+- b8d1918176757f79
+=1878 91f152c506663e3e
+=1879 6ea2824fc8bfdac2
++                    lx = 0.5f;
+@@ -2246,1 +2433,3
+- a31ef30e46eb5bfb
+=1883 bc01468bfa476685
++                    lx = -0.5f;
++                }
+@@ -2248,6 +2437,2
+- 6d4ab882aa0da866
+- 3467d854e8184658
+- ba0a6e0489d83551
+- 7e911d322d4e2e4f
+- c996bf619f8444af
+- 4586ed2b86194a6f
+=1887 0a09079aea6ba39c
++                    lx = 0.5f;
+@@ -2256,3 +2441,3
+- d943a1db94a3b830
+- 5c85c8ba4920e1ac
+- 140fd7dfb9862915
+=1891 913ef0f3f623662d
++                    lx = -0.5f;
++                }
+@@ -2260,6 +2444,0
+- cab7ef41b030575d
+- 2cdd2fba64babc5e
+- e3b0c44298fc1c14
+- bf60f9a2a0adfa67
+- 0f013de9d093e6fe
+- 87772e3c1d4ca465
+@@ -2267,13 +2446,1
+- cf0b2bb223b3c2ea
+- 863e731557f71753
+- c5dc5e32451cb18e
+- b8d1918176757f79
+- e3b0c44298fc1c14
+- 1c7a69331bad6221
+- 66d7035bd9d4360f
+- f870199384fd9289
+- cc80fab033429bc1
+- a5ede4bd3920c14d
+- 27058f772aaf808f
+- 9ae2954c3c2b543d
+- cc6c839578adff3f
+=1896 3ef5cf85fccb37a9
+@@ -2281,4 +2448,2
+- 9e72e1a617bbfb90
+- 47ec7b407f5997af
+- 0e728db2bfa5651f
+- aab81fdfa3632011
+=1898 b6e0151bd96e2c16
+=1899 d067eb8e7dfabfde
+@@ -2286,2 +2451,1
+- 04ebcece51ec3ea5
+- b8d1918176757f79
+=1901 64a2ffcc3157f916
+@@ -2289,1 +2453,2
+- 4d041d801487d041
+=1903 e054a1f25cb70a27
++            }
+@@ -2291,3 +2456,2
+- 6b597ca135690b90
+- 433d72acf96f045b
+- b8d1918176757f79
+=1906 f0ce87ab8301ebba
+=1907 ef23c3d4f672cb85
+@@ -2295,3 +2459,1
+- 3dfc23fcef0a20d5
+- ef849edc4943b639
+- 0bf0a088a649c22d
+=1909 1184781405f976e5
+@@ -2299,1 +2461,1
+- 140fd7dfb9862915
+=1903 e054a1f25cb70a27
+@@ -2301,2 +2463,1
+- c64ce5d632496e6b
+- c706425c2f2bbd91
++        }
+@@ -2304,4 +2465,3
+- 86cf0c59818e18c8
+- a49e92bdbb8ca769
+- 5a6da2572d30c45a
+- 3e2689155f02b57b
+=1915 e4840a2bfb231e74
+=1822 cd07d670f576e60c
++        }
+@@ -2309,7 +2469,4
+- 7945fffb1c0c6d59
+- 602575db826f3663
+- 338487e6ce4c9383
+- 9cba39dc73464253
+- ae368b0de584cf8f
+- e5c3c893cf644e07
+- b8d1918176757f79
+=1840 eab84a4ad53295d1
+=1920 cb2d60a0fe245a04
+=1921 223458ecabb8883e
++            }
+@@ -2317,5 +2474,1
+- ffd83f43091810d4
+- 0255d8b549a9170f
+- 3549cece3dcdccb8
+- 9a9b0e8005e0a490
+- 0bf0a088a649c22d
+=1924 b538f3160a4d159a
+@@ -2323,19 +2476,3
+- def38f4d4c2104ba
+- 5c85c8ba4920e1ac
+- 140fd7dfb9862915
+- 7537d58c743de3ed
+- 98c0a4cca30f7beb
+- ea7b3f6817e871a0
+- 97bf3bd3428c1156
+- 5c85c8ba4920e1ac
+- bfd8e9f3410b82d1
+- 1a26c913b963a0cf
+- 140fd7dfb9862915
+- 2eabfcac03fb89f9
+- fd79167d7854edb7
+- 5f09bb0fab59a885
+- 83dafa2125632901
+- b39242be109ad39b
+- e46208b076a6da50
+- 87772e3c1d4ca465
+- 0bf0a088a649c22d
+=1926 25d8804d1fcd9175
+=1927 2bcc43b2b601d197
++            }
+@@ -2343,3 +2480,3
+- 33aca0cffc627f26
+- 1f2a696f69ba858b
+- 0bf0a088a649c22d
+=1930 d2fbce5f8d92b118
+=1931 330f14fea31c618d
++            }
+@@ -2347,1 +2484,3
+- 4eb21ade4442a180
+=1934 af76bcc6e28cb60c
+=1935 4ff7359ce5befbcd
++                drop *= 0.05f;
+@@ -2349,6 +2488,1
+- 140fd7dfb9862915
+- 388a6fe92d01ec6b
+- 028de1680626657b
+- 12561038b990693d
+- 87bb8901803d272d
+- cf29233c8e32615d
+=1938 62de640a037d75f5
+@@ -2356,11 +2490,1
+- a724694c0c5bfd14
+- b966c9db4885d5ef
+- c738440d1da6494a
+- 593d83dd0bc09e77
+- b8d1918176757f79
+- 66d7035bd9d4360f
+- fa67b08f682e0fb3
+- 5de33dcc8c0f432b
+- cfd61d8b2d069b7b
+- fe26bd81eb55e749
+- eadaa072a12734a4
+=1940 886f55d210839afd
+@@ -2368,8 +2492,6
+- e84c19155088f3e9
+- 0a0e76ee3fe22a6a
+- aa30a852852b611a
+- 7db53d2369216ca3
+- 2f428e918fb1605e
+- 7abf9f8e664d99e2
+- 15bd1e2fca3111cc
+- 042a1c6072bb49f5
+=1942 61a15b7eb37e22df
++            }
++        } else {
+=1945 1664221931bace36
+=1946 ffc46092ff4f8b6b
++            }
+@@ -2377,14 +2499,4
+- 9d128b2fe1899045
+- 9914f5d5e2c30a8d
+- 2eb9381c3f5ef290
+- 15fcc71c909c5887
+- eed956e266cefceb
+- a9164e009f53e62e
+- aae41b2155a59c20
+- 9e67a8cf3e6c4c96
+- d5f9f7e90d6bff61
+- 5e26260453776acb
+- d5f9f7e90d6bff61
+- ec5364256121ee02
+- fcd683f9ac4b7e7e
+- 10b28319899d6b86
+=1949 94b2e2b01cd9b9f8
+=1950 d8c4089c6cb7fd6f
++            }
++        }
+@@ -2392,7 +2504,3
+- 2a8d166536bc99e5
+- aab81fdfa3632011
+- 766db794b0f26c65
+- 0c68fab6855bff43
+- d5f9f7e90d6bff61
+- 2eb9381c3f5ef290
+- 10b28319899d6b86
+=1954 6a2162a71be4770f
++        // coop-soakfix5: at file scope (EdMoveCharaRotCount), so a resync starts it over on both copies.
++        int &rot_count = EdMoveCharaRotCount;
+@@ -2400,12 +2508,3
+- 2a8d166536bc99e5
+- 8a0c38f3b29d7ac8
+- a7cf330ae2d7d95d
+- aeb473f77c6e0315
+- fb65dc80d19d5a19
+- 56e2743fa709fc02
+- 29db510328cd37ca
+- 2a8d166536bc99e5
+- fbd3eaec01a26aa0
+- 2a8d166536bc99e5
+- b8d1918176757f79
+- 0bf0a088a649c22d
+=1957 99704c07f0abdc5e
+=1958 b9bb62316ecec1b4
++        }
+@@ -2413,7 +2512,3
+- dfbf2ee0e61c6224
+- 140fd7dfb9862915
+- bf8b4ddb4a31c449
+- 028de1680626657b
+- 12561038b990693d
+- 76ce95f78c01d7aa
+- cf29233c8e32615d
+=1961 b3592980241d0ab7
+=1962 d00c2ee4177b0579
+=1963 38d9c7af57ef3ebc
+@@ -2421,3 +2516,5
+- 7da0783f2035e3c8
+- b385d123ff86c44a
+- 30d211e775ab58a7
+=1965 affbed303d080ed1
+=1966 fde9e7ade733df78
+=1967 acac4ce15939498c
++                } else {
++                    rot_count = 0;
+@@ -2424,0 +2522,1
++            }
+@@ -2426,6 +2524,5
+- fd79167d7854edb7
+- 83dafa2125632901
+- dd4ff6863a648ac4
+- b385d123ff86c44a
+- 7aea8cca2947f5d8
+- e46208b076a6da50
+=1973 ae59106e8d85857a
+=1974 66abfe2d1a0d6914
+=1975 0360c3134fc8c620
++                } else {
++                    rot_count = 0;
+@@ -2432,0 +2530,1
++            }
+@@ -2434,4 +2532,3
+- a4aed1e37525ad5c
+- 140fd7dfb9862915
+- d1cc337d9eec6b74
+- 140fd7dfb9862915
+=1981 3c66d4e1a36bc34c
++                rot_count = 0;
++            }
+@@ -2440,8 +2537,1
+- 01e0e4fee68193b2
+- 1c76fe56ab96509c
+- 32384a09aad54a80
+- cd771a1b35033e2b
+- d8566a7c91422662
+- ed171a1ee22a4f33
+- 647271644ee6a52d
+- 2a44168318e224e1
++        rot_count--;
+@@ -2449,3 +2539,1
+- de4445b5ce8e3503
+- d625d7ab43bcf189
+- b7ec5de3199ce4fd
+=1988 47ee7330dc53b8e8
+@@ -2454,1 +2542,1
+- 63d2a1efd20f77d7
+=1991 93c24fbbb84fbed9
+@@ -2456,2 +2544,4
+- fa60985dfb9aa282
+- e049f041bd9face2
++    // coop-talks2: her talk has its own talk state beside his (CoopTownHerTalkStepIn), so his walk sets his up as ever.
++    // DC_COOP_MUTATE=talks_one (twin): his waits for hers, as coop-hertalk had it (one talk in the room).
++    if (CoopTownHisTalkWaits()) {
+~2050 60105e555ad6011f|        |
+@@ -2460,2 +2550,2
+- fa60985dfb9aa282
+- df1f304b482730e1
+=1993 08cc697423459a8d
+=1994 2a2635c04ab1b2bf
+@@ -2464,3 +2554,12
+- f69aac2db7ec9298
+- ef1ae2fa18658cb7
+- 28d86778615f6af4
+=1997 76171d1ebee73eb3
+=1998 d7e3fc1e7271957a
+=1999 f9a48fb4216a3964
+=2000 eafc7892f39329da
+=2001 918040223113e150
+=2002 002150ad991bc793
+=2003 fd295316fdcc5cee
+=2004 0cfc5bd3947ce866
+=2005 51dd60a43b8660ed
+=2006 3812a474bb1ef2da
+=2007 db66071f529affff
+=2008 cfceb4a7d6842bc8
+@@ -2468,3 +2567,4
+- 29954903128ba6a8
+- 90fda1ffe8535f17
+- ddef3eecc4324dbb
+=2010 71a64953b36a4ae5
+=2011 5a8d44f57815bd6f
+=2012 5b3d86f3ba6c60ca
+=2013 09d5e5ee6baafbf7
+@@ -2472,5 +2572,3
+- fd9248e185327a0d
+- 3704c6f41af62979
+- 2fb87160b75f7eae
+- f5acd969be4edb9e
+- 3ce480c47bbf28c5
+=2015 855b413845d3e736
+=2016 7a164ae0e2e41cc6
+=2017 afdb0656c8cee38c
+@@ -2478,3 +2576,3
+- 1b9a9af5ae119bb8
+- fe38aa4f9a71d09a
+- 86afdf70a95436e8
+=2019 377c8be5e1fd97a6
+=2020 b9a6f48b8986c069
++                    }
+@@ -2482,1 +2580,9
+- 3f6b3a0a7160868b
+=2023 7534ee1c878b1f99
+=2024 8544c67035701958
+=2025 034feb97aaae386d
+=2026 f6972d2fe2261ee6
++                } else {
+=2028 575a3d2073ca6aa8
+=2026 f6972d2fe2261ee6
++                }
++            }
+@@ -2484,2 +2590,2
+- 1b9a9af5ae119bb8
+- f98ce607fd15e41b
+=2033 8bee18d10ef84fee
+=2034 770635c0557b19fc
+@@ -2488,1 +2594,2
+- 3c6ce7c736ecb2b6
+=2037 4c05b4c6ddc2b2df
+=2038 3f2e0c47f3eca944
+@@ -2490,2 +2597,4
+- 1b9a9af5ae119bb8
+- d21e7d8cbf37a9c2
+=2040 bc086b7facc19bd3
+=2041 ad4f1318e790363e
+=2042 7ac131714073bfd4
++                }
+@@ -2494,1 +2603,2
+- 80ebd6396e4abc36
+=2046 91580ccac06c277c
++        }
+@@ -2496,3 +2606,3
+- 1b9a9af5ae119bb8
+- 9a8e7f12f237345f
+- 86afdf70a95436e8
+=2049 38ba9d2c2d2ae59a
+=2050 60105e555ad6011f
++        }
+@@ -2500,1 +2610,4
+- 189150fc95fb6dab
+=2053 61000a45f5c5f7f1
+=2054 42f0449538ec4d86
++            acted = true;
++        }
+@@ -2502,2 +2615,9
+- 1b9a9af5ae119bb8
+- 9a8e7f12f237345f
+=2058 a2362957049c0590
+=2059 6cc29b2467870193
+=2060 04f9e3261c3bc7da
+=2061 7135e113eba2129b
++                    acted = true;
++                }
+=2064 b855e07ecc5c0ddf
+=2065 bf2b203dc10c1688
++                acted = true;
+@@ -2505,3 +2624,0
+- e3b0c44298fc1c14
+- 0ffe1c685211928c
+- 3df0d495c4703d0b
+@@ -2510,1 +2627,4
+- d4962f208acbad8e
+=2070 5d7aabcf55b74941
+=2071 b3588f533ad14437
+=2072 c45dd0b27702fc3a
++    }
+@@ -2512,5 +2632,1
+- e53734c1036b1eee
+- 9236e0185a2f4566
+- 712068b1d2110d4b
+- acde65bacbc53763
+- 2a44168318e224e1
++    EdFishingWeights fishing_weights;
+@@ -2518,8 +2634,1
+- bbd9a338b218dd43
+- 09e30af533ae1c6d
+- 4863a0027a29405b
+- 473a28a3ab6cd2b4
+- 3ff72a528d95ea76
+- 69eaffc45a24d579
+- 989200c9f5317875
+- e25710c2ca3c6104
++    EdFishingStepIn(chara, camera, pos, &fishing_weights); // coop-eventslots: the fishing step, split out (below)
+@@ -2527,2 +2636,1
+- e2d43fb1007ffdcd
+- b9a5ed98c1c71d6e
++    chara->Step();
+@@ -2530,9 +2638,3
+- ef4c5cd73ff9250b
+- 96a04d98c6d49bf5
+- 2fd812bfdc3707f3
+- ce8320bb727828a1
+- 26c4062d17c64ab2
+- 98fa46d72d42c541
+- 779d616976858cd4
+- 86afdf70a95436e8
+- 2a44168318e224e1
+=1429 fa60985dfb9aa282
+=2457 e049f041bd9face2
++    }
+@@ -2540,2 +2642,3
+- 6e122a2a5ae6d9df
+- 756531f1a456f8b3
+=1429 fa60985dfb9aa282
+=2461 df1f304b482730e1
++    }
+@@ -2543,7 +2646,2
+- 05857b5c82cb35ad
+- 2fd812bfdc3707f3
+- bfb611dec80fd14e
+- ce8320bb727828a1
+- 26c4062d17c64ab2
+- 86afdf70a95436e8
+- 2a44168318e224e1
+=2464 f69aac2db7ec9298
+=2465 ef1ae2fa18658cb7
+@@ -2551,0 +2650,1
++    EdFishingLineStep(chara, fishing_weights); // coop-eventslots

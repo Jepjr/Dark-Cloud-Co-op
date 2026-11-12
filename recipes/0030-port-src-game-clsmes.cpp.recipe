@@ -2,15 +2,17 @@
 target port/src/game/clsmes.cpp
 base port/src/game/clsmes.cpp
 from 5a2b29d6ba3232adda320e3e42922dcc03e122da
-to 8deea7e44781b5a78122eb57c6728f0b3c707478
-@@ -45,0 +46,3
+to 6f6965ad4ecfd7645343b0aa50362dd068c995d9
+@@ -2,0 +3,1
++#include "dialog/npc.hpp" // Jep (co-op, coop-pt1111e): DialogNpcHoverDraw
+@@ -45,0 +47,3
 +#include "coop/coop_dialogue.hpp" // Jep (co-op), coop-dlgname
 +#include "coop/netplay.hpp"       // coop: netplay (TableRand)
 +#include "coop/netplay_test.hpp"
-@@ -1069,1 +1072,1
+@@ -1069,1 +1073,1
 - d55f9e1e6104d3b1
 +    return CoopDialogueLine(this, line, FindMessage(this->buff, line)); // Jep (co-op), coop-dlgname: her name in her dialogue
-@@ -1410,0 +1414,19
+@@ -1410,0 +1415,19
 +// Jep (co-op), coop: netplay: the tables only shape how a message window is drawn (its bubble's wobble), but retail rolls
 +// them from the game's generator, which a linked pair keeps alike. A window rebuilds only when its text changes
 +// (ClsMes::MakeMesWin's mes_made), and that is per copy: a host that used the Georama before player 2 joined had its
@@ -30,9 +32,17 @@ to 8deea7e44781b5a78122eb57c6728f0b3c707478
 +}
 +} // namespace
 +
-@@ -1416,1 +1438,1
+@@ -1416,1 +1439,1
 - 6c5ce2d7df95111c
 +        value = ((hi - lo) * static_cast<float>(TableRand())) / 2147483648.0f; // Jep (co-op): TableRand
-@@ -1426,1 +1448,1
+@@ -1426,1 +1449,1
 - 6c5ce2d7df95111c
 +        value = ((hi - lo) * static_cast<float>(TableRand())) / 2147483648.0f; // Jep (co-op): TableRand
+@@ -2974,0 +2998,7
++    // Jep (co-op, coop-pt1111e): the viewer's own pointer hover as the conversation window's hand, for this draw alone.
++    struct HoverDraw {
++        ClsMes *mes;
++        explicit HoverDraw(ClsMes *m) : mes(m) { dc::dialog::DialogNpcHoverDraw(mes, true); }
++        ~HoverDraw() { dc::dialog::DialogNpcHoverDraw(mes, false); }
++    } hover_draw(this);
++

@@ -1,0 +1,42 @@
+# port/src/game/weaponelement.cpp from Chronicle's port/src/game/weaponelement.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/weaponelement.cpp
+base port/src/game/weaponelement.cpp
+from 1cfb0c5eaaf2f13030cf0bace0aa62300f430421
+to 21b4f8868304337ce867c60b8c4c63080d0eb2ce
+@@ -12,0 +13,5
++namespace coop {
++bool Mutated(const char *feature);                                          // coop-pt1111b: the twin's switch
++void ElementBoltsDrawn(int kind, int drawn, int behind, int behind_drawn, const float *at); // coop-pt1111b: the rows' line (DC_COOP_DEBUG)
++} // namespace coop
++
+@@ -19,0 +25,12
++// coop-pt1111b (Jep's 11-11 playtest, item 14: "P1 with a lightning weapon: P2 sometimes sees lightning particles on her screen
++// when P1 hits things, even far away"): whether a point is in front of the view drawn now. MGRotTransPers projects a point behind
++// the camera as if it were 1 in front (its depth clamped), which puts it on the screen near the middle; retail drew a bolt's four
++// corners that way unchecked, which one player's view never showed (the player faces what the weapon hits), but another
++// player's view of the same hit, facing away from it, did.
++bool InFront(const float *position) {
++    sceVu0FVECTOR point;
++
++    sceVu0ApplyMatrix(point, mgRenderInfo.view_scaled, const_cast<float *>(position));
++    return point[2] >= 1.0f;
++}
++
+@@ -701,0 +719,4
++    int           drawn = 0;
++    int           behind = 0;
++    int           behind_drawn = 0;
++    static const bool before = coop::Mutated("bolts_behind"); // (coop-pt1111b's twin: every bolt drawn, as retail)
+@@ -703,0 +725,10
++        // coop-pt1111b: a bolt with an end behind this view is not drawn (its projection would be the middle of the screen).
++        if (!InFront(offset[bolt_head[i]]) || !InFront(offset[bolt_tail[i]])) {
++            behind++;
++            if (!before) {
++                continue;
++            }
++            behind_drawn++;
++        }
++        drawn++;
++
+@@ -720,0 +752,1
++    coop::ElementBoltsDrawn(kind, drawn, behind, behind_drawn, *origin);

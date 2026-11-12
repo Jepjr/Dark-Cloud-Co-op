@@ -19,6 +19,9 @@ int DebugStartFloors(int dungeon);
 // one asked for, "town" starts the town next to the one picked, "scene" leaves the story scenes unseen,
 // "menu" leaves a join's resync at the floor menu, "save" lets saves through after a debug start.
 bool DebugStartMutated(const char *what);
+// pt1111c: DC_DEBUG_START_SEEN's game flags, set by a test start (GameTakeJumpFloor) beside its scenes; and the floor (0 up)
+// that start goes to, kept for a join's resync that comes before the floor is entered (DebugStartOnResync's read).
+void DebugStartSeenFlags(int floor);
 
 // Online: a join's resync sends both copies back to the dungeon's entrance, whose floor menu would follow. In
 // debug mode (a debug start, which the joiner takes from the host's state) both instead enter the floor the

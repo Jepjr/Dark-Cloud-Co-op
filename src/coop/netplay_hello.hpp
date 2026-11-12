@@ -70,7 +70,7 @@ struct NetplayHello {
     std::uint8_t  player_damage;
     std::uint8_t  own_bags; // separate item bags as they are in effect (config or DC_COOP_OWN_BAGS)
     std::uint8_t  revive_powder; // coop-revive: the Revive Powder rule as it is in effect (DC_COOP_REVIVE_POWDER)
-    std::uint8_t  story_gather;  // coop-floorgate: game.coop_story_gather (bit 0); coop-gateflow: game.coop_gate_picker (bit 1)
+    std::uint8_t  story_gather;  // coop-floorgate: game.coop_story_gather (bit 0); coop-gateflow: game.coop_gate_picker (bit 1); coop-eventslots: not game.coop_fishing_shared (bit 2); coop-pt1111o: game.coop_menus (bit 3), game.coop_menu_panel (bit 4)
     // coop-lobby: this copy's lobby identity (game.netplay_player_id), so a rejoin gets its seat back (protocol 12).
     std::uint64_t player_id;
     // release2 (protocol 21, train 56's one bump): the disc release this copy's game data comes from (NetplayHelloRegion).
@@ -106,16 +106,25 @@ void NetplayHelloLogSha();
 // coop-cand58: the exe hasher's thread joined as the game ends (NetplayStopThreads); true when there was one.
 bool NetplayHelloStop();
 
+// coop-pt1111o: what a joiner is told when it takes the host's co-op settings: those of the host's that differ from this
+// copy's, as "game.coop_menus on (yours: off)", comma-separated. Empty when none differ.
+std::string NetplayHelloAdoptNote(const NetplayHello &mine, const NetplayHello &host);
+
 // Empty when the two copies can link; else what keeps them apart, as the HUD and the log say it.
 std::string NetplayHelloCompare(const NetplayHello &mine, const NetplayHello &theirs);
 // coop-hellosize51: this build's protocol (a Hello of another size is read against it).
 std::uint32_t NetplayHelloProtocol();
 
 // The way past differing settings: when only settings a running game can change differ (not the
-// build, the protocol or the language), the joiner takes the host's into its config.json (in its own
-// save folder).
+// build, the protocol or the language), the joiner takes the host's for this run only: config.json keeps
+// its own (coop-pt1111p: the keys below are a session's, NetplayAdoptSession, ended at Quit Game).
 bool NetplayHelloSettingsOnly(const NetplayHello &mine, const NetplayHello &theirs);
 void NetplayHelloAdopt(const NetplayHello &host);
+// coop-pt1111p: the keys NetplayHelloAdopt sets, copied from one settings set into another (config.json keeps from's).
+namespace dc::platform { struct Config; }
+void NetplayHelloAdoptedKeys(dc::platform::Config &to, const dc::platform::Config &from);
+// netplay.cpp: the adopted keys as this run's (on) or not (off); with the title's online session in one.
+void NetplayAdoptSession(bool on);
 
 // coop-joinfix: only the settings part of this copy's Hello (from tick_rate on), without its state digest (which reads every
 // save slot); and whether two Hellos' settings parts differ.

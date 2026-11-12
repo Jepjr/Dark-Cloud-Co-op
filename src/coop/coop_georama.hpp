@@ -50,6 +50,9 @@ bool CoopP2MenuHoldsP1(int menu_no);
 // his out (EdInitModeFinish); a parts menu of either open local (every copy keeps EditSave's state alike); shut here and its command on the way
 // (his copy draws his Georama meanwhile); his menu's step in the town's: 1 as it shuts on this copy's tick.
 bool CoopP2MenuHoldsParts();
+// coop-pt1111d: player 1's Georama (its edit or its parts menu, as ::GameMode has it) runs off her town menu's engine, so hers may open
+// beside it (false when his parts menu would share her copy's engine: HisPartsMenuOnHerEngine).
+bool CoopP1GeoramaBesideHerMenu();
 // coop-pt1108: a local menu's writes to the chip boards and the parts' records as pokes, around its step (collect) or draw (the overlay only).
 void CoopPartsWritesBegin(bool collect);
 void CoopPartsWritesEnd();

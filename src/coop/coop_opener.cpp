@@ -33,6 +33,7 @@
 #include "dungeonmap.hpp"
 #include "gamepad.hpp"
 #include "itemdata.hpp"
+#include "memcard.hpp" // GetAtraMsgNo (coop-pt1111b)
 #include "menu_save.hpp" // PlayerAllItemCheck
 #include "platform/arena.hpp"
 #include "platform/input.hpp"
@@ -199,6 +200,7 @@ void EndWorld(int player, std::int64_t tick) {
         if (p.kind == kPresentAtla) {
             // retail's step 5: turned round (hers to the ball, Toan's -PI), the game's camera following again
             CharaMain.SetRotation(0.0f, PlayerAtlaEndTurn(), 0.0f);
+            OthersAtlaFxEnd(player); // coop-pt1111b (item 12: draw only, the others' copies)
             MainCamera__4.SetSpeed(6.0f);
             MainCamera__4.FollowOn();
         } else if (p.refusal != 0) {
@@ -478,6 +480,9 @@ static bool StartAtla(int player, int active) {
         p.posed = 1;
     }
     driveNoInterpolate = 1;
+    if (NetplayLocalPlayer() != player) { // coop-pt1111b (item 12): the others see its effect stand in the ball's place
+        OthersAtlaFxStart(player, index, p.turn);
+    }
     std::fprintf(stderr, "coop-opener: player %d takes Atla %d (ball %d) at tick %lld: posed %d\n", player, p.item, index,
                  (long long) NetplayLinkTick(), (int) p.posed);
     return true;
@@ -634,6 +639,9 @@ static bool StepWorld(int opener, bool resident) {
             BtActStatus.motion_no = 0x2F;
         }
         PlayerAtlaStep();
+        if (!here) {
+            OthersAtlaFxStep(opener); // coop-pt1111b (item 12)
+        }
     } else {
         // The hold motion at the opening's frame 79 (retail's PAL rule, read from the body, which every copy steps alike).
         const int opening = p.kind == kPresentBig ? 0x2C : 0x2A;
@@ -644,11 +652,11 @@ static bool StepWorld(int opener, bool resident) {
         }
     }
     if (p.kind == kPresentAtla) {
-        // Its name on the others' screens, fading (coop-closetitem, Jep 10-31), about where the opener's shows it (the effect's
-        // frame 129.5). DC_COOP_MUTATE=atlaname_opener_only (twin): never.
+        // Its name on the others' screens (coop-closetitem, Jep 10-31), about where the opener's shows it (the effect's frame
+        // 129.5): each other player's own notice, gone by itself (coop-pt1111b, Jep's 11-11 choice B; OthersAtlaNotice).
+        // DC_COOP_MUTATE=atlaname_opener_only (twin): never.
         if (p.ticks == kAtlaNameTick && !here && !Mutated("atlaname_opener_only")) {
-            MessageBy by(opener);
-            AtraGetMes(selectMapNo, p.item, 0x28);
+            OthersAtlaNotice(opener, selectMapNo, p.item);
             p.named = 1;
         }
     } else if (held_up && !here) {
@@ -698,6 +706,21 @@ int PresentEngineVolume() {
 
 int PresentEngineRefusal() {
     return g_opener_engine.player > 0 ? g_present[g_opener_engine.player - 1].refusal : 0;
+}
+
+int PresentEngineAtla(int map_no, int read) {
+    if (!g_in_engine || g_opener_engine.player <= 0) {
+        return read; // retail's own task (unlinked, present_lockstep)
+    }
+
+    const int opener = g_opener_engine.player;
+    const int id = Mutated("atlaname_reread") ? read : g_present[opener - 1].item;
+
+    if (CoopDebug()) {
+        std::fprintf(stderr, "coop-opener: player %d's engine names Atla %d (message %d; the registry read %d)\n", opener, id, GetAtraMsgNo(map_no, id),
+                     read);
+    }
+    return id;
 }
 
 CCameraFollow *PresentEngineCamera() {

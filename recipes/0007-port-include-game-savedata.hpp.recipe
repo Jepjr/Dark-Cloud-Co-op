@@ -1,0 +1,16 @@
+# port/include/game/savedata.hpp from Chronicle's port/include/game/savedata.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/savedata.hpp
+base port/include/game/savedata.hpp
+from 53b34f73ea851c294e46f22185a8b4fa5058d2d5
+to 96e63d3716a894c7a436fcbe8e2514e3f989fdef
+@@ -107,0 +108,1
++    friend void EdFishingStepIn(class CCharacter *chara, class CCameraFollow *camera, float *pos, struct EdFishingWeights *out); // coop-eventslots: EdMoveChara's fishing, split out
+@@ -342,0 +344,8
++    /**
++     * Jep (co-op), coop-eventslots: the fishing record's own words (the points, the log, Mardan Garayan's count), for each player's
++     * own record when the fishing points are each player's (port/src/coop/coop_inventory.cpp).
++     */
++    s32 *CoopFishingPointWord() { return &fishing_point; }
++    SV_FISH_DATA *CoopFishLog() { return fish_data; }
++    s32 *CoopMardanWord() { return &mardan_garayan_caught; }
++

@@ -2,7 +2,7 @@
 target port/src/game/dungeonmap.cpp
 base port/src/game/dungeonmap.cpp
 from d84b3a671223705472239a7a06597bf57ff515d4
-to 3bb5b93b78f6c23c6003816131c3a6609122ff27
+to fd233e3081d30c80e925caff9d5bdbdd455919ca
 @@ -8,0 +9,1
 +#include <cstdint>
 @@ -9,0 +11,1
@@ -97,7 +97,7 @@ to 3bb5b93b78f6c23c6003816131c3a6609122ff27
 +// differently. The guards (the linker orders .data$ sections by name) take those reads and writes instead, and
 +// a resync clears them on both copies (PortBuildMapGuardsClear), so both build alike from then on.
 +// Jep (co-op): a deliberate divergence from upstream, which places buildMapDat between scanRoomInfoWork and buildMapWork so the
-+// strays land where retail had them (Jep kept the guards, 2026-11-10): docs\upstream-divergences.md, "floor builder".
++// strays land where retail had them (Jep kept the guards, 2026-11-10): debug\notes\upstream-divergences.md, "floor builder".
 +__attribute__((section(".data$dcbuildmap_a"), used)) BUILD_MAP_INFO g_build_map_before[20] = {};
 @@ -1340,1 +1422,23
 - 07d46e2e11ec22c0

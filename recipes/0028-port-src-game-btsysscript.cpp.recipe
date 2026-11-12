@@ -2,11 +2,12 @@
 target port/src/game/btsysscript.cpp
 base port/src/game/btsysscript.cpp
 from 08ba60f02159ac8b5f6aed7f7b76355350925a65
-to f2c0d697797e31defa932f937d9dd8f21a41ca1e
-@@ -46,0 +47,2
+to ebd56eba92cdcaedce836cc8aa594b5b5404df39
+@@ -46,0 +47,3
 +void NetplayFloorBuilding(); // coop-floorsnap (port/src/coop/netplay.cpp)
++#include "coop/coop_zonechara.hpp" // coop-pt1111k
 +
-@@ -564,10 +566,1
+@@ -564,10 +567,1
 - fd4bcb6d3a76c6ec
 - 04e9d9f9acd99b77
 - db2e875652d12519
@@ -18,13 +19,20 @@ to f2c0d697797e31defa932f937d9dd8f21a41ca1e
 - 3b8c4802a7eb36a6
 - d10b36aa74a59bcf
 +// Jep (co-op): defined in src/coop/coop_useprompt.cpp, which replaces this function.
-@@ -600,0 +594,2
+@@ -600,0 +595,2
 +// coop-floorsnap: the floor's build, with netplay told first (NetplayFloorBuilding: a catch-up joiner builds the host's
 +// floor from the host's random state).
-@@ -601,0 +597,2
+@@ -601,0 +598,2
 +    NetplayFloorBuilding();
 +
-@@ -912,22 +909,1
+@@ -813,0 +812,6
++    // Jep (co-op), coop-pt1111k: the floor start's zone force (F(z), then _SET_LIMMIT_ZONE(z)) is met when another player on the
++    // floor already plays z: player 1 keeps his member (port/src/coop/coop_zonechara.cpp).
++    if (coop::ZoneForceMetByOther(stack - 1, chara)) {
++        return 1;
++    }
++
+@@ -912,15 +916,1
 - 3d8270f86e6f4157
 - 0b6f5aa5e99beb30
 - beacfd11d65e6950
@@ -40,15 +48,15 @@ to f2c0d697797e31defa932f937d9dd8f21a41ca1e
 - 5abe1e8c483de41c
 - 4cf6c5ff572bacbb
 - 28d86778615f6af4
-- e3b0c44298fc1c14
++// Jep (co-op): defined in src/coop/coop_combat.cpp, which replaces this function.
+@@ -928,13 +918,1
 - add4135852703e04
 - 3b8c4802a7eb36a6
 - d10b36aa74a59bcf
 - e3b0c44298fc1c14
 - cebd53ab4dda5206
 - 0b6f5aa5e99beb30
-+// Jep (co-op): defined in src/coop/coop_combat.cpp, which replaces this function.
-@@ -935,6 +911,1
+- e3b0c44298fc1c14
 - d5f78acea1afe0cc
 - 61315b2631c34e80
 - 2c0656dd78cc7ab5

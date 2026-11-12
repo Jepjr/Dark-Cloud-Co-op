@@ -2,7 +2,7 @@
 target port/src/platform/config.cpp
 base port/src/platform/config.cpp
 from fbd5a5d2deac52be74e863cbc3f25544260ee075
-to e08548fc332aebe1b65dff5c964e7fbb02467a36
+to fb95503642ad480ccd52e6805929c22e8723a697
 @@ -10,0 +11,1
 +#include <cstdlib>
 @@ -26,0 +28,4
@@ -10,7 +10,7 @@ to e08548fc332aebe1b65dff5c964e7fbb02467a36
 +Config                        g_base;
 +ConfigSessionApply            g_session_apply = nullptr;
 +ConfigSessionRestore          g_session_restore = nullptr;
-@@ -433,0 +439,166
+@@ -433,0 +439,169
 +    if (name == "game.coop") {
 +        return ReadBool(value, config.coop);
 +    }
@@ -129,6 +129,9 @@ to e08548fc332aebe1b65dff5c964e7fbb02467a36
 +    if (name == "game.coop_own_bags") {
 +        return ReadBool(value, config.coop_own_bags);
 +    }
++    if (name == "game.coop_fishing_shared") { // coop-eventslots
++        return ReadBool(value, config.coop_fishing_shared);
++    }
 +    // coop-menus
 +    if (name == "game.coop_menus") {
 +        return ReadBool(value, config.coop_menus);
@@ -177,7 +180,7 @@ to e08548fc332aebe1b65dff5c964e7fbb02467a36
 +        (name == "video.window_left" ? config.window_left : config.window_top) = value.get<int>();
 +        return true;
 +    }
-@@ -738,0 +910,81
+@@ -738,0 +913,82
 +    root["game"]["coop"] = config.coop;
 +    root["game"]["window_title"] = config.window_title;
 +    root["game"]["netplay"] = config.netplay;
@@ -243,6 +246,7 @@ to e08548fc332aebe1b65dff5c964e7fbb02467a36
 +        root["game"]["coop_independent_cameras"] = *config.coop_independent_cameras;
 +    }
 +    root["game"]["coop_own_bags"] = config.coop_own_bags; // coop-inventory
++    root["game"]["coop_fishing_shared"] = config.coop_fishing_shared; // coop-eventslots
 +    root["game"]["coop_menus"] = config.coop_menus;       // coop-menus
 +    if (config.coop_menu_panel) {
 +        root["game"]["coop_menu_panel"] = true; // written only when set, so the files that never had it stay as they are
@@ -259,26 +263,35 @@ to e08548fc332aebe1b65dff5c964e7fbb02467a36
 +    root["input"]["controller"] = config.controller;
 +    root["video"]["window_left"] = config.window_left;
 +    root["video"]["window_top"] = config.window_top;
-@@ -809,1 +1061,1
+@@ -809,1 +1065,1
 - 9ba46fbde9c84e2c
 +    g_saved = WriteReplacing(path, ConfigSerialize(g_session_apply != nullptr ? g_base : g_config));
-@@ -819,1 +1071,1
+@@ -819,1 +1075,1
 - 36ef88f509c359dc
 +        g_config = g_base = Config{};
-@@ -828,0 +1081,1
+@@ -828,0 +1085,1
 +    g_base = g_config;
-@@ -863,0 +1117,10
+@@ -863,0 +1121,14
 +    // A session's keys keep their saved values in config.json; the running settings keep the session's.
++    // coop-pt1111p: a change of the session's keys alone leaves what config.json holds as it was, so the file is not written
++    // again (its bytes stay the player's: a joiner taking the host's settings for the run).
++    bool file_same = false;
 +    if (g_session_apply != nullptr) {
 +        Config base = after;
 +
 +        g_session_restore(base, g_base);
++        file_same = base == g_base && g_saved;
 +        g_base = base;
 +        g_session_apply(after);
 +    } else {
 +        g_base = after;
 +    }
-@@ -876,0 +1140,22
+@@ -865,1 +1136,3
+- a4593bbca8bec3bc
++    if (!file_same) {
++        ConfigSave();
++    }
+@@ -876,0 +1150,22
 +void ConfigSetSession(ConfigSessionApply apply, ConfigSessionRestore restore) {
 +    if (g_session_apply == nullptr) {
 +        g_base = g_config;

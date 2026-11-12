@@ -214,6 +214,8 @@ std::string NetplayTickPartsSay(); // coop-small1b: the netplay tick's dearest p
 // town where the other stayed and is to take her state: its window holds black (its door's fade) until it has caught up.
 // DC_NETPLAY_MUTATE=arrival_shown (twin): its own town and then its last list, as before.
 bool NetplayArrivalHold();
+// coop-pt1111h: whether the last presented frame was in an arrival's black (NetplayArrivalHold's answer then; no side effects).
+bool NetplayArrivalBlack();
 bool NetplayCatchupBuildingDoor(char *name, int name_size, int *entrance, int *jump, int *start_event);
 
 // What the HUD shows of the link: empty when off, else a short status; desync is set once the copies
@@ -341,8 +343,10 @@ void NetplayShowNotice(const char *text);
 // coop-floorgate: the game flag floor `floor` (0 up) of dungeon `map` sets as its opening scene plays (MarkFloorScenesSeen's
 // list), or -1 for a floor with none.
 int NetplayFloorSceneFlag(int map, int floor);
-// coop-b4story: the game flag floor `floor`'s story sets: its opening scene's (NetplayFloorSceneFlag), else a mid-floor story's
-// (Divine Beast Cave's floor 4: its miniboss's win, 102), -1 for none. DC_NETPLAY_MUTATE=midfloor_story_off (twin): scenes only.
+// coop-b4story, pt1111c: the first game flag of floor `floor`'s story that is still unset: its opening scene's
+// (NetplayFloorSceneFlag), else an event's of the floor (a walk-in marker's, a monster's death: kFloorStories, e.g. the cave's
+// floor 8, 25); once all are set, the first of them; -1 for a floor with no story. DC_NETPLAY_MUTATE=midfloor_story_off (twin):
+// scenes only; walkin_story_off (twin): no walk-in marker's.
 int NetplayFloorStoryFlag(int map, int floor);
 // coop-floorgate: this copy (apart) leaves wherever it is for dungeon map's floor (0 up), straight onto it from the entrance.
 void NetplayGoToFloor(int map, int floor);

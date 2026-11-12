@@ -52,6 +52,11 @@ bool PresentEngine();
 int  PresentEngineItem();
 int  PresentEngineVolume();
 int  PresentEngineRefusal();
+// coop-pt1111b (Jep's 11-11 playtest, item 10: the opener's '"" acquired.'): the Atla retail's step 0 names (BtAtraGetID). As
+// this copy's engine, the one the world took at the press (PresentEngineItem): the registry's id (read) is -1 by then, the
+// world's getAtraToSaveData having emptied its slot. Else read, retail's. DC_COOP_DEBUG: the name's message said
+// ("coop-opener: player N's engine names Atla <id> (message <no>)"). DC_COOP_MUTATE=atlaname_reread (twin): read, as before.
+int  PresentEngineAtla(int map_no, int read);
 // The Atla's stance the world gave its opener (PlayerAtlaStance, run once at the press on every copy): true when the opener
 // stands in it (a member who is not Toan), with the effect's turn.
 bool PresentEngineStance(float *turn);

@@ -91,6 +91,8 @@ void EdInMenuToWalk(); // coop-stage4 4c (edit_in.cpp)
 } // namespace dc::game
 namespace dc::quest {
 void CustomShopEnd();   // coop-stage4 r6: a parked shop puts retail's prices back (quest/custom_shop)
+bool CustomShopActive();                // coop-pt1111e
+s16 *PortGetItemShopList(int shop_no);
 } // namespace dc::quest
 
 namespace {
@@ -821,7 +823,28 @@ int CoopTownMenuCloseJump(int player) {
     return player == 2 ? g_close_jump + 1 : player == 1 ? g_his_close_code : 0;
 }
 
+static int g_quest_shop_item = -1; // coop-pt1111e: the open quest shop's first good (CoopTownMenuQuestShopTick), -1 none
+
+void CoopTownMenuQuestShopTick() {
+    if (dc::quest::CustomShopActive()) {
+        g_quest_shop_item = dc::quest::PortGetItemShopList(0)[0];
+    }
+}
+
 void CoopTownMenuClosedByCommand(int player, int code, long long tick) {
+    // coop-pt1111e: a quest's shop (custom_shop) is opened by its talk on every copy (QuestHostTakeShop in the talk's step) and runs
+    // on its owner's copy alone (CommonShopLoop, his local menu), whose end put retail's prices back there alone: its close command
+    // ends it on every copy, the prices it laid over put back alike (CustomShopEnd does nothing where none is open, as on its owner's).
+    if (g_quest_shop_item >= 0) {
+        const int item = g_quest_shop_item;
+
+        g_quest_shop_item = -1;
+        dc::quest::CustomShopEnd();
+        if (item >= ITEM_ATTACH_START && item - ITEM_ATTACH_START < 296) {
+            std::fprintf(stderr, "coop-townmenu: the quest shop ends with player %d's close at link tick %lld (item %d buys at %d again)\n", player, tick, item,
+                         (int) PriceList[item - ITEM_ATTACH_START].buy_price);
+        }
+    }
     if (player == 1) {
         // coop-stage4 4b: his close on every copy, its tick: his map jump (and indoors the room's way out) for the town to take
         g_his_jump = (code & 0xFFFF) - 1;
@@ -1462,8 +1485,15 @@ void CoopP2TownMenuTick() {
         const bool walk = TownWalks();
         const bool his_menu_runs = EdInteriorFlag == 0 ? ::GameMode == ED_MODE_MENU : CoopTownIndoorP1Menu();
         const bool beside = (CoopTownP1Menu() && his_menu_runs && BesideOk(true, g_p1_ticks)) || HisLocalMenu(); // (coop-stage4 4b: or his local one)
+        // coop-pt1111d (Jep's 11-11 playtest, items 5 and 5a: "P2 cannot open her menu while P1 is in the Georama menu", and only one
+        // way: his Triangle opens his menu beside her Georama): her Triangle asked for the walk (TownWalks reads ::GameMode, player 1's own
+        // mode) or his town menu, so his Georama, its edit or its parts menu, refused hers, where her Start already pauses her beside it
+        // (coop-pausegeo, HisGeorama). His Georama is his: its parts menu steps on his copy alone (HisPartsLocal) and hers on her own
+        // blocks (MenuSecondBlocks), so hers opens beside it; not where his parts menu would run on her copy's engine (its lockstep twin).
+        // Outdoors only (a room has no Georama). DC_COOP_MUTATE=townmenu_notingeorama (twin): as before.
+        const bool p1_georama = EdInteriorFlag == 0 && CoopP1GeoramaBesideHerMenu() && !Mutated("townmenu_notingeorama");
 
-        if ((pressed & kInputTriangle) != 0 && Allowed() && (walk || beside) && !CoopP2Building() && change_time_event == 0 &&
+        if ((pressed & kInputTriangle) != 0 && Allowed() && (walk || beside || p1_georama) && !CoopP2Building() && change_time_event == 0 &&
             !(HisLocalMenu() && Mutated("townmenuboth_off"))) { // (coop-stage4 4b: the twin's one at a time beside his local menu too)
             // coop-stage4: local, the bit on every copy now and the engine on hers alone.
             const bool local = LocalOn();

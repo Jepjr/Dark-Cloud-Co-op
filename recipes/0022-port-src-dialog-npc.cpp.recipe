@@ -1,0 +1,333 @@
+# port/src/dialog/npc.cpp from Chronicle's port/src/dialog/npc.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/dialog/npc.cpp
+base port/src/dialog/npc.cpp
+from 84ea5aafa66de3424cd1f27347e7f6029f02633a
+to 51b5c0dfd9259bfce19610118f3a371fcae81bc1
+@@ -3,0 +4,2
++#include <array>
++#include <cstdint>
+@@ -49,0 +52,8
++// DC_DIALOG_TEST's choice (Setup).
++const auto TestWhoSelect = [](ISessionController &session) {
+~73 0d7c659465a30995|    |
+~74 f776824672d7ce2a|    |
+~75 db985a9857ec84a3|                           |
+~76 3e5e2bae57c99187|                            |
++};
++
+@@ -66,0 +77,11
++    // Jep (co-op, coop-pt1111e): its choice binds again by its id on a copy a conversation is carried to; DC_DIALOG_TEST_UNBOUND=1
++    // (x-talk-follow -Unbound): it does not, so a merge mid-conversation shows the guard's LINT line.
++    if (std::getenv("DC_DIALOG_TEST_UNBOUND") == nullptr) {
++        RegisterChoiceResolver([](const NpcContext &, ChoiceItem &item) {
++            if (item.id != "test.who") {
++                return false;
++            }
++            item.on_select = TestWhoSelect;
++            return true;
++        });
++    }
+@@ -72,6 +93,1
+- 0b27eb1c0d7f7e9f
+- 0d7c659465a30995
+- f776824672d7ce2a
+- db985a9857ec84a3
+- 3e5e2bae57c99187
+- f0e48af4b7cddc43
++        item.on_select = TestWhoSelect;
+@@ -234,3 +250,1
+- de1904d5d5cb7362
+- 7fa02b84d8b7cb02
+- e3b0c44298fc1c14
++void DialogNpcPress(int pad_down) {
+@@ -239,1 +253,1
+- d930f76cd497b0a5
++    if ((pad_down & PAD_UP) != 0 && InputMoveUp()) {
+@@ -242,1 +256,1
+- ccf8a750fe2294c2
++    if ((pad_down & PAD_DOWN) != 0 && InputMoveDown()) {
+@@ -245,1 +259,1
+- 4cbae2305e258d63
++    if ((pad_down & PAD_CROSS) != 0) {
+@@ -251,1 +265,1
+- 650a1e1879062bc5
++    } else if ((pad_down & PAD_CIRCLE) != 0) {
+@@ -253,0 +268,6
++}
++
+=234 de1904d5d5cb7362
++    StepSession();
++    DialogNpcPress((GamePad.Down(PAD_UP) != 0 ? PAD_UP : 0) | (GamePad.Down(PAD_DOWN) != 0 ? PAD_DOWN : 0) | (GamePad.Down(PAD_CROSS) != 0 ? PAD_CROSS : 0) |
++                   (GamePad.Down(PAD_CIRCLE) != 0 ? PAD_CIRCLE : 0));
+@@ -291,6 +311,16
+- 6e7538822fcf623a
+- d5f74cecc5088a42
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 2f65f99a446fe1ce
+- 6169811507d7a4bd
++// Jep (co-op, coop-pt1111e): the pointer in a linked game (npc.hpp's DialogNpcSetCoopHooks). The selection is every copy's (the
++// session steps on every copy from the agreed pads), so a hover moved it on the pointer's own copy alone: two copies confirmed two
++// choices. With the hooks a hover is this screen's own hand (g_hover, drawn by DialogNpcHoverDraw) and a click's choice goes to
++// every copy by the pick hook (a command) beside its Cross.
++namespace {
++DialogNpcPickFn    g_pick_hook = nullptr;
++DialogNpcWithOwnFn g_own_hook = nullptr;
++DialogNpcOwnsFn    g_owns_hook = nullptr;
++int                g_hover = -1;   // the choice row in view the pointer is on (this screen's own), -1 none
++int                g_hover_saved = -2; // EditMes1's cursor_row, put back after the hover's draw
++
++// fn with the viewer's own conversation open (the co-op hook swaps its talker's in and back), else the open one.
++void WithOwn(void (*fn)(void *), void *ctx) {
++    if (g_own_hook == nullptr || !g_own_hook(fn, ctx)) {
++        fn(ctx);
++    }
+@@ -299,13 +329,22
+- bb0d701f9307e41f
+- 30399b9ba0d66ef5
+- e328e6f8bdb70065
+- e429e9d88b7b3ca2
+- e7f1c622ded2f4c1
+- 28d86778615f6af4
+- 68ad54d1550e2cfd
+- e3b0c44298fc1c14
+- 6f31bb2db007ead1
+- 6966b9c9c3c11263
+- c15c0bbdace97d19
+- 38f0d63d23ffa522
+- c20f0a3eb45c8898
++// The pointer on choice row choice in view (-1 none), moved or not, and its buttons and wheel: one frame of the pointer.
++void PointerAct(int choice, bool moved, int clicked, float wheel) {
++    if (g_pick_hook != nullptr) {
++        // Linked: the hover is this screen's hand alone; a click, the right button or the wheel goes to every copy as one command
++        // (the pick hook: the choice the click is on, and the buttons it stands for, DialogNpcPress there), never a press of this
++        // copy's own pad (the pointer's presses reach GamePad on this copy alone, past the agreed pads).
++        g_hover = choice;
++        int pad_down = 0;
++        if ((clicked & 1) != 0 && (choice >= 0 || g_window.choice_rows == 0)) {
++            pad_down |= PAD_CROSS;
++        } else if ((clicked & 2) != 0) {
++            pad_down |= PAD_CIRCLE;
++        }
++        if (wheel > 0.0f) {
++            pad_down |= PAD_UP;
++        } else if (wheel < 0.0f) {
++            pad_down |= PAD_DOWN;
++        }
+~145 eb3cf6a9cc3db2b9|        |
++        if (pad_down != 0 && view != nullptr) {
++            g_pick_hook((pad_down & PAD_CROSS) != 0 && choice >= 0 ? view->choice_scroll_offset + choice : -1, pad_down);
++        }
+@@ -314,3 +353,1
+- e3b0c44298fc1c14
+- 193ddc763326b58a
+- e9eaa1f529746d11
++    if (choice >= 0 && moved && InputHoverChoice(choice)) {
+@@ -324,1 +361,1
+- 7c60451b90e64dea
++    if ((clicked & 1) != 0 && (choice >= 0 || g_window.choice_rows == 0)) {
+@@ -326,1 +363,1
+- e8c9073a514a6e06
++    } else if ((clicked & 2) != 0) {
+@@ -329,1 +366,1
+- ac59bcd62624d18a
++    if (wheel > 0.0f) {
+@@ -331,1 +368,1
+- 1830353c25484393
++    } else if (wheel < 0.0f) {
+@@ -335,0 +373,195
++} // namespace
++
++void DialogNpcSetCoopHooks(DialogNpcPickFn pick, DialogNpcWithOwnFn with_own, DialogNpcOwnsFn owns) {
++    g_pick_hook = pick;
++    g_own_hook = with_own;
++    g_owns_hook = owns;
++}
++
++void DialogNpcHoverDraw(ClsMes *mes, bool begin) {
++    if (g_pick_hook == nullptr || mes != &EditMes1) {
++        return;
++    }
++    if (!begin) {
++        if (g_hover_saved != -2) {
++            EditMes1.cursor_row = g_hover_saved;
++            g_hover_saved = -2;
++        }
++        return;
++    }
++    if (g_hover < 0 || g_window.choice_rows <= 0 || g_hover >= g_window.choice_rows || !IsSessionActive() || g_window.retail_buff == nullptr ||
++        (g_owns_hook != nullptr && !g_owns_hook())) {
++        return;
++    }
++    g_hover_saved = EditMes1.cursor_row;
++    EditMes1.cursor_row = g_window.first_row + g_hover; // (this screen's hand alone: put back as the draw ends)
++}
++
++void DialogNpcTestPointer(int choice, bool click) {
++    struct Ctx {
++        int  choice;
++        bool click;
++    } ctx{choice, click};
++    WithOwn(
++        [](void *p) {
++            const auto *c = static_cast<const Ctx *>(p);
++            if (g_window.retail_buff != nullptr && IsSessionActive()) {
++                PointerAct(c->choice < g_window.choice_rows ? c->choice : -1, true, c->click ? 1 : 0, 0.0f);
++            }
++        },
++        &ctx);
++}
++
+=291 6e7538822fcf623a
++    bool open = false;
++    WithOwn([](void *p) { *static_cast<bool *>(p) = g_window.retail_buff != nullptr && IsSessionActive(); }, &open);
++    return open;
++}
++
+=295 2f65f99a446fe1ce
+=296 6169811507d7a4bd
++}
++
+=299 bb0d701f9307e41f
++    WithOwn(
++        [](void *) {
+~300 30399b9ba0d66ef5|            |
+~301 e328e6f8bdb70065|            |
+~302 e429e9d88b7b3ca2|                |
+~303 e7f1c622ded2f4c1|                |
++            }
+~305 68ad54d1550e2cfd|            |
++
+~307 6f31bb2db007ead1|            |
+~308 6966b9c9c3c11263|            |
+~309 c15c0bbdace97d19|            |
+~310 38f0d63d23ffa522|            |
+~311 c20f0a3eb45c8898|            |
++                return;
++            }
++            PointerAct(ChoiceAt(pointer.x, pointer.y), take.moved, static_cast<int>(take.clicked), take.wheel);
++        },
++        nullptr);
++}
++
+=337 a06581f38ac8a960
++
++// Jep (co-op, coop-pt1111e): each talker's window, kept and carried beside its session (npc.hpp).
+=20 928f49b1ad17d82d
++
++namespace {
++
++struct KeptWindow {
++    short       *retail_buff = nullptr;
++    std::string  shown;
+=37 ec0c99ee0f907540
++    int          first_row = 0;
++    int          choice_rows = 0;
++};
++
++std::array<KeptWindow, kSessionSlots> g_kept_windows;
++
++void SwapWindow(KeptWindow &kept) {
++    std::swap(kept.retail_buff, g_window.retail_buff);
++    std::swap(kept.shown, g_window.shown);
++    std::swap(kept.file, g_window.file);
++    std::swap(kept.first_row, g_window.first_row);
++    std::swap(kept.choice_rows, g_window.choice_rows);
++}
++
++void PutU64(std::string &out, std::uint64_t value) {
++    for (int i = 0; i < 8; i++) {
++        out.push_back(static_cast<char>(value >> (8 * i)));
++    }
++}
++
++void PutStr(std::string &out, const std::string &text) {
++    PutU64(out, text.size());
++    out += text;
++}
++
++bool GetU64(const char *data, std::size_t size, std::size_t &at, std::uint64_t &value) {
++    if (at + 8 > size) {
++        return false;
++    }
++    value = 0;
++    for (int i = 0; i < 8; i++) {
++        value |= static_cast<std::uint64_t>(static_cast<unsigned char>(data[at + i])) << (8 * i);
++    }
++    at += 8;
++    return true;
++}
++
++bool GetStr(const char *data, std::size_t size, std::size_t &at, std::string &text) {
++    std::uint64_t length = 0;
++    if (!GetU64(data, size, at, length) || at + length > size) {
++        return false;
++    }
++    text.assign(data + at, length);
++    at += length;
++    return true;
++}
++
++void PutWindow(std::string &out, const short *retail_buff, const std::string &shown, int first_row, int choice_rows) {
++    PutU64(out, reinterpret_cast<std::uintptr_t>(retail_buff)); // (the villagers' message file: the game's, at one address on every copy)
++    PutStr(out, shown);
++    PutU64(out, static_cast<std::uint32_t>(first_row));
++    PutU64(out, static_cast<std::uint32_t>(choice_rows));
++}
++
++bool GetWindow(const char *data, std::size_t size, std::size_t &at, KeptWindow &window) {
++    std::uint64_t buff = 0, first = 0, rows = 0;
++    std::string   shown;
++    if (!GetU64(data, size, at, buff) || !GetStr(data, size, at, shown) || !GetU64(data, size, at, first) || !GetU64(data, size, at, rows)) {
++        return false;
++    }
++    window.retail_buff = reinterpret_cast<short *>(static_cast<std::uintptr_t>(buff));
++    window.shown = std::move(shown);
++    window.first_row = static_cast<int>(static_cast<std::uint32_t>(first));
++    window.choice_rows = static_cast<int>(static_cast<std::uint32_t>(rows));
++    window.file = GameTextFile{};
++    if (!window.shown.empty()) {
++        window.file.Set(0, window.shown); // (this copy's own text for EditMes1, as ShowWindow made it on the other)
++    }
++    return true;
++}
++
++} // namespace
++
++void DialogNpcRepoint() {
++    if (g_window.retail_buff != nullptr && !g_window.shown.empty() && IsSessionActive()) {
+=156 355ce066dc8a1b27
++    }
++}
++
++void DialogNpcSwapWindow(int slot) {
++    if (slot < 0 || slot >= kSessionSlots) {
++        return;
++    }
++    SwapWindow(g_kept_windows[static_cast<std::size_t>(slot)]);
++}
++
++void DialogNpcWriteWindows(std::string &out) {
++    PutWindow(out, g_window.retail_buff, g_window.shown, g_window.first_row, g_window.choice_rows);
++    for (const KeptWindow &kept : g_kept_windows) {
++        PutWindow(out, kept.retail_buff, kept.shown, kept.first_row, kept.choice_rows);
++    }
++}
++
++bool DialogNpcReadWindows(const char *data, std::size_t size) {
++    std::size_t                           at = 0;
++    KeptWindow                            live;
++    std::array<KeptWindow, kSessionSlots> kept;
++    bool                                  ok = GetWindow(data, size, at, live);
++    for (KeptWindow &window : kept) {
++        ok = ok && GetWindow(data, size, at, window);
++    }
++    if (!ok) {
++        return false;
++    }
++    SwapWindow(live);
++    g_kept_windows = std::move(kept);
++    ClsMesSetChoiceRows(nullptr, 0); // (set again by the window's next ShowWindow, as the other copy's)
++    DialogNpcRepoint();
++    return true;
++}

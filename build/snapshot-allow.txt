@@ -51,6 +51,8 @@ obj:*coop_menu.cpp*
 !guard_variable_for_*
 !*g_drawn
 !*g_cover_drawn
+!*g_host_menus*             # coop-pt1111o: the host's menus settings this copy plays by (a session setting, not world state: a state set must not give a joiner the host's empty one)
+!*g_host_panel*
 coop::g_partner
 coop::g_icon_due   # coop-floorscene: ChangePlayer's item-sheet reload held for a scene (both copies reload on one tick)
 coop::g_scene_handover   # coop-sceneowner: her floor merge's change of players held to her scene's end (both copies change on one tick)
@@ -732,3 +734,36 @@ coop::*::g_pause
 # DrawWepDamageDraw's warningcnt (battlemenu.cpp, new upstream): the weapon-damage warning's blink counter, stepped by that
 # draw alone and read by nothing else; a local menu draws it on its owner's copy only (t-triangle-menu-herweapons-guard).
 !ps2:*DrawWepDamageDraw(*)::warningcnt
+# coop-eventslots (Jep's 11-11 item 1): each player's parked event slot (the event engine's state as bytes), own-event arena and
+# buffers, fishing set and catch window, the slot cameras and the live own event's owner (coop_eventslots.cpp), so a merge or a
+# resync carries a running parked event or fishing. Out: this copy's render targets and its test switches and lines.
+obj:*coop_eventslots.cpp*
+!*::g_es_hidden              # (this copy's render target and the one it drew into before)
+!*::g_es_previous
+!*CoopEventKeepsVillagers()::said
+!*TripForTest()::*
+!*FramesForTest(*)::on
+!*FishTrace(*)::on
+!*::g_fish_state_said
+!*CoopFishingWalkIn()::on
+!*CoopScriptExtTrace(*)::on
+!guard_variable_for_*CoopFishingWalkIn*
+!guard_variable_for_*CoopScriptExtTrace*
+!guard_variable_for_*TripForTest*
+!guard_variable_for_*FramesForTest*
+!guard_variable_for_*FishTrace*
+!*SysMesForTest()::*
+!guard_variable_for_*SysMesForTest*
+!*::g_sys_hidden_frames       # (this copy's draw counts, the tests')
+!*::g_sys_shown_frames
+!*CoopEventSlotsAfterLive()::on
+!guard_variable_for_*CoopEventSlotsAfterLive*
+!*CatchPressForTest(*)::on
+!guard_variable_for_*CatchPressForTest*
+!*CoopEventSlotsAfterLive()::tie
+!*CoopEventSlotsAfterLive()::live_was
+# coop-eventslots: each player's own fishing record (coop_inventory.cpp), carried by a merge or resync with the save it sits beside.
+*g_fish_records
+!*CoopEventSlotsAfterLive()::trace
+!*CoopEventSlotsAfterLive()::said
+!guard_variable_for_*CoopEventSlotsAfterLive*

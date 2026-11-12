@@ -13,6 +13,8 @@ namespace coop {
 
 // Whether a question is waiting for player 2's answer (pad 2's Cross and Circle are then its).
 bool PromptAsksPartner();
+// coop-pt1111k: whether a swap question (not the revive one) is open now.
+bool PromptSwapOpen();
 
 // Asks the other player for the member: asker 0 the player wants the partner's, 1 the partner wants
 // the player's. A question already waiting is left as it is.

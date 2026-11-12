@@ -265,8 +265,68 @@ void MenuWorkCensus(std::size_t *held, std::size_t *total, std::uint32_t *own_ha
     *own_hash = hash;
 }
 
+// coop-pt1111l: and DC_COOP_MUTATE=scriptmenu_merge_retail (x-town-stayermenu-hisscene~mergeretail): a script's retail menu
+// stepped in the lockstep through the merge, on the taker too, which never opened it. coop-small2 made that twin on a base without
+// e57647e7; at their merge (3e1009de) the set no longer carried the menu's working globals, so the taker's world map step read
+// its own BtlMenuStatusPt, null in a copy that never opened a battle menu (the dump: SearchItemIndexNo, this null, from
+// EscapeDungeonMode in MenuMoveKey), and the copy crashed before the twin's stop. Its twin carries them too, as before.
 bool MenuRetailLockstepMutated() {
-    return Mutated("merge_menu_retail");
+    return Mutated("merge_menu_retail") || Mutated("scriptmenu_merge_retail");
+}
+
+// coop-pt1111m (found by pt1111l): with game.coop_menus off (a player's setting) every menu is retail's, stepped in the lockstep on
+// every copy, so its working globals are simulated state that every copy must hold alike, as the world's. e57647e7 took them out of
+// the state set on the rule "menu state is not world state", which holds only for local menus. A merge into a stayer in a menu
+// (his scene's world map, EscapeDungeonMode's) then had the taker step it on its own globals: BtlMenuStatusPt null in a copy that
+// never opened a battle menu, SearchItemIndexNo(this=nullptr) <- EscapeDungeonMode <- MenuMoveKey <- EdMenuMode <-
+// CoopScriptMenuStep: a crash. With the menus in the lockstep the set carries them again (as before e57647e7); with local menus
+// it does not (each copy's menu is its own). Every copy of a session plays with one setting (the checksum's MenuHash already
+// differs on every tick otherwise), so sender and taker list the same regions.
+bool MenuWorkInSet() {
+    return Enabled() && !MenusOn();
+}
+
+// DC_COOP_MUTATE=menusoff_menu_out (twin, x-town-stayermenu-*-menusoff~menuout): a link's apply leaves this copy's own menu working
+// globals as they were, as since e57647e7 (a state file's load, the row's fixture, takes them as the fix does).
+bool MenuWorkKeptMutated() {
+    return Mutated("menusoff_menu_out");
+}
+
+// coop-pt1111m: every menu working global's bytes (MenuRegions, SaveRegions): saved and put back (the twin), and their hash (the rows'
+// check: the taker's after the apply is the sender's at the take).
+void MenuWorkSave(std::vector<unsigned char> &out) {
+    out.clear();
+    for (const std::vector<Region> *list : {&MenuRegions(), &SaveRegions()}) {
+        for (const Region &region : *list) {
+            const auto *at = static_cast<const unsigned char *>(region.at);
+            out.insert(out.end(), at, at + region.size);
+        }
+    }
+}
+
+void MenuWorkRestore(const std::vector<unsigned char> &in) {
+    std::size_t at = 0;
+
+    for (const std::vector<Region> *list : {&MenuRegions(), &SaveRegions()}) {
+        for (const Region &region : *list) {
+            if (at + region.size > in.size()) {
+                return;
+            }
+            std::memcpy(region.at, in.data() + at, region.size);
+            at += region.size;
+        }
+    }
+}
+
+std::uint32_t MenuWorkHash() {
+    std::vector<unsigned char> bytes;
+    std::uint32_t              hash = 2166136261u;
+
+    MenuWorkSave(bytes);
+    for (unsigned char byte : bytes) {
+        hash = (hash ^ byte) * 16777619u;
+    }
+    return hash;
 }
 
 // coop-offthread (the twin's DC_SNAPSHOT_MUTATE=menu_in_set): every one of them, as at, size.
@@ -1069,7 +1129,17 @@ void ApplyPoke(int player, const NetCommand &command, std::int64_t tick) {
                 reinterpret_cast<std::uint16_t *>(&SharedRing())[command.b - kRingFirst] = (std::uint16_t) command.c;
             }
         } else if (std::uint32_t *word = ExtraWord(command.b - kStatusWords)) {
+            // coop-eventslots: a save word of another player's menu (their fishing exchange) lands in their own fishing record when the
+            // records are each player's (the save's own being the game's player's). DC_COOP_MUTATE=fishpoke_into_save (twin): the save's.
+            const bool own_record = player > 1 && FishingPerPlayer() && !Mutated("fishpoke_into_save");
+
+            if (own_record) {
+                FishRecordSwap(player - 1);
+            }
             *word = command.c;
+            if (own_record) {
+                FishRecordSwap(player - 1);
+            }
         }
         if (player == g_local.owner || player == NetplayLocalPlayer()) {
             auto it = std::find_if(g_pokes.begin(), g_pokes.end(), [&](const Poke &p) { return p.word == command.b && p.value == command.c; });
@@ -1911,6 +1981,10 @@ int FullMenuOwner() {
     return FirstOpen() ? g_full.owner : g_second.live ? g_second.owner : 0;
 }
 
+int FullMenuViewPlayerChara() {
+    return FullMenuRunsFor(2) && g_full.player_chara >= 0 ? g_full.player_chara : -1;
+}
+
 bool FullMenuRunsFor(int player) {
     return (FirstOpen() && g_full.owner == player) || (g_full.live && g_second.live && g_second.owner == player) ||
            FullMenuRunsLocalFor(player);
@@ -1922,6 +1996,15 @@ bool FullMenuRunsLocalFor(int player) {
 
 bool FullMenuLocalPick(int player, int wanted) {
     return LocalPick(player, wanted);
+}
+
+// coop-pt1111k test hook: a local menu's pick of wanted taken on this tick, as its kCmdPick is on every copy (ApplyPick).
+void FullMenuApplyPickForTest(int player, int wanted) {
+    NetCommand command;
+
+    command.kind = kCmdPick;
+    command.a = (std::uint8_t) wanted;
+    ApplyPick(player, command, NetplayLinkTick());
 }
 
 // DC_COOP_MUTATE=second_escape_lost (the escape rows' twin; with local menus): the close command carries no map jump.
@@ -2808,6 +2891,16 @@ void FullMenuEndForSplit() {
     if (g_local.live) {
         {
             LocalPad pad;
+            // coop-basereds (x-dungeon-descent-menu-p1, OUT OF SYNC at tick 180, part melt): the gate question closes the asked
+            // player's local menu here (CoopWorldsGateVote), on the menu's copy alone. ExitBattleMenu resets the bag's melt timer
+            // (ItemVolumeStep.Initialize: frame 0, ticking on) and tidies the bag, the world's since coop-guard; outside the
+            // menu's writes they stayed on her copy (melt 15 0 1 against 0 0 0 at the next checksum). Inside them, as the down
+            // path's close (coop-famA), they go to every copy by command on one tick. DC_COOP_MUTATE=splitmenu_writes_here (twin):
+            // outside, as before.
+            std::optional<LocalWrites> writes;
+            if (!Mutated("splitmenu_writes_here")) {
+                writes.emplace(true);
+            }
             ExitBattleMenu(1);
         }
         g_local.live = false;

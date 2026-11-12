@@ -1,0 +1,10 @@
+# port/src/game/dngmessageman.cpp from Chronicle's port/src/game/dngmessageman.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/dngmessageman.cpp
+base port/src/game/dngmessageman.cpp
+from 625dabf5e6867d5a7d5ebe9bf5aae0c836cab7eb
+to fc51e26ed371175258954e13a51a599110a575af
+@@ -19,1 +19,3
+- 16e8c5f94abe080c
++        // Jep (co-op), coop-pt1111k: the floor's member, which retail's player always is (the floor's script switched him to
++        // it); in co-op another player may be the one playing it.
++        insert_mes_1 = zone + 0x32;

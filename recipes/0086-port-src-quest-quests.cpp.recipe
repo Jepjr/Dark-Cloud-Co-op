@@ -1,0 +1,32 @@
+# port/src/quest/quests.cpp from Chronicle's port/src/quest/quests.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/quests.cpp
+base port/src/quest/quests.cpp
+from 510ec6a2e44d9269a089d49320238f942b088c03
+to 337a44fc5b17abb17fc977ddc996d73dbb29996d
+@@ -2,0 +3,5
++#include <cstdlib>
++#include <utility>
++
++#include "itemdata.hpp"
++
+@@ -9,0 +15,16
++// Jep (co-op, coop-pt1111e): DC_QUEST_TEST_SHOP=1 (x-talk-follow -Shop): the mayor offers a shop of his own (one bread at 7
++// gilda), a quest's shop for the co-op merge's tests (no quest of the game opens one yet).
++Definition TestShop() {
++    return Builder("test_shop")
++        .Stages({"open"})
++        .Option(NoruneMayor(), [](const Context &) { return true; }, {"quest.test_shop.ask", "Show me your wares"},
++                [](Scene &scene) {
++                    ShopSpec shop;
++                    shop.look_of_shop = 0;
++                    shop.goods.push_back({game::ITEM_BREAD, 7});
++                    shop.keeper = Shopkeeper::Retail;
++                    scene.OpenShop(std::move(shop));
++                })
++        .Build();
++}
++
+@@ -12,0 +34,3
++    if (std::getenv("DC_QUEST_TEST_SHOP") != nullptr) {
++        Register(TestShop());
++    }

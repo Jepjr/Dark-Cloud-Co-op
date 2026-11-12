@@ -62,6 +62,19 @@ void BagSizesSay(const char *label);
 
 // Whether the players have a bag each: game.coop and game.coop_own_bags.
 bool OwnBags();
+// coop-eventslots: the player (1 up) whose own bag P2Bag keeps (the game's pack is player 1's); one more bag a player is later work.
+int OwnBagPlayer();
+
+// coop-eventslots (Jep 11-11, FP and the fishing log: game.coop_fishing_shared, default shared): each player's own fishing record when
+// they are each player's (FishingPerPlayer: the config off, with own bags; DC_COOP_FISHING_PER_PLAYER=1 for the rows). The game's
+// player's record is the save's own (SaveData); every other player's is kept here by actor index, with their profile in
+// coop-bags.json beside their bag, and exchanged with the save's around what reads or writes it (their fishing, their own events,
+// their menus' writes). A switch of the setting on a save keeps every point (FishModeSwitch).
+bool FishingPerPlayer();
+void FishRecordSwap(int index);        // the save's fishing record and player index's (index > 0), exchanged (twice puts back)
+int  FishPointsOf(int index);          // player index's points as they stand (the save's for the game's player, or the party's)
+void FishTestSeed();                   // DC_COOP_TEST_FISHING_POINTS_P2=N: player 2's own points (per-player rows)
+void FishSwitchSelfTest(const char *directory); // DC_COOP_TEST_FISH_SWITCH=<a scratch folder>: the switch both ways and the profile file, checked
 
 // The pack player 2's items come from and go to: its own while the bags are separate, else the party's.
 ITEM_PACK &PartnerPack();

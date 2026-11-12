@@ -49,6 +49,13 @@ std::uint16_t PlayerWheelMask();
 // run while the world holds, so they cannot close it themselves).
 void CloseWheelForPause(int player);
 
+// coop-pt1111k: a ring's Cross on chosen for player index (0 up), as it is taken: a trade asked, or that player's own pick checked
+// against a character-limited floor's rule (refused on their screen when it would leave the floor's member unplayed).
+void WheelConfirm(int index, int chosen);
+// Test hooks (DC_COOP_TEST_ZONE_PICKS): whether the ring offers chara now; open it with the hand on chara (false: not offered).
+bool WheelOffersForTest(int index, int chara);
+bool WheelOpenForTest(int index, int chara);
+
 } // namespace coop
 
 // coop-wheelcrash: for the dungeon's own Select (port/src/dun/movechara.cpp): its wheel stays shut while each player has

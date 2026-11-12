@@ -70,6 +70,8 @@ struct EntryStandInPoseInfo {
 bool EntryStandInPose(EntryStandInPoseInfo *out);
 void PartyResetForSession();
 bool StepPresence(bool *rejoined = nullptr);
+// coop-pt1111k: whether player 2 counts as there now (StepPresence's last answer), her body loaded or not yet.
+bool PartnerCounted();
 void PresenceResetForSession();
 // coop-localfix: the presence latch (whether player 2 counts as there, and for how many calls she has been absent), carried with a
 // join's state set from the host (CoopTownSyncTake / Apply).

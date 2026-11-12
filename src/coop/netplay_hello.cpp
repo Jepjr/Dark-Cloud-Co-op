@@ -15,6 +15,7 @@
 #include "coop/coop.hpp"
 #include "coop/coop_camera.hpp"
 #include "coop/coop_inventory.hpp"
+#include "coop/coop_menu.hpp" // coop-pt1111o
 #include "coop/coop_prompt.hpp" // coop-revive
 #include "coop/netplay.hpp"     // coop-lobby: NetplayPlayerId
 #include "coop/coop_worlds.hpp" // coop-localfix2: the stayer
@@ -42,7 +43,7 @@
 namespace {
 
 // Bumped whenever the link's packets change.
-constexpr std::uint32_t kProtocol = 22; // 22 (train 57 with the repin to Chronicle 9418a550 / Kazarov b619d1aa: the state set's whole layout, coop-quittitle's kCmdQuit (15), the floor autosave's mark and the system message buffer in the state set); 21 (train 56 = cand56 + cand57, one bump): coop-small2's kCmdStorageClaim/kCmdStorageMove (12/13, the party storage by option C), its storage asks apart and a script menu's record in the state set (kExtraScriptMenu), coop-opt7's kCmdPresent and the player table's g_present in the state set, coop-opt8's talk slots (each player's talk carried in the snapshot extras, kExtraTalks; his talk together no longer the town's mode), coop-release2's region in the Hello (NTSC 1.02 only), coop-scriptmenus' kCmdScriptMenuEnd (a script's menu run on its opener's copy alone), coop-pt1108's kCmdPartsPoke, the Georama menu's writes outside the party status, and the playtest fixes' state-set changes (scene music, the texture table of 80 blocks); 20 (train 55, one bump): coop-catchuprace's kCmdSlot (a late slot record by a lockstep command) and coop-joinlobby's pick in the catch-up's last blob and coop-stage4's town menus local (a town menu runs on its owner's copy alone; its close is a command); 19: coop-fx51a's floor build random and key and floor entrance in the state set (b2; the build check refuses mixed builds anyway, the bump keeps the convention 15 set); 18: coop-worldkeys key ring in the bag bytes and the slot sync (17 is joinlate's); 16: coop-buildid's version (joinlate takes 17; whichever lands second bumps again); 15: coop-kocatchup's weapon element spark slot in the state set (train 50); 14: coop-stayerhello's link_source; 13: coop-localmenu's commands (an Entry's NetCommand), train 48 with coop-lobby's 12; 12: coop-lobby's player_id; 11: coop-session's first_link; 5: coop-revive's revive_powder; 6: coop-localfix2's stayer; 7: coop-georamaload's builds, stand; 8: coop-apartstats' gains, characters now; 9: coop-pagediff's page list, need and pages; 10: coop-floorgate's story_gather
+constexpr std::uint32_t kProtocol = 23; // 23 (the 11-11 train, cand1111b, one bump: coop-eventslots' parked event slots, fishing set, arena and texture blocks in the state set, the texture table of 128 blocks, game.coop_fishing_shared in the Hello (story_gather bit 2); coop-pt1111e's kCmdDialogPick (16), kExtraQuests/kExtraDialog (0xC000000A/B) and the quests checksum part; coop-pt1111o's game.coop_menus / coop_menu_panel in the Hello (bits 3, 4); the 11-11 playtest fixes' state-set changes); 22 (train 57 with the repin to Chronicle 9418a550 / Kazarov b619d1aa: the state set's whole layout, coop-quittitle's kCmdQuit (15), the floor autosave's mark and the system message buffer in the state set); 21 (train 56 = cand56 + cand57, one bump): coop-small2's kCmdStorageClaim/kCmdStorageMove (12/13, the party storage by option C), its storage asks apart and a script menu's record in the state set (kExtraScriptMenu), coop-opt7's kCmdPresent and the player table's g_present in the state set, coop-opt8's talk slots (each player's talk carried in the snapshot extras, kExtraTalks; his talk together no longer the town's mode), coop-release2's region in the Hello (NTSC 1.02 only), coop-scriptmenus' kCmdScriptMenuEnd (a script's menu run on its opener's copy alone), coop-pt1108's kCmdPartsPoke, the Georama menu's writes outside the party status, and the playtest fixes' state-set changes (scene music, the texture table of 80 blocks); 20 (train 55, one bump): coop-catchuprace's kCmdSlot (a late slot record by a lockstep command) and coop-joinlobby's pick in the catch-up's last blob and coop-stage4's town menus local (a town menu runs on its owner's copy alone; its close is a command); 19: coop-fx51a's floor build random and key and floor entrance in the state set (b2; the build check refuses mixed builds anyway, the bump keeps the convention 15 set); 18: coop-worldkeys key ring in the bag bytes and the slot sync (17 is joinlate's); 16: coop-buildid's version (joinlate takes 17; whichever lands second bumps again); 15: coop-kocatchup's weapon element spark slot in the state set (train 50); 14: coop-stayerhello's link_source; 13: coop-localmenu's commands (an Entry's NetCommand), train 48 with coop-lobby's 12; 12: coop-lobby's player_id; 11: coop-session's first_link; 5: coop-revive's revive_powder; 6: coop-localfix2's stayer; 7: coop-georamaload's builds, stand; 8: coop-apartstats' gains, characters now; 9: coop-pagediff's page list, need and pages; 10: coop-floorgate's story_gather
 
 // FNV-1a over the executable's bytes, read once: two copies of one build agree, any rebuild differs.
 std::uint64_t BuildHash() {
@@ -229,7 +230,10 @@ void PutSettings(NetplayHello &hello) {
     hello.own_bags = coop::OwnBags();
     hello.revive_powder = coop::RevivePowderOn(); // coop-revive
     // coop-floorgate; coop-gateflow: game.coop_gate_picker in bit 1 (no protocol change: an older copy reads the byte as "on")
-    hello.story_gather = (config.coop_story_gather ? 1 : 0) | (config.coop_gate_picker ? 2 : 0);
+    hello.story_gather = (config.coop_story_gather ? 1 : 0) | (config.coop_gate_picker ? 2 : 0) | (config.coop_fishing_shared ? 0 : 4); // (coop-eventslots: bit 2)
+    // coop-pt1111o: game.coop_menus in bit 3, game.coop_menu_panel in bit 4, as this game plays them (the host's, once a joiner took them)
+    // (cand1111b: bits 3 and 4, bit 2 being coop-eventslots' game.coop_fishing_shared)
+    hello.story_gather |= (coop::MenusSetting() ? 8 : 0) | (coop::MenuPanelSetting() ? 16 : 0);
 }
 
 } // namespace
@@ -434,8 +438,30 @@ std::string NetplayHelloCompare(const NetplayHello &mine, const NetplayHello &th
     Differs(out, "DC_COOP_REVIVE_POWDER", theirs.revive_powder != mine.revive_powder); // coop-revive
     Differs(out, "game.coop_story_gather", (theirs.story_gather & 1) != (mine.story_gather & 1)); // coop-floorgate
     Differs(out, "game.coop_gate_picker", (theirs.story_gather & 2) != (mine.story_gather & 2)); // coop-gateflow
+    Differs(out, "game.coop_fishing_shared", (theirs.story_gather & 4) != (mine.story_gather & 4)); // coop-eventslots
+    Differs(out, "game.coop_menus", (theirs.story_gather & 8) != (mine.story_gather & 8));       // coop-pt1111o
+    Differs(out, "game.coop_menu_panel", (theirs.story_gather & 16) != (mine.story_gather & 16)); // coop-pt1111o
 
     return out.empty() ? out : "settings differ: " + out;
+}
+
+std::string NetplayHelloAdoptNote(const NetplayHello &mine, const NetplayHello &host) {
+    std::string out;
+    const auto  say = [&](const char *name, bool theirs, bool ours) {
+        if (theirs == ours) {
+            return;
+        }
+        out += std::string(out.empty() ? "" : ", ") + name + (theirs ? " on" : " off") + " (yours: " + (ours ? "on" : "off") + ")";
+    };
+
+    say("game.coop_menus", (host.story_gather & 8) != 0, (mine.story_gather & 8) != 0);
+    say("game.coop_menu_panel", (host.story_gather & 16) != 0, (mine.story_gather & 16) != 0);
+    say("game.coop_story_gather", (host.story_gather & 1) != 0, (mine.story_gather & 1) != 0);
+    say("game.coop_gate_picker", (host.story_gather & 2) != 0, (mine.story_gather & 2) != 0);
+    say("game.coop_fishing_shared", (host.story_gather & 4) == 0, (mine.story_gather & 4) == 0);
+    say("game.coop_own_bags", host.own_bags != 0, mine.own_bags != 0);
+    say("game.coop_independent_cameras", host.coop_independent_cameras != 0, mine.coop_independent_cameras != 0);
+    return out;
 }
 
 bool NetplayHelloSettingsOnly(const NetplayHello &mine, const NetplayHello &theirs) {
@@ -444,10 +470,38 @@ bool NetplayHelloSettingsOnly(const NetplayHello &mine, const NetplayHello &thei
            (theirs.language == mine.language || NetplayMutated("lang_ignored"));
 }
 
+void NetplayHelloAdoptedKeys(dc::platform::Config &to, const dc::platform::Config &from) {
+    // (the keys NetplayHelloAdopt sets: one list kept beside it)
+    to.tick_rate = from.tick_rate;
+    to.debug_mode = from.debug_mode;
+    to.qte_always_win = from.qte_always_win;
+    to.element_quick_select = from.element_quick_select;
+    to.swap_keeps_lock_on = from.swap_keeps_lock_on;
+    to.coop = from.coop;
+    to.coop_independent_cameras = from.coop_independent_cameras;
+    to.detail_distance = from.detail_distance;
+    to.options.fast_messages = from.options.fast_messages;
+    to.options.clock = from.options.clock;
+    to.options.fast_time = from.options.fast_time;
+    to.options.map = from.options.map;
+    to.options.enemy_damage = from.options.enemy_damage;
+    to.options.player_damage = from.options.player_damage;
+    to.coop_own_bags = from.coop_own_bags;
+    to.coop_story_gather = from.coop_story_gather;
+    to.coop_gate_picker = from.coop_gate_picker;
+    to.coop_fishing_shared = from.coop_fishing_shared;
+}
+
 void NetplayHelloAdopt(const NetplayHello &host) {
     if (NetplayMutated("no_adopt")) {
         return;
     }
+
+    // coop-pt1111p (Jep's rule: the joiner plays by the host's settings for the run only, never in its config.json): before, the
+    // ConfigChange below saved them into the joiner's file (ConfigSave writes the running settings when no session keeps keys
+    // apart), so after a joined run its own settings were the host's. The adopted keys are a session's now, set before the change
+    // so ConfigSave keeps the file's values of them. DC_NETPLAY_MUTATE=adopt_saved (twin): no session, the file written as before.
+    NetplayAdoptSession(true);
 
     dc::platform::Config config = dc::platform::ConfigGet();
 
@@ -468,7 +522,9 @@ void NetplayHelloAdopt(const NetplayHello &host) {
     config.coop_own_bags = host.own_bags; // (DC_COOP_OWN_BAGS on this copy still turns them on)
     config.coop_story_gather = (host.story_gather & 1) != 0; // coop-floorgate
     config.coop_gate_picker = (host.story_gather & 2) != 0; // coop-gateflow
+    config.coop_fishing_shared = (host.story_gather & 4) == 0; // coop-eventslots
     ConfigChange(config);
+    coop::MenusAdopt((host.story_gather & 8) != 0, (host.story_gather & 16) != 0); // coop-pt1111o: this run only, config.json unchanged
     coop::RevivePowderAdopt(host.revive_powder != 0); // coop-revive: this run only, as the launcher's switch is
 }
 

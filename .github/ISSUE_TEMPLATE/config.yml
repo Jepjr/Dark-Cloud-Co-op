@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup help and known issues
+    url: https://github.com/Jepjr/Dark-Cloud-Co-op#known-issues
+    about: Check the README's known issues and setup notes first.
+  - name: What each feature does
+    url: https://github.com/Jepjr/Dark-Cloud-Co-op/blob/main/FEATURES.md
+    about: How to use each co-op feature.

@@ -1,0 +1,356 @@
+# port/src/dialog/framework.cpp from Chronicle's port/src/dialog/framework.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/dialog/framework.cpp
+base port/src/dialog/framework.cpp
+from e184c428da6fc37a2a1d792290b7b72bf273775d
+to 5954aea85b25e2012c6c2c16d547bbd896a76a30
+@@ -6,0 +7,1
++#include <cstring>
+@@ -1120,0 +1122,16
++bool SelectChoice(int32_t index) {
+=1122 e7b83cfc90652bcd
++        return false;
++    }
+=238 8d8e2309a2802fe8
++    if (index < 0 || std::cmp_greater_equal(index, top.choices.size()) || !top.choices[static_cast<size_t>(index)].enabled) {
++        return false;
++    }
++    if (index != top.selected_choice) {
++        top.selected_choice = index;
+~1086 8f31e5c646e5976d|        |
+=515 b46c18747f8c1198
++    }
++    return true;
++}
++
+@@ -1235,0 +1253,331
++// Jep (co-op, coop-pt1111e): the sessions as data and one per talker (framework.hpp).
++namespace {
++
++struct KeptSession {
+=73 bbf8da213a10a630
+=74 1a1d364361fd0eb2
+=75 9d6b4ac66259c944
+=76 8f95a649debbea88
+=77 bd903b6a9e2d2331
+=78 cdf0b12050b35598
+=81 ab7f4f70033a00bc
+=82 4d7529c4952d6505
++};
++
++std::array<KeptSession, kSessionSlots> g_kept;
++std::vector<ChoiceResolverFn>          g_resolvers;
++
++bool BindChoice(const NpcContext &ctx, ChoiceItem &item) {
++    if (item.id == "builtin.talk") {
++        item.on_select = [](ISessionController &ctrl) { ctrl.PlayOriginalMessage(); };
++        return true;
++    }
++    if (item.id == "builtin.leave") {
++        item.on_select = [](ISessionController &ctrl) { ctrl.Close(); };
++        return true;
++    }
++    for (const ChoiceResolverFn &resolve : g_resolvers) {
++        if (resolve(ctx, item)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++class Writer {
++public:
++    explicit Writer(std::vector<uint8_t> &out) : out_(out) {}
++    void U32(uint32_t value) {
++        for (int i = 0; i < 4; i++) {
++            out_.push_back(static_cast<uint8_t>(value >> (8 * i)));
++        }
++    }
++    void I32(int32_t value) { U32(static_cast<uint32_t>(value)); }
++    void F32(float value) {
++        uint32_t bits = 0;
++        std::memcpy(&bits, &value, 4);
++        U32(bits);
++    }
++    void Str(const std::string &text) {
++        U32(static_cast<uint32_t>(text.size()));
++        out_.insert(out_.end(), text.begin(), text.end());
++    }
++    void Strs(const std::vector<std::string> &texts) {
++        U32(static_cast<uint32_t>(texts.size()));
++        for (const std::string &text : texts) {
++            Str(text);
++        }
++    }
++
++private:
++    std::vector<uint8_t> &out_;
++};
++
++class Reader {
++public:
++    Reader(const uint8_t *data, size_t size) : data_(data), size_(size) {}
++    bool     Ok() const { return ok_; }
++    uint32_t U32() {
++        if (at_ + 4 > size_) {
++            ok_ = false;
++            return 0;
++        }
++        uint32_t value = 0;
++        for (int i = 0; i < 4; i++) {
++            value |= static_cast<uint32_t>(data_[at_ + i]) << (8 * i);
++        }
++        at_ += 4;
++        return value;
++    }
++    int32_t I32() { return static_cast<int32_t>(U32()); }
++    float   F32() {
++        const uint32_t bits = U32();
++        float          value = 0.0f;
++        std::memcpy(&value, &bits, 4);
++        return value;
++    }
++    std::string Str() {
++        const uint32_t size = U32();
++        if (!ok_ || at_ + size > size_) {
++            ok_ = false;
++            return {};
++        }
++        std::string text(reinterpret_cast<const char *>(data_ + at_), size);
++        at_ += size;
++        return text;
++    }
++    std::vector<std::string> Strs() {
++        const uint32_t           count = U32();
++        std::vector<std::string> texts;
++        for (uint32_t i = 0; ok_ && i < count; i++) {
++            texts.push_back(Str());
++        }
++        return texts;
++    }
++
++private:
++    const uint8_t *data_;
++    size_t         size_;
++    size_t         at_ = 0;
++    bool           ok_ = true;
++};
++
++void WriteContext(Writer &w, const NpcContext &ctx) {
++    w.I32(ctx.map_no);
++    w.I32(ctx.npc_id);
++    w.I32(ctx.mes_id);
++    w.Str(ctx.mes_file_key);
++    w.Str(ctx.hub_greeting_key);
++    w.U32(static_cast<uint32_t>(ctx.bubble));
++    w.U32(ctx.has_anchor ? 1u : 0u);
++    w.F32(ctx.anchor_x);
++    w.F32(ctx.anchor_y);
++    w.U32(ctx.host_plays_original ? 1u : 0u);
++}
++
++NpcContext ReadContext(Reader &r) {
++    NpcContext ctx;
++    ctx.map_no = r.I32();
++    ctx.npc_id = r.I32();
++    ctx.mes_id = r.I32();
++    ctx.mes_file_key = r.Str();
++    ctx.hub_greeting_key = r.Str();
++    ctx.bubble = static_cast<BubbleKind>(r.U32());
++    ctx.has_anchor = r.U32() != 0;
++    ctx.anchor_x = r.F32();
++    ctx.anchor_y = r.F32();
++    ctx.host_plays_original = r.U32() != 0;
++    return ctx;
++}
++
++void WriteKept(Writer &w, const KeptSession &s) {
++    w.U32(s.active ? 1u : 0u);
++    w.U32(static_cast<uint32_t>(s.last_end));
++    WriteContext(w, s.active_ctx);
++    w.Str(s.original_message);
++    w.U32(s.snap_cursor ? 1u : 0u);
++    w.U32(s.blink_counter);
++    w.U32(static_cast<uint32_t>(s.stack.size()));
++    for (const FrameNode &node : s.stack) {
++        w.U32(static_cast<uint32_t>(node.slices.size()));
++        for (const PageSlice &slice : node.slices) {
++            w.Str(slice.raw_text);
++            w.Strs(slice.wrapped_markup_lines);
++            w.Strs(slice.wrapped_visible_lines);
++        }
++        w.I32(node.current_slice_idx);
++        w.U32(static_cast<uint32_t>(node.choices.size()));
+~294 6806e7c901f8f0ba|        |
++            w.Str(item.id);
++            w.Str(item.label_key);
++            w.Str(item.fallback_label);
++            w.Strs(item.label_args);
++            w.U32(static_cast<uint32_t>(item.color));
++            w.U32(item.enabled ? 1u : 0u);
++            w.U32(item.on_select ? 1u : 0u);
++        }
++        w.Strs(node.formatted_choice_labels);
++        w.I32(node.selected_choice);
++        w.I32(node.choice_scroll_offset);
++        w.U32(node.hub ? 1u : 0u);
++        w.U32(node.close_when_read ? 1u : 0u);
++    }
++}
++
++bool ReadKept(Reader &r, KeptSession &s, std::string &why) {
++    s = KeptSession{};
++    s.active = r.U32() != 0;
++    s.last_end = static_cast<SessionEnd>(r.U32());
++    s.active_ctx = ReadContext(r);
++    s.original_message = r.Str();
++    s.snap_cursor = r.U32() != 0;
++    s.blink_counter = r.U32();
++    const uint32_t nodes = r.U32();
++    for (uint32_t n = 0; r.Ok() && n < nodes; n++) {
++        FrameNode      node;
++        const uint32_t slices = r.U32();
++        for (uint32_t i = 0; r.Ok() && i < slices; i++) {
+~798 d26ef739242779fe|            |
++            slice.raw_text = r.Str();
++            slice.wrapped_markup_lines = r.Strs();
++            slice.wrapped_visible_lines = r.Strs();
++            node.slices.push_back(std::move(slice));
++        }
++        node.current_slice_idx = r.I32();
++        const uint32_t choices = r.U32();
++        for (uint32_t i = 0; r.Ok() && i < choices; i++) {
++            ChoiceItem item;
++            item.id = r.Str();
++            item.label_key = r.Str();
++            item.fallback_label = r.Str();
++            item.label_args = r.Strs();
++            item.color = static_cast<ChoiceColor>(r.U32());
++            item.enabled = r.U32() != 0;
++            const bool bound = r.U32() != 0;
++            if (bound && r.Ok() && !BindChoice(s.active_ctx, item)) {
++                why = "choice '" + item.id + "' binds to nothing here";
++                return false;
++            }
++            node.choices.push_back(std::move(item));
++        }
++        node.formatted_choice_labels = r.Strs();
++        node.selected_choice = r.I32();
++        node.choice_scroll_offset = r.I32();
++        node.hub = r.U32() != 0;
++        node.close_when_read = r.U32() != 0;
++        s.stack.push_back(std::move(node));
++    }
++    if (!r.Ok()) {
++        why = "the data ends early";
++        return false;
++    }
++    return true;
++}
++
++KeptSession LiveSession() {
++    KeptSession s;
++    s.active = g_state.active;
++    s.last_end = g_state.last_end;
++    s.active_ctx = g_state.active_ctx;
++    s.original_message = g_state.original_message;
++    s.stack = g_state.stack;
++    s.cached_view = g_state.cached_view;
++    s.snap_cursor = g_state.snap_cursor;
++    s.blink_counter = g_state.blink_counter;
++    return s;
++}
++
++void SwapLive(KeptSession &s) {
++    std::swap(s.active, g_state.active);
++    std::swap(s.last_end, g_state.last_end);
++    std::swap(s.active_ctx, g_state.active_ctx);
++    std::swap(s.original_message, g_state.original_message);
++    std::swap(s.stack, g_state.stack);
++    std::swap(s.cached_view, g_state.cached_view);
++    std::swap(s.snap_cursor, g_state.snap_cursor);
++    std::swap(s.blink_counter, g_state.blink_counter);
++    ++g_state.view_generation; // (the default renderer lays the labels out again)
++}
++
++bool Rebindable(const KeptSession &s, std::string &missing) {
++    for (const FrameNode &node : s.stack) {
+~294 6806e7c901f8f0ba|        |
++            ChoiceItem probe = item;
++            if (item.on_select && !BindChoice(s.active_ctx, probe)) {
++                missing = item.id;
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
++} // namespace
++
++void RegisterChoiceResolver(ChoiceResolverFn resolver) {
++    if (resolver) {
++        g_resolvers.push_back(std::move(resolver));
++    }
++}
++
++void SwapSession(int slot) {
++    if (slot < 0 || slot >= kSessionSlots) {
++        return;
++    }
++    SwapLive(g_kept[static_cast<size_t>(slot)]);
++}
++
++void WriteSessions(std::vector<uint8_t> &out) {
++    Writer w(out);
++    w.U32(0x44534553u); // "SESD"
++    w.U32(static_cast<uint32_t>(kSessionSlots));
++    WriteKept(w, LiveSession());
++    for (const KeptSession &s : g_kept) {
++        WriteKept(w, s);
++    }
++}
++
++bool ReadSessions(const uint8_t *data, size_t size, std::string &why) {
++    Reader r(data, size);
++    if (r.U32() != 0x44534553u || r.U32() != static_cast<uint32_t>(kSessionSlots)) {
++        why = "not a sessions block";
++        return false;
++    }
++    KeptSession                            live;
++    std::array<KeptSession, kSessionSlots> kept;
++    bool                                   ok = ReadKept(r, live, why);
++    for (KeptSession &s : kept) {
++        ok = ok && ReadKept(r, s, why);
++    }
++    if (!ok) {
+=230 24113207dc084a30
++        g_kept = {};
++        return false;
++    }
++    SwapLive(live);
++    g_kept = std::move(kept);
+=219 054deda75e3d3e3f
++        RebuildActiveView(); // (the view from the carried top page, as the other copy has it)
++    }
++    for (KeptSession &s : g_kept) {
++        if (s.active) {
++            SwapLive(s);
+~515 b46c18747f8c1198|            |
++            SwapLive(s);
++        }
++    }
++    return true;
++}
++
++bool SessionsRebindable(std::string &missing) {
++    if (!Rebindable(LiveSession(), missing)) {
++        return false;
++    }
++    for (const KeptSession &s : g_kept) {
++        if (!Rebindable(s, missing)) {
++            return false;
++        }
++    }
++    return true;
++}
++

@@ -1,0 +1,66 @@
+# port/src/dialog/npc.hpp from Chronicle's port/src/dialog/npc.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/dialog/npc.hpp
+base port/src/dialog/npc.hpp
+from 2c693e2259820cd8aceecbce149f6db366c3cfae
+to 987cac11f3b141b61374e508ced4fa1bd9470ac6
+@@ -2,0 +3,1
++#include <cstddef>
+@@ -8,0 +10,4
++namespace dc::game {
++class ClsMes;
++} // namespace dc::game
++
+@@ -77,0 +83,53
++// Jep (co-op, coop-pt1111e): the conversation's window beside its session (framework.hpp's SwapSession, WriteSessions): one per
++// talker, carried as data. The window's text is this process's own (EditMes1 reads it from here while a page is up), so a window
++// read back or swapped in is pointed at it again (DialogNpcRepoint).
++
++/**
++ * Exchanges the open conversation's window with the one kept in slot (as SwapSession's), and points EditMes1 at its text.
++ */
++void DialogNpcSwapWindow(int slot);
++
++/**
++ * Appends the open window and every slot's, as data.
++ */
++void DialogNpcWriteWindows(std::string &out);
++
++/**
++ * Replaces the open window and every slot's with DialogNpcWriteWindows' data; false for data that does not read.
++ */
++bool DialogNpcReadWindows(const char *data, std::size_t size);
++
++/**
++ * EditMes1 pointed at the open window's text while a framework page is up (its buffer is this copy's own).
++ */
++void DialogNpcRepoint();
++
++// Jep (co-op, coop-pt1111e): the pointer in a linked game. The pick hook takes a click's choice (counted from the page's first) to
++// every copy with the buttons it stands for (PAD_* pressed: DialogNpcPress there); the own hook runs fn with the viewer's own conversation open, returning false
++// where that is the open one already; the owns hook says whether the window being drawn is the viewer's own. With them a hover
++// is the viewer's own hand (DialogNpcHoverDraw) and moves no selection. Unset: as retail's pointer, the hover the selection.
++using DialogNpcPickFn = bool (*)(int choice, int pad_down);
++using DialogNpcWithOwnFn = bool (*)(void (*fn)(void *), void *ctx);
++using DialogNpcOwnsFn = bool (*)();
++
++/**
++ * One frame of the open conversation's buttons (PAD_UP, PAD_DOWN, PAD_CROSS, PAD_CIRCLE pressed), as DialogNpcStep reads the pad:
++ * the co-op pick hook's command applies a pointer's click with it on every copy.
++ */
++void DialogNpcPress(int pad_down);
++
++/**
++ * Sets (or, with nullptr, clears) the co-op pointer's hooks.
++ */
++void DialogNpcSetCoopHooks(DialogNpcPickFn pick, DialogNpcWithOwnFn with_own, DialogNpcOwnsFn owns);
++
++/**
++ * Around a message window's draw (ClsMes::DrawMesWin): the viewer's own hover as the window's hand, put back as it ends.
++ */
++void DialogNpcHoverDraw(dc::game::ClsMes *mes, bool begin);
++
++/**
++ * Tests: the pointer on choice row choice in view (-1: none) for one frame, with a left click, as the mouse puts it.
++ */
++void DialogNpcTestPointer(int choice, bool click);
++

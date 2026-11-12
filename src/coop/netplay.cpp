@@ -83,6 +83,7 @@ int CoopTownGroundEventAt(const float *at); // coop_town.cpp (coop-soakfix3, tes
 #include "dun/gameloop.hpp"
 #include "dun/motiondrive.hpp" // coop-p2absent
 #include "userstatus.hpp"      // coop-snapshot: the floor-start checkpoint's floor
+#include "dngmessageman.hpp" // coop-pt1111h: DC_COOP_TEST_LIMIT_ZONE_LOADED
 
 namespace dc::game {
 extern sceVu0FVECTOR ref_off; // dun/gameloop.cpp: the camera's offset for the player's move (the trip's inputs line)
@@ -1466,6 +1467,21 @@ bool StayerMergeOn() {
     return SnapshotJoinOn() || (SnapshotLayoutPinned() && !NetplayMutated("no_snapshot") && !NetplayMutated("stayer_needs_snapshot"));
 }
 
+} // namespace
+namespace dc::dialog {
+bool SessionsRebindable(std::string &missing); // dialog/framework.cpp (coop-pt1111e: SnapshotQuietTick)
+void WriteSessions(std::vector<uint8_t> &out); // (coop-pt1111e: the state set's dialog extra)
+bool ReadSessions(const uint8_t *data, size_t size, std::string &why);
+bool IsSessionActive() noexcept;
+void DialogNpcWriteWindows(std::string &out);   // dialog/npc.cpp
+bool DialogNpcReadWindows(const char *data, std::size_t size);
+} // namespace dc::dialog
+namespace dc::quest {
+void CustomShopWrite(std::string &out);     // quest/custom_shop.cpp (coop-pt1111e: the state set's dialog extra)
+bool CustomShopRead(std::string_view data);
+} // namespace dc::quest
+namespace {
+
 // A tick the host's state may be taken on: on a floor under control, no script under way (so the script VM's heap holds
 // nothing the snapshot would need), no menu over the floor. coop-snapjoin: or in a town or a building, walking (no scene,
 // no menu, no door under way).
@@ -1474,6 +1490,28 @@ bool StayerMergeOn() {
 // DC_NETPLAY_TEST_SNAP_MENU=1 (tests): every tick counts as a menu open (the strict test never passes).
 bool SnapshotQuietTick(bool menu_ok = false) {
     static const bool menu_for_test = TestEnvOn("DC_NETPLAY_TEST_SNAP_MENU");
+
+    // coop-pt1111e (Jep's 11-11 playtest item 6: OUT OF SYNC in the mayor's house, P2 following P1 in as his talk went on): a talk
+    // with a villager a quest adds choices to (the mayor's "Do you have any supplies?") opens Chronicle's dialog framework, whose
+    // session was the process's heap alone: a set taken in it gave the taker the talk with no session (her talk ended on her first
+    // replayed tick, or her copy crashed in its window). The sessions now ride with the set as data (kExtraDialog, each choice bound
+    // again by its id: dialog::ReadSessions), so the take goes mid-conversation, no wait. Only a choice nothing can bind again (a
+    // quest's Scene::Choice not declared by Builder::Choice; its quest says so as it is made, "quests: LINT") holds the take, said
+    // loudly: with today's quests none (x-talk-follow -Unbound proves the guard).
+    if (SendsState() && g_snap.take_due) {
+        std::string missing;
+
+        if (!dc::dialog::SessionsRebindable(missing)) {
+            static std::string said;
+
+            if (said != missing) {
+                said = missing;
+                std::fprintf(stderr, "catchup: LINT: the take waits: dialog choice '%s' binds to nothing on another copy (declare it: Builder::Choice or a resolver)\n",
+                             missing.c_str());
+            }
+            return false;
+        }
+    }
 
     if (mode == GAME_MODE_EDIT) {
         // coop-scenejoin: or a room's scene under way (its script's state is in the set: the VM's pinned arena), so her
@@ -1818,6 +1856,7 @@ std::string AreaNotice(bool entered, int mover) {
            " the area";
 }
 
+std::string g_adopt_note; // coop-pt1111o: the host's settings this joiner took, for the joined notice
 bool g_last_close_apart = false; // the link last went down by a split (its next coming up is a merge)
 
 void SetNotice(const std::string &text) {
@@ -2125,6 +2164,7 @@ bool Begin(const NetplayHello &mine) {
     if (!refusal.empty() && NetplayHelloSettingsOnly(mine, g_link.peer_hello)) {
         if (g_link.player == 2) {
             NetplayHelloAdopt(g_link.peer_hello);
+            g_adopt_note = NetplayHelloAdoptNote(mine, g_link.peer_hello); // coop-pt1111o: said in the joined notice
             std::fprintf(stderr, "netplay: took the host's settings (%s)\n", refusal.c_str());
         } else {
             std::fprintf(stderr, "netplay: player 2 takes this copy's settings (%s)\n", refusal.c_str());
@@ -2439,11 +2479,14 @@ bool Begin(const NetplayHello &mine) {
                  alike ? "" : g_link.source == 1 ? "; the copies start apart, so the host sends its state first" : "; the copies start apart, so player 2 sends its state first");
     CatchReceiverTick(); // coop-joinbudget: the copy that takes the state reads it beside its game thread from here
     std::snprintf(g_link.status, sizeof g_link.status, "Linked: player %d", g_link.player);
+    // coop-pt1111o: the menus settings this game plays by (one per game: the host's), on both copies, for the tests and the log reader
+    std::fprintf(stderr, "netplay: menus in effect: game.coop_menus %s, game.coop_menu_panel %s\n", coop::MenusSetting() ? "on" : "off", coop::MenuPanelSetting() ? "on" : "off");
     if (g_last_close_apart) { // coop-uinotice: a merge
         // the arriver: player 1 when player 2 stayed (source 2), player 2 when he did (3); the host's state (1) says neither
         SetNotice(AreaNotice(true, g_merge_word == 2 ? 1 : g_merge_word == 3 ? 2 : 0));
     } else {
-        SetNotice(g_link.player == 1 ? PeerName() + " has joined" : "Joined " + PeerName());
+        SetNotice(g_link.player == 1 ? PeerName() + " has joined" : "Joined " + PeerName() + (g_adopt_note.empty() ? "" : ". The host's settings are used: " + g_adopt_note));
+        g_adopt_note.clear();
     }
     g_last_close_apart = false;
     return true;
@@ -6227,11 +6270,63 @@ void TownCameraPartPut(const unsigned char *data, std::size_t size) {
     }
 }
 
+} // namespace
+namespace dc::quest {
+std::string SaveJson();                 // quest/framework.cpp (coop-pt1111e: the quests' progress, carried)
+bool        LoadJson(std::string_view json);
+void        QuestHostSetup();           // quest/host.cpp
+} // namespace dc::quest
+namespace {
+// The quests' progress as text, the quests registered first: the host registers them at a game's start or load or a copy's first
+// talk, and a copy without them wrote its saved progress alone (no quest at its fresh stage), so two copies holding the same
+// progress would read apart.
+std::string QuestsText() {
+    dc::quest::QuestHostSetup();
+    return dc::quest::SaveJson();
+}
+
+// coop-pt1111e (coordinator, 11-11, after Jep's playtest item 6): the quests' progress (quest/framework.cpp: each quest's stage and
+// variables, saved beside the save as its own JSON) is in no state set and was read by no checksum: a quest moved on one copy alone
+// (a talk's choice that ran on one copy, a resync) parted the copies with no OUT OF SYNC to say so. Its text (SaveJson) is the part:
+// hashed into the checksum, carried with a resync (LoadJson on every copy) and, with the state set, by its extra (SnapExtras).
+// DC_NETPLAY_MUTATE=quests_unsummed (twin): not read by the checksum, as before.
+std::uint32_t QuestsPartHash() {
+    // (the moved progress alone: a quest at its first stage with no variables is as no progress, whether the copy registered it or not)
+    std::string text = CoopWorldsQuestsMoved();
+
+    // (the twin reads the progress as it first was, blind to every later move: a state file's saved checksum still matches)
+    if (NetplayMutated("quests_unsummed")) {
+        static const std::string first = text;
+        text = first;
+    }
+    std::uint32_t     hash = 2166136261u;
+
+    for (unsigned char c : text) {
+        hash = (hash ^ c) * 16777619u;
+    }
+    return hash;
+}
+void QuestsPartTake(std::vector<unsigned char> &out) {
+    const std::string text = QuestsText();
+    out.insert(out.end(), text.begin(), text.end());
+}
+void QuestsPartPut(const unsigned char *data, std::size_t size) {
+    const std::string host(reinterpret_cast<const char *>(data), size);
+
+    if (host != QuestsText()) {
+        std::fprintf(stderr, "netplay: carried: the quests' progress differs here: the host's taken\n");
+    }
+    if (!dc::quest::LoadJson(host)) {
+        std::fprintf(stderr, "netplay: carried: the host's quests' progress does not read (%zu bytes)\n", size);
+    }
+}
+
 const CarriedPart kCarried[] = {
     {"settings", SettingsPartHash, SettingsPartTake, SettingsPartPut},
     {"place", PlacePartHash, PlacePartTake, PlacePartPut},
     {"toan step", ToanStepPartHash, ToanStepPartTake, ToanStepPartPut},
     {"town camera", TownCameraPartHash, TownCameraPartTake, TownCameraPartPut},
+    {"quests", QuestsPartHash, QuestsPartTake, QuestsPartPut}, // coop-pt1111e
 };
 
 std::uint32_t CarriedHash() {
@@ -7048,6 +7143,18 @@ void TestMenuPresses() {
         }
         start = CoopTownDoorPromptArmed(); // (N is added to since below: a start before tick 0 would read as none)
         std::fprintf(stderr, "netplay: test: menu presses count from tick %lld, at %d there (the cave door test armed)\n", (long long) start, from_door);
+    }
+    // coop-cand1111fix: DC_COOP_MENUPRESS_FROM_DOOR_READY=P: the clock from the link tick player P stood at Norune's opened cave door
+    // with its event ready (CaveDoorSquares' own test for P's Square), the state x-cave-square's Square depends on, not a count of
+    // ticks after the load. Both copies read it alike (the walker is Toan on every copy, her partner's pose is the shared one).
+    static const int from_door_ready = TestEnvInt("DC_COOP_MENUPRESS_FROM_DOOR_READY", 0);
+
+    if (start < 0 && from_door_ready > 0) {
+        if (CoopTownCaveDoorReadyTick(from_door_ready) < 0) {
+            return;
+        }
+        start = CoopTownCaveDoorReadyTick(from_door_ready);
+        std::fprintf(stderr, "netplay: test: menu presses count from tick %lld (player %d at the opened cave door, its event ready)\n", (long long) start, from_door_ready);
     }
     // coop-pt1106-lockup: DC_COOP_MENUPRESS_FROM_LOCKSTEP=1: the clock from the lockstep, a menu still up (free play is its close).
     static const bool from_lockstep = TestEnvOn("DC_COOP_MENUPRESS_FROM_LOCKSTEP");
@@ -10383,6 +10490,8 @@ constexpr std::uint64_t kExtraHerGeorama = 0xC0000006u; // coop-stage4 r4: her o
 constexpr std::uint64_t kExtraSwapDefer = 0xC0000007u;  // coop-stage4 4e part 2: her event's due swap (CoopTownSwapDeferBytes)
 constexpr std::uint64_t kExtraTalks = 0xC0000008u;      // opt8: every player's talk slot (CoopTownTalksBytes)
 constexpr std::uint64_t kExtraScriptMenu = 0xC0000009u; // coop-small2 (9 in train 56: opt8 has 8): a script's menu open, carried local (CoopScriptMenuSyncBytes)
+constexpr std::uint64_t kExtraQuests = 0xC000000Au;     // coop-pt1111e: the quests' progress (QuestsPartTake's text, its length first)
+constexpr std::uint64_t kExtraDialog = 0xC000000Bu;     // coop-pt1111e: the dialog framework's sessions and windows (SnapDialogFill)
 
 // coop-splashmove (Jep's 2026-10-26 case: Xiao walking about Norune while his copy showed its splash): the pads the link
 // routed on the tick before the state set's. Her town step reads the routed pads at the frame's start, before this tick's
@@ -10395,8 +10504,118 @@ struct SnapPads {
     InputPadState routed[2];
 } g_snap_pads;
 
+// coop-pt1111e: the quests' progress with the state set (a merge's take, a state file): its text, its length in the first 4 bytes.
+// Filled from this copy's own each time the list is made, so a set without it (an older state file) puts back what this copy had.
+// DC_NETPLAY_MUTATE=snap_quests_lost (twin, x-quest-apart -AtTake): not read back after the apply (the taker keeps its own).
+unsigned char g_snap_quests[16384];
+
+void SnapQuestsFill() {
+    std::vector<unsigned char> text;
+    QuestsPartTake(text);
+    std::uint32_t size = text.size() + 4 <= sizeof g_snap_quests ? (std::uint32_t) text.size() : 0u;
+
+    if (size == 0 && !text.empty()) {
+        std::fprintf(stderr, "catchup: the quests' progress (%zu bytes) is more than the set's room for it (%zu): not carried\n", text.size(),
+                     sizeof g_snap_quests - 4);
+    }
+    std::memset(g_snap_quests, 0, sizeof g_snap_quests);
+    std::memcpy(g_snap_quests, &size, 4);
+    std::memcpy(g_snap_quests + 4, text.data(), size);
+}
+
+void SnapQuestsApply() {
+    std::uint32_t size = 0;
+
+    std::memcpy(&size, g_snap_quests, 4);
+    if (size == 0 || size + 4 > sizeof g_snap_quests || NetplayMutated("snap_quests_lost")) {
+        return;
+    }
+    QuestsPartPut(g_snap_quests + 4, size);
+    std::fprintf(stderr, "catchup: the state set carries the quests' progress (%u bytes)\n", size);
+}
+
+// coop-pt1111e: the dialog framework's sessions (the open one and each talker's slot) and their windows with the state set, as data
+// (dialog::WriteSessions, DialogNpcWriteWindows): the sessions' size and bytes, then the windows' size and bytes. Filled from this
+// copy's own each time the list is made, as the quests'. DC_NETPLAY_MUTATE=dialog_session_not_carried (twin): not read back after
+// the apply (the taker keeps its own, as before: her talk's dialog open with no session).
+unsigned char g_snap_dialog[65536];
+
+void SnapDialogFill() {
+    std::vector<uint8_t> sessions;
+    std::string          windows;
+    std::string          shop; // (coop-pt1111e: a quest's shop open, custom_shop's g_open, mid-visit)
+
+    dc::dialog::WriteSessions(sessions);
+    dc::dialog::DialogNpcWriteWindows(windows);
+    dc::quest::CustomShopWrite(shop);
+    std::memset(g_snap_dialog, 0, sizeof g_snap_dialog);
+    if (12 + sessions.size() + windows.size() + shop.size() > sizeof g_snap_dialog) {
+        std::fprintf(stderr, "catchup: the dialog sessions (%zu + %zu + %zu bytes) are more than the set's room for them: not carried\n", sessions.size(),
+                     windows.size(), shop.size());
+        return;
+    }
+    std::size_t at = 0;
+    for (const std::string_view part : {std::string_view(reinterpret_cast<const char *>(sessions.data()), sessions.size()), std::string_view(windows),
+                                        std::string_view(shop)}) {
+        const std::uint32_t size = (std::uint32_t) part.size();
+
+        std::memcpy(g_snap_dialog + at, &size, 4);
+        std::memcpy(g_snap_dialog + at + 4, part.data(), part.size());
+        at += 4 + part.size();
+    }
+}
+
+void SnapDialogApply() {
+    std::string_view parts[3];
+    std::size_t      at = 0;
+
+    for (std::string_view &part : parts) {
+        std::uint32_t size = 0;
+
+        if (at + 4 > sizeof g_snap_dialog) {
+            return;
+        }
+        std::memcpy(&size, g_snap_dialog + at, 4);
+        if (at + 4 + (std::size_t) size > sizeof g_snap_dialog) {
+            return;
+        }
+        part = std::string_view(reinterpret_cast<const char *>(g_snap_dialog + at + 4), size);
+        at += 4 + size;
+    }
+    if (parts[0].empty() || NetplayMutated("dialog_session_not_carried")) {
+        return;
+    }
+    std::string why;
+
+    if (!dc::dialog::ReadSessions(reinterpret_cast<const uint8_t *>(parts[0].data()), parts[0].size(), why)) {
+        std::fprintf(stderr, "catchup: LINT: the state set's dialog sessions do not read here (%s): closed\n", why.c_str());
+        return;
+    }
+    if (!dc::dialog::DialogNpcReadWindows(parts[1].data(), parts[1].size())) {
+        std::fprintf(stderr, "catchup: the state set's dialog windows do not read here\n");
+        return;
+    }
+    if (dc::dialog::IsSessionActive()) {
+        std::fprintf(stderr, "catchup: the state set carries the open dialog session (%zu bytes, its choices bound again here)\n", parts[0].size());
+    }
+    // coop-pt1111e: a quest's shop open as the set was taken (its goods, keeper, lines and the prices it laid over), so its close
+    // puts retail's prices back here too. DC_NETPLAY_MUTATE=quest_shop_not_carried (twin): not read back (the taker has none).
+    if (!NetplayMutated("quest_shop_not_carried")) {
+        if (!dc::quest::CustomShopRead(parts[2])) {
+            std::fprintf(stderr, "catchup: the state set's quest shop does not read here\n");
+        } else if (!parts[2].empty()) {
+            std::fprintf(stderr, "catchup: the state set carries the open quest shop (%zu bytes)\n", parts[2].size());
+        }
+    }
+}
+
 std::vector<SnapshotExtra> SnapExtras() {
     std::vector<SnapshotExtra> extras;
+
+    SnapQuestsFill(); // coop-pt1111e
+    extras.push_back({kExtraQuests, g_snap_quests, sizeof g_snap_quests});
+    SnapDialogFill(); // coop-pt1111e
+    extras.push_back({kExtraDialog, g_snap_dialog, sizeof g_snap_dialog});
     CCameraFollow             *camera = coop::CoopCameraObject();
 
     extras.push_back({kExtraPartnerCamera, reinterpret_cast<unsigned char *>(camera), sizeof *camera});
@@ -10461,11 +10680,31 @@ bool StateSetApplyCore(const std::vector<unsigned char> &unpacked, std::string &
 
     coop::MenuWorkCensus(&menu_held, &menu_total, &menu_before);
     CoopScriptMenuSyncClear(); // coop-small2: a set without a script's menu open leaves this copy's as it is
+    // coop-pt1111m: DC_COOP_MUTATE=menusoff_menu_out (twin): a link's apply leaves this copy's own menu working globals, as since e57647e7
+    std::vector<unsigned char> menu_own;
+    const bool                 menu_kept = !g_state_file_applying && coop::MenuWorkInSet() && coop::MenuWorkKeptMutated();
+
+    if (menu_kept) {
+        coop::MenuWorkSave(menu_own);
+    }
     const bool applied = SnapshotApplyBytes(unpacked.data(), unpacked.size(), why, regions, bytes, SnapExtras());
+    if (menu_kept) {
+        coop::MenuWorkRestore(menu_own);
+    }
     coop::MenuWorkCensus(&menu_held, &menu_total, &menu_after);
+    // coop-pt1111m (x-town-stayermenu-*-menusoff reads it against the sender's take line): with the menus in the lockstep the taker
+    // steps the sender's menus from here, on the sender's menu state
+    if (!g_state_file_applying && coop::MenuWorkInSet()) {
+        std::fprintf(stderr, "catchup: the menus are in the lockstep (game.coop_menus off): the menu's working globals after the apply %08x%s\n", coop::MenuWorkHash(),
+                     menu_kept ? " (test: this copy's own kept)" : "");
+    }
     // (x-town-stayermenu reads it: his menu open as she takes his set, her menu's globals stay hers)
     std::fprintf(stderr, "catchup: the state set holds %zu of the menu's %zu working globals; this copy's others across the apply: %08x before, %08x after\n",
                  menu_held, menu_total, menu_before, menu_after);
+    if (applied) {
+        SnapQuestsApply(); // coop-pt1111e
+        SnapDialogApply();
+    }
     if (applied && NetplayMutated("snap_talks_lost")) { // opt8 (twin, SnapExtras)
         std::size_t talks_size = 0;
         std::memset(CoopTownTalksBytes(&talks_size), 0, talks_size);
@@ -10723,6 +10962,7 @@ void SnapFrameStart() {
         CoopP2TownPauseTake(); // coop-mergecam: her pause with it
         CoopGeoramaSyncTake(); // coop-stage4 r4: her own Georama with it
         CoopScriptMenuSyncTake(); // coop-small2: a script's menu open, carried local
+        CoopWorldsTestQuestAtTake(); // coop-pt1111e (a test hook)
         if (TestEnv("DC_NETPLAY_TEST_TICK_LINE") != nullptr) { // coop-houseexit (tests)
             std::fprintf(stderr, "tickline: the state set's take at tick %lld\n", (long long) g_link.tick);
             CoopTownCamTestLine(-1);
@@ -10741,6 +10981,9 @@ void SnapFrameStart() {
         if (mode == GAME_MODE_DUNGEON && BtEventMode != 0) { // coop-joinfix: the join goes into his scene (37a)
             std::fprintf(stderr, "catchup: the state set is taken mid-scene (script %d, task %d, tick %lld)\n", (int) BtEventInfo.running_script_no,
                          (int) gameTask, (long long) g_link.tick);
+        }
+        if (coop::MenuWorkInSet()) { // coop-pt1111m (the rows' line, against the taker's after its apply)
+            std::fprintf(stderr, "catchup: the menus are in the lockstep (game.coop_menus off): the menu's working globals at the take %08x\n", coop::MenuWorkHash());
         }
         if (SnapshotTakeBytes(g_snap.bytes, why, SnapExtras())) {
             g_snap.tick = g_link.tick;
@@ -11870,6 +12113,15 @@ void StateFileFrameStart() {
         FloorTitleOn();
         NetplayTestSeriesMark();
         std::fprintf(stderr, "floor-title: test: started on the fixture's load\n");
+    }
+    // coop-pt1111h (x-floor-join-late -Zone): DC_COOP_TEST_LIMIT_ZONE_LOADED=Z puts the loaded floor in limited zone Z and raises its
+    // message (CDngMessageMan::LimmitZone, as the floor's start does), on the load itself: in the state a join's snapshot takes
+    // (coop_combat's DC_COOP_TEST_LIMIT_ZONE waits for the partner's step, which a host alone only has once linked).
+    if (static const int zone = TestEnvInt("DC_COOP_TEST_LIMIT_ZONE_LOADED", -1); g_state_file_loaded && zone >= 0 && UserStatus != nullptr) {
+        UserStatus->res_limit_zone_current = zone;
+        DngMessMan.LimmitZone(); // present: everyone's (the floor's own rule message, as its start raises it: FloorRuleMessage, owner 0)
+        std::fprintf(stderr, "coop-test: limited zone %d: the dungeon's message %d raised (timer %d) on the load, link tick %lld\n", zone,
+                     (int) DngMessMan.message, (int) DngMessMan.timer, (long long) g_link.tick);
     }
     load_packed.clear();
     load_packed.shrink_to_fit();
@@ -13042,22 +13294,53 @@ int NetplayFloorSceneFlag(int map, int floor) {
 
 // coop-b4story (Jep's LAN pack 7 playtest, 2026-11-01: "P2 still ran down the stairs 2 times on B4 when joining late. I think B4
 // was supposed to still be tagged a story floor since it had a cinematic and miniboss on it"): the floors whose story plays
-// mid-floor, not at arrival, so neither retail's jump list nor kFloorScenes names them. Divine Beast Cave's floor 4 (d01inter2):
-// its skeleton scene (program 102, e28c01d/e28e03a) and its miniboss (program 110, e28eb), whose win drops three boxes and sets
-// game flag 102. Never marked seen by
-// MarkFloorScenesSeen: a join or a debug start onto the floor would skip its miniboss.
-constexpr FloorScene kFloorStories[] = {{0, 3, 102}};
+// after the arrival, not at it, so neither retail's jump list nor kFloorScenes names them. Never marked seen by
+// MarkFloorScenesSeen: a join or a debug start onto the floor would skip them.
+// pt1111c (Jep's 11-11 playtest, item 18: "Dran's Cave B8: a cutscene plays as soon as you step onto the floor ... but the floor
+// is not tagged"): the rule. A floor is a story floor while any game flag one of ITS OWN events sets is unset, whichever way
+// the event starts: the floor start's own scene (program 100, kFloorScenes), an event marker of the floor's map that fires as
+// the player walks into it (a PT_MARKER of dun\<map>.cfg whose program writes a story flag), or a monster's death
+// (_SET_MONSTOR_ID's script). The audit (debug\notes\floor-story-audit: audit.py over data\dun and its README, 2026-11-11: every
+// map cfg's markers, every program of the seven event.stb that writes a game flag, and program 100's _SET_DUNGEON_MAP per
+// floor) found these besides kFloorScenes and the bosses (kGatherBoss):
+// - Divine Beast Cave floor 4 (d01inter2): marker event02 (program 102, radius 40) starts the skeleton scene, its miniboss's
+//   win (program 110) sets 102.
+// - Divine Beast Cave floor 8 (d01inter): marker event00_2 (program 300, radius 50 around the entrance: it fires on the first
+//   step after the entrance, Jep's case) plays Seda's scene and duel; it sets 37 as the scene is seen and 25 as the duel is
+//   won, and the floor's start switches the marker off only once 25 is set (program 100: _SGET_GAME_FLAG 25 ->
+//   _SET_EVENT_SW 300, 0). So 25, not 37, is when the story is over (a lost duel plays it again).
+// - Shipwreck floor 9 (d03inter): after its arrival scene (121) its three monsters' deaths each play one (programs 197, 196,
+//   195: 122, 123, 124).
+// - Sun and Moon Temple floor 9 (d04inter): after its arrival scene (132) two monsters' deaths (programs 197, 196: 133, 134).
+// Not tagged: Wise Owl Forest floor 9's event10_2 (program 300, flag 48) needs an item used on it, as a key does (no walk-in);
+// Moon Sea floor 8 (d05inter), Gallery of Time and Demon Shaft have no story but their arrival or boss; Shipwreck floor 17's
+// gatekey_3 (400, flag 28) is a key. DC_NETPLAY_MUTATE=midfloor_story_off (twin): none of these; walkin_story_off (twin): all
+// but floor 8's walk-in.
+struct FloorStory {
+    int  map, floor, flag;
+    bool walk_in; // started by walking into its marker (the pt1111c twin's)
+};
+constexpr FloorStory kFloorStories[] = {{0, 3, 102, false}, {0, 7, 25, true},   {2, 8, 122, false},
+                                        {2, 8, 123, false}, {2, 8, 124, false}, {3, 8, 133, false}, {3, 8, 134, false}};
 
 int NetplayFloorStoryFlag(int map, int floor) {
-    if (const int flag = NetplayFloorSceneFlag(map, floor); flag >= 0) {
-        return flag;
+    const int scene = NetplayFloorSceneFlag(map, floor);
+    int       first = scene;
+
+    // The first of the floor's story flags still unset (its opening scene's first), else its first one.
+    if (scene >= 0 && (SaveData == nullptr || SaveData->GetGameFlag(scene) == 0)) {
+        return scene;
     }
-    for (const FloorScene &story : kFloorStories) {
-        if (story.map == map && story.floor == floor && !NetplayMutated("midfloor_story_off")) {
+    for (const FloorStory &story : kFloorStories) {
+        if (story.map != map || story.floor != floor || NetplayMutated("midfloor_story_off") || (story.walk_in && NetplayMutated("walkin_story_off"))) {
+            continue;
+        }
+        if (SaveData == nullptr || SaveData->GetGameFlag(story.flag) == 0) {
             return story.flag;
         }
+        first = first >= 0 ? first : story.flag;
     }
-    return -1;
+    return first;
 }
 
 void NetplayFloorStarted() {
@@ -13224,6 +13507,9 @@ bool ArrivalHoldNow() {
 
 // coop-replayspeed: how long each arrival's black lasted, and how much of it came after the link was up (her state set, its
 // apply, the replay): the time the catch-up adds to the arriving copy's transition.
+// coop-pt1111h: the arrival's black as the last presented frame had it (NetplayArrivalHold), read only.
+static bool g_arrival_black = false;
+
 bool NetplayArrivalHold() {
     static std::int64_t began = -1, linked = -1;
     static double       log_ms_from = 0.0; // coop-small1b: the game thread's log writes at the black's start (QaLogTotals)
@@ -13234,7 +13520,12 @@ bool NetplayArrivalHold() {
         began = NowMs();
         QaLogTotals(&log_ms_from, &log_lines_from);
     }
-    if (hold && linked < 0 && g_link.up) {
+    // coop-pt1111l: DC_NETPLAY_MUTATE=black_polled_link (twin, x-town-stayermenu-herevent~polled) reads the link as these calls
+    // see it, as before fcda4155; a test copy that draws nothing (DC_QA_NO_DRAW) made none of them in the black then, so the
+    // link went unseen ("catching up" 0 ms, no phases line). efa20fb4 (coop-pilot) has its every tick ask the hold as a drawn
+    // copy does, so the polled link now came within a tick of the stamped one and the twin passed. Under the twin a no-draw
+    // copy's calls see no link, as before that: it fails on its own check again.
+    if (hold && linked < 0 && g_link.up && !(NetplayMutated("black_polled_link") && NetplayTestNoDraw())) {
         linked = NowMs();
     }
     if (!hold && began >= 0) {
@@ -13266,7 +13557,12 @@ bool NetplayArrivalHold() {
         }
         began = linked = -1;
     }
+    g_arrival_black = hold; // coop-pt1111h
     return hold;
+}
+
+bool NetplayArrivalBlack() {
+    return g_arrival_black;
 }
 
 NetplayCostTotals NetplayCosts() {
@@ -14260,6 +14556,45 @@ void OnlineSessionRestore(dc::platform::Config &config, const dc::platform::Conf
     config.netplay_keyboard = saved.netplay_keyboard;
 }
 
+// coop-pt1111p: this copy's run-only settings in one session (ConfigSetSession keeps one): the title's online ones (MenuOnline) and,
+// on a joiner, the host's it took (NetplayHelloAdopt). Each kept out of config.json by its restore.
+namespace {
+bool g_adopt_session = false;
+
+void RunSession(dc::platform::Config &config) {
+    if (g_menu_online) {
+        OnlineSession(config);
+    }
+    // (the adopted keys need no apply: the running settings hold the host's from the adopt's change on, and a later change of
+    // them is this run's too)
+}
+
+void RunSessionRestore(dc::platform::Config &config, const dc::platform::Config &saved) {
+    if (g_menu_online) {
+        OnlineSessionRestore(config, saved);
+    }
+    if (g_adopt_session) {
+        NetplayHelloAdoptedKeys(config, saved);
+    }
+}
+
+void RunSessionSet() {
+    const bool on = g_menu_online || g_adopt_session;
+
+    ConfigSetSession(on ? RunSession : nullptr, on ? RunSessionRestore : nullptr);
+}
+} // namespace
+
+void NetplayAdoptSession(bool on) {
+    if (NetplayMutated("adopt_saved") || on == g_adopt_session) {
+        return;
+    }
+    g_adopt_session = on;
+    RunSessionSet();
+    std::fprintf(stderr, on ? "netplay: the host's settings are this run's (config.json keeps this copy's own)\n"
+                            : "netplay: this copy's own settings again (the host's were this run's)\n");
+}
+
 // A plain copy (no online setting) goes online for the title's Multi-player, or back to single player. Only at the
 // title: nothing has linked, so the link may start again from there.
 namespace {
@@ -14273,7 +14608,7 @@ void MenuOnline(bool on) {
     g_role = 0;
     g_join_picked = false;
     if (!NetplayMutated("no_session")) {
-        ConfigSetSession(on ? OnlineSession : nullptr, on ? OnlineSessionRestore : nullptr);
+        RunSessionSet(); // (coop-pt1111p: with the adopted keys, when a joiner's)
     }
     if (on) {
         // As the LAN pack's launcher sets before the game starts: Xbox pads over raw HID (SDL applies these as they change).
@@ -15262,6 +15597,8 @@ bool NetplayTakeQuitToTitle() {
     g_host_via = 0;
     g_handoffs.clear();
     MenuOnline(false); // (a plain copy that went online at its title goes back to single player, as it booted)
+    coop::MenusAdoptEnd(); // coop-pt1111o: this copy's own menus settings again
+    NetplayAdoptSession(false); // coop-pt1111p: and its own of the rest the host's had been
     CoopResetForSession();   // every co-op module's own state as a fresh session starts it
     CoopWorldsSessionEnded(); // the pair's apart and merge state gone
     std::fprintf(stderr, "netplay: quit: this copy (player %d) left the session at link tick %lld (%s, link was %s): link closed, back to the title\n",

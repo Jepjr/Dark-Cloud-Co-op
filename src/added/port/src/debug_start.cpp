@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -85,6 +86,24 @@ int DebugStartFloors(int dungeon) {
 bool DebugStartMutated(const char *what) {
     static const std::string value = std::string(",") + TestEnvOr("DC_DEBUG_START_MUTATE", "") + ",";
     return value.find(std::string(",") + what + ",") != std::string::npos;
+}
+
+// pt1111c test hook (DC_DEBUG_START_SEEN=F[/F...], the dun0-f8-solo fixture): game flags a test start marks set too, besides
+// its scenes (the cave's floor 8 walk-in story, 25: unset, its marker would start Seda's scene as the fixture is made).
+int g_jump_pending = -1; // pt1111c: the floor a test start goes to, until a join's resync reads it
+
+void DebugStartSeenFlags(int floor) {
+    g_jump_pending = floor;
+    const char *list = TestEnvOr("DC_DEBUG_START_SEEN", "");
+    for (const char *at = list; *at != 0;) {
+        const int flag = std::atoi(at);
+        if (flag > 0 && SaveData != nullptr) {
+            SaveData->SetGameFlag(flag, 1);
+            std::fprintf(stderr, "debug start: game flag %d set (DC_DEBUG_START_SEEN)\n", flag);
+        }
+        const char *slash = std::strchr(at, '/');
+        at = slash != nullptr ? slash + 1 : at + std::strlen(at);
+    }
 }
 
 int DebugStartModeLoop() {
@@ -184,8 +203,14 @@ void DebugStartBeforeModeInit() {
     // The save's dungeon status, which UserStatus points at once the dungeon starts (a joiner coming from the
     // title has no UserStatus yet).
     const CUserStatus *status = reinterpret_cast<const CUserStatus *>(SaveData->GetDngStatus());
+    // pt1111c (the dun1-f9 fixture came onto Wise Owl Forest floor 1 where it jumped to floor 9): a join's resync can come
+    // before the jump's floor is entered (both copies' --jump, the resync at link tick 33, the floor's start later), and the
+    // save's floor read here was still the dungeon's first; dun0-f8 had won the same race by its timing. The floor this copy's
+    // own test start goes to is the one meant (both copies jump alike).
+    const int jumped = g_jump_pending;
+    g_jump_pending = -1;
     if (DebugMode != 0 && mode == GAME_MODE_DUNGEON && status->cur_floor >= 0) {
-        g_resync_floor = status->cur_floor;
+        g_resync_floor = std::max<int>(status->cur_floor, jumped);
         std::fprintf(stderr, "debug start: after the resync, back to floor %d\n", g_resync_floor + 1);
     }
 }

@@ -2,11 +2,14 @@
 target port/include/game/texture.hpp
 base port/include/game/texture.hpp
 from e67ccdac5b12d70ae86baad075287ad98c2ef160
-to caee12946f62d17a5e301fce637e105fd4637f54
-@@ -109,0 +110,24
+to 4144d76044df9c4e13dabe8c80eda1742b5dd012
+@@ -109,0 +110,27
 +// Jep (co-op), coop-pt1108f (Jep's 11-09 playtest): retail's 72 blocks, then six only player 2's menu engine uses (74 to 79). Her menu sat in 44 to 49, and a town
 +// script's _LOAD_TEXTURE family deletes and loads 45 to 49, so an event on her walk took her menu's pictures. 73 is never a block: the Z sheet's mark.
-+constexpr int kTextureBlockCount = 80;
++// coop-eventslots (Jep's 11-11 item 1): 80 to 127, eight a player (six players), each player's own event's and fishing's blocks
++// (the fish, the fish caught, the bait, the event's 45 to 49), so two players' events and fishing never take each other's pictures
++// (port/src/coop/coop_eventslots.cpp CoopEventTexBlock).
++constexpr int kTextureBlockCount = 128;
 +constexpr bool TextureBlockValid(int block) {
 +    return block >= 0 && block < kTextureBlockCount && block != 73;
 +}
@@ -28,6 +31,6 @@ to caee12946f62d17a5e301fce637e105fd4637f54
 +void                     PortTextureRebuildBefore();
 +PortTextureRebuildReport PortTextureRebuildAfterApply();
 +
-@@ -122,1 +146,1
+@@ -122,1 +149,1
 - 5e0852c3da337b51
 +    CTextureBlock     blocks[kTextureBlockCount];    /**< Managed texture blocks. */

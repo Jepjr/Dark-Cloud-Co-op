@@ -30,6 +30,10 @@ class MessageBy {
 // sysmes.cpp: ItemGetMes names its item before it sets the message; SetSystemMes tags the message it set.
 void SystemMesItem(int item);
 void SystemMesSet(int message_no);
+// coop-eventslots: the tag as a range of each player's own message slot, its reset, the next message's owner (0: the party's).
+void MessageTagRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context);
+void MessageTagClear();
+int  MessageOwnerNext();
 // SystemMesDraw: whether this copy draws the system message.
 bool SystemMesShown();
 // coop-closetitem: SystemMesStep: whether the player a system message waiting for a button is for pressed Cross this tick
@@ -43,11 +47,17 @@ int SystemMesFor();
 // 2026-10-27 and 10-31). Not a key item: nothing (the message is the opener's). Presentation only: this copy's message slot.
 // DC_COOP_MUTATE=keymes_opener_only (twin): never shown on the others' screens.
 void OthersKeyItemMes(int player, int item, int volume);
+// coop-pt1111b (Jep's 11-11 choice B): on a copy other than the opener's, the opener's Atla find as this copy's own notice, for an
+// item drop's time, gone by itself (never waiting for the opener's Cross). DC_COOP_MUTATE=atlanotice_waits (twin): the opener's
+// message waiting for the opener's Cross there, as before.
+void OthersAtlaNotice(int opener, int map_no, int atla);
 
 // Coop code that set DngMessMan's message for player 2 (her weapon's wear, break, build-up) says so after it.
 void DngMesBy(int player);
 // The dungeon's draw: whether this copy draws DngMessMan's message.
 bool DngMesShown();
+// coop-pt1111h: the name the drawn message inserts (this copy's own floor notice's, else DngMessMan's).
+int  DngMesInsert1();
 bool DngMesEnabledHere(); // coop-pt1109c: the game's DngMessMan.enabled as this copy's screen has it
 // coop-p2hurt: the message the dungeon's draw shows (her own thirst's on her copy, in place of none or his), and her thirst's
 // messages stepped each tick from her member's water (StepThirst), as CDngMessageMan::SetStatus_Dry steps his.

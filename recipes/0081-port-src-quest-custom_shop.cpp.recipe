@@ -1,0 +1,119 @@
+# port/src/quest/custom_shop.cpp from Chronicle's port/src/quest/custom_shop.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/custom_shop.cpp
+base port/src/quest/custom_shop.cpp
+from 3c18a59004a813904fed4ca766feb988856d0ac2
+to 02f84f14fd200cc5f4a4b5ead7248af49488ef3f
+@@ -194,0 +195,113
++// Jep (co-op, coop-pt1111e): the open shop as data (custom_shop.hpp).
++namespace {
++void PutInt(std::string &out, std::int64_t value) {
++    for (int i = 0; i < 8; i++) {
++        out.push_back(static_cast<char>(static_cast<std::uint64_t>(value) >> (8 * i)));
++    }
++}
++void PutText(std::string &out, const std::string &text) {
++    PutInt(out, static_cast<std::int64_t>(text.size()));
++    out += text;
++}
++struct Cursor {
++    std::string_view data;
++    std::size_t      at = 0;
++    bool             ok = true;
++    std::int64_t     Int() {
++        if (at + 8 > data.size()) {
++            ok = false;
++            return 0;
++        }
++        std::uint64_t value = 0;
++        for (int i = 0; i < 8; i++) {
++            value |= static_cast<std::uint64_t>(static_cast<unsigned char>(data[at + i])) << (8 * i);
++        }
++        at += 8;
++        return static_cast<std::int64_t>(value);
++    }
++    std::string Text() {
++        const std::int64_t size = Int();
++        if (!ok || size < 0 || at + static_cast<std::size_t>(size) > data.size()) {
++            ok = false;
++            return {};
++        }
++        std::string text(data.substr(at, static_cast<std::size_t>(size)));
++        at += static_cast<std::size_t>(size);
++        return text;
++    }
++};
++} // namespace
++
++void CustomShopWrite(std::string &out) {
++    if (!g_open) {
++        return;
++    }
++    const Open &open = *g_open;
++    PutInt(out, open.shop.look);
++    PutInt(out, static_cast<std::int64_t>(open.shop.goods.size()));
++    for (const auto &[item, price] : open.shop.goods) {
++        PutInt(out, item);
++        PutInt(out, price);
++    }
++    PutText(out, open.shop.keeper);
++    PutInt(out, static_cast<std::int64_t>(open.shop.lines.size()));
++    for (const auto &[line, text] : open.shop.lines) {
++        PutInt(out, static_cast<std::int64_t>(line));
++        PutText(out, text);
++    }
++    for (const s16 good : open.goods) {
++        PutInt(out, good);
++    }
++    PutInt(out, static_cast<std::int64_t>(open.prices.size()));
++    for (const auto &[item, price] : open.prices) {
++        PutInt(out, item);
++        PutInt(out, price);
++    }
++    PutText(out, open.keeper_image);
++}
++
++bool CustomShopRead(std::string_view data) {
++    if (data.empty()) {
++        if (g_open) {
+~191 136d886a71b52d7f|            |
++            g_open.reset(); // (the price table is the other copy's already)
++        }
++        return true;
++    }
++    Cursor c{data};
++    Open   open;
++    open.shop.look = static_cast<int>(c.Int());
++    const std::int64_t goods = c.Int();
++    for (std::int64_t i = 0; c.ok && i < goods && i < 256; i++) {
++        const int item = static_cast<int>(c.Int());
++        open.shop.goods.emplace_back(item, static_cast<int>(c.Int()));
++    }
++    open.shop.keeper = c.Text();
++    const std::int64_t lines = c.Int();
++    for (std::int64_t i = 0; c.ok && i < lines && i < 64; i++) {
++        const auto line = static_cast<CustomShopLine>(c.Int());
++        open.shop.lines[line] = c.Text();
++    }
++    for (s16 &good : open.goods) {
++        good = static_cast<s16>(c.Int());
++    }
++    const std::int64_t prices = c.Int();
++    for (std::int64_t i = 0; c.ok && i < prices && i < 256; i++) {
++        const int item = static_cast<int>(c.Int());
++        open.prices.emplace_back(item, static_cast<s16>(c.Int()));
++    }
++    open.keeper_image = c.Text();
++    if (!c.ok) {
++        return false;
++    }
+=169 2312b60bd5bc6b5c
++    for (const auto &[line, text] : open.shop.lines) {
++        for (const int number : LineNumbers(line, open.shop.look)) {
+=172 d6318358a83659a1
++        }
++    }
++    g_open = std::move(open);
++    ClsMesSetMessageOverlay(any_line_set ? &CommonMenuMes3 : nullptr, any_line_set ? g_open->lines.Data() : nullptr);
++    return true;
++}
++

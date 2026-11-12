@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <optional>
 
+#include "app/gameloop.hpp" // coop-pt1111m: the twins' stop (GameRequestStop)
 #include "battlemenu.hpp"
 #include "editloop.hpp"
 #include "edit.hpp"
@@ -37,6 +38,7 @@
 #include "coop/coop_camera.hpp" // DrawRng
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
+#include "coop/coop_actor.hpp" // coop-eventslots: kMaxPlayers
 #include "coop/coop_town.hpp"
 #include "coop/coop_townmenu.hpp"
 #include "coop/coop_worlds.hpp"
@@ -78,9 +80,41 @@ struct ScriptMenu {
     bool          made = false;   // its opening's frames done (retail's EdInitModeFinish answered, or the four counted)
     bool          stray_said = false; // coop-small2: a retail step on a copy that never opened it, said once
     bool          carried = false;    // coop-small2: brought by a merge's state set, before the link it came with is up
+    bool          apart = false;      // coop-pt1111m: opened apart (this copy alone in its world: its own player's, whatever index it records)
     CGamePad      pad{};          // the opener's copy: the menu's own pad (its menu mode and repeats never in the game's)
     InputPadState before{};
-} g_menu;
+};
+
+// coop-eventslots (Jep's 11-11 item 1: both players at the fishing board at once): one record a player, as each player's own
+// event (the town's live one, or a parked slot's) opens its menus; the running event's player picks it (CoopTownEventPadPlayer),
+// the end command its sender. Two players' menus are open at once, each made and stepped on its own opener's copy.
+// DC_COOP_MUTATE=scriptmenu_one_record (twin): one record for everyone, as before.
+ScriptMenu g_menus[coop::kMaxPlayers];
+
+ScriptMenu &MenuOf(int player) {
+    if (Mutated("scriptmenu_one_record") || player < 1 || player > coop::kMaxPlayers) {
+        player = 1;
+    }
+    return g_menus[player - 1];
+}
+
+ScriptMenu &CurrentMenu() {
+    ScriptMenu &mine = MenuOf(CoopTownEventPadPlayer());
+
+    // cand1111b: a menu a merge carried (CoopScriptMenuSyncApply) sits at its owner's record, while the taker's running event may
+    // name another player (its town event is the game's player's); with that one closed, the carried record is the one this copy's
+    // event waits on (else it stepped it as retail's: x-town-stayermenu-herscene). Carried ones only: two players' own menus open at
+    // once (coop-eventslots, x-eventslots-bothlog) each stay at their own player's.
+    if (!mine.on) {
+        for (ScriptMenu &other : g_menus) {
+            if (other.on && other.local && other.carried) {
+                return other;
+            }
+        }
+    }
+    return mine;
+}
+#define g_menu (CurrentMenu())
 
 bool OwnerHere() {
     return g_menu.local && NetplayLocalPlayer() == g_menu.owner;
@@ -123,16 +157,18 @@ const char *KindName(int kind) {
 
 // Every copy, the command's tick: the opener's menu ended with its result; the script takes it on this tick's step.
 void ApplyEnd(int player, const NetCommand &command, std::int64_t tick) {
-    if (!g_menu.on || !g_menu.local || g_menu.landed || player != g_menu.owner || command.a != g_menu.kind) {
+    ScriptMenu &menu = Mutated("scriptmenu_end_current") ? CurrentMenu() : MenuOf(player); // (twin: the record the pad player picks)
+
+    if (!menu.on || !menu.local || menu.landed || player != menu.owner || command.a != menu.kind) {
         std::fprintf(stderr, "coop-scriptmenu: player %d's script menu end (kind %d) at link tick %lld finds none waiting for it: ignored\n", player, (int) command.a,
                      (long long) tick);
         return;
     }
-    g_menu.landed = true;
-    g_menu.result = (int) (std::int32_t) command.c;
-    std::fprintf(stderr, "coop-scriptmenu: player %d's %s ends with %d on every copy at link tick %lld (%lld ticks open)\n", player, KindName(g_menu.kind),
-                 g_menu.result, (long long) tick, (long long) (tick - g_menu.opened));
-    if (g_menu.kind == ED_MENU_FISHING_EXCHANGE && SaveData != nullptr) {
+    menu.landed = true;
+    menu.result = (int) (std::int32_t) command.c;
+    std::fprintf(stderr, "coop-scriptmenu: player %d's %s ends with %d on every copy at link tick %lld (%lld ticks open)\n", player, KindName(menu.kind),
+                 menu.result, (long long) tick, (long long) (tick - menu.opened));
+    if (menu.kind == ED_MENU_FISHING_EXCHANGE && SaveData != nullptr) {
         std::fprintf(stderr, "coop-scriptmenu: the fishing points now %d\n", (int) SaveData->GetFishingPoint()); // (the rows' line, every copy)
     }
     std::fflush(stderr);
@@ -150,6 +186,7 @@ void CoopScriptMenuOpens(int kind) {
     g_menu.on = true;
     g_menu.kind = kind;
     g_menu.owner = CoopTownEventPadPlayer();
+    g_menu.apart = CoopWorldsApart();
     // (linked: together, or a catch-up's ticks both copies step alike; a room's scene too, where the town's menu test wants her pose)
     g_menu.local = (CoopWorldsLinkedTogether() || CoopTownMenuLinked()) && FullMenuLocalOn() && NetplayHasPlayer() && !Mutated("scriptmenu_lockstep");
     g_menu.opened = NetplayLinkTick();
@@ -194,6 +231,20 @@ int CoopScriptMenuStep() {
             g_menu.stray_said = true;
             std::fprintf(stderr, "coop-scriptmenu: a script's menu this copy never opened steps here in the lockstep (retail's) at link tick %lld\n", (long long) NetplayLinkTick());
             std::fflush(stderr);
+        }
+        // coop-pt1111m: the twins menusoff_menu_out and scriptmenu_apart_index leave this copy with no menu state of the opener's (their checks
+        // read that at the take and the apply, before this): stepping it would crash here (SearchItemIndexNo(this=nullptr), the bug they bring
+        // back), and a crash is never a twin's FAIL. Under them this copy stops instead, as its stop file would: nothing without the switches.
+        if (!g_menu.on && (MenuWorkKeptMutated() || Mutated("scriptmenu_apart_index"))) {
+            static bool said = false;
+
+            if (!said) {
+                said = true;
+                std::fprintf(stderr, "coop-scriptmenu: test: a script's menu this copy holds no state of would step here (the twin's crash): this copy stops\n");
+                std::fflush(stderr);
+            }
+            dc::app::GameRequestStop();
+            return 0;
         }
         EdDrawOffAll();
         return EdMenuMode();
@@ -284,7 +335,12 @@ void CoopScriptMenuOver() {
 }
 
 bool CoopScriptMenuOpenHere() {
-    return g_menu.on && (!g_menu.local || OwnerHere());
+    for (const ScriptMenu &menu : g_menus) { // coop-eventslots: any player's (this copy's own, or a retail one)
+        if (menu.on && (!menu.local || (NetplayLocalPlayer() == menu.owner))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // coop-small2 (Jep 11-09: a script's menu open at the merge is its opener's): a menu a script opened apart is retail's on its
@@ -312,19 +368,39 @@ void CoopScriptMenuRetailToLocal() {
     }
     const int here = NetplayLocalPlayer() != 0 ? NetplayLocalPlayer() : NetplayRole(); // (the merge's link not up yet: its role)
 
-    if (!g_menu.made || g_menu.owner != here || !FullMenuCarryOn() || Mutated("scriptmenu_lockstep")) {
-        std::fprintf(stderr, "coop-scriptmenu: player %d's %s stays retail's through the merge (%s)\n", g_menu.owner, KindName(g_menu.kind),
-                     !g_menu.made ? "still opening" : g_menu.owner != here ? "not this copy's player's" : "menus in the lockstep");
+    // coop-pt1111m: apart a copy records its play as player 1 (NetplayLocalPlayer: the solo host, so a catch-up replays it alike), so
+    // a menu her script opened apart named player 1 as its opener on player 2's copy: "not this copy's player's", it stayed retail's
+    // through the merge and the taker (his copy, which never opened it and holds no menu state: the menus' working globals are each
+    // copy's own) stepped it in the lockstep: SearchItemIndexNo(this=nullptr) <- EscapeDungeonMode, the crash pt1111l found with the
+    // menus off, here on default settings (x-town-stayermenu-herscene). A menu opened apart is this copy's own player's, whatever its
+    // index then. DC_COOP_MUTATE=scriptmenu_apart_index (twin): the index it recorded, as before.
+    ScriptMenu *menu = &g_menu;
+
+    if (menu->apart && menu->owner != here && here > 0 && !Mutated("scriptmenu_apart_index")) {
+        std::fprintf(stderr, "coop-scriptmenu: %s opened apart on this copy (recorded as player %d's) is player %d's\n", KindName(menu->kind), menu->owner, here);
+        menu->owner = here;
+        // cand1111b (coop-eventslots' record a player beside coop-pt1111m's owner): the record goes to its owner's place, which the
+        // running event's player reads from the merge on (CurrentMenu); left in player 1's, that copy found none there and stepped the
+        // world map as retail's (x-town-stayermenu-herscene: the same crash on his copy).
+        if (ScriptMenu &to = MenuOf(here); &to != menu) {
+            to = *menu;
+            *menu = ScriptMenu{};
+            menu = &to;
+        }
+    }
+    if (!menu->made || menu->owner != here || !FullMenuCarryOn() || Mutated("scriptmenu_lockstep")) {
+        std::fprintf(stderr, "coop-scriptmenu: player %d's %s stays retail's through the merge (%s)\n", menu->owner, KindName(menu->kind),
+                     !menu->made ? "still opening" : menu->owner != here ? "not this copy's player's" : "menus in the lockstep");
         return;
     }
-    g_menu.local = true;
-    g_menu.pad = GamePad; // (its menu mode and repeats, as retail's step left them)
-    g_menu.before = InputPadState{};
-    NetplayMenuPad(g_menu.owner, g_menu.before);
+    menu->local = true;
+    menu->pad = GamePad; // (its menu mode and repeats, as retail's step left them)
+    menu->before = InputPadState{};
+    NetplayMenuPad(menu->owner, menu->before);
     GamePad.AutoRepeatOff(); // (the game's pad as retail's EdExitMenu leaves it, on this copy and so in the set)
     GamePad.MenuModeOff();
     std::fprintf(stderr, "coop-scriptmenu: player %d's %s (opened apart at link tick %lld) goes on as a local menu through the merge at link tick %lld\n",
-                 g_menu.owner, KindName(g_menu.kind), (long long) g_menu.opened, (long long) NetplayLinkTick());
+                 menu->owner, KindName(menu->kind), (long long) menu->opened, (long long) NetplayLinkTick());
     std::fflush(stderr);
 }
 
@@ -335,11 +411,18 @@ unsigned char *CoopScriptMenuSyncBytes(std::size_t *size) {
 
 void CoopScriptMenuSyncTake() {
     g_menu_sync = ScriptMenuSync{};
-    if (g_menu.on && g_menu.local && !g_menu.landed) {
+    // cand1111b: the running event's player's record first, then any player's (coop-eventslots keeps one a player: a menu opened apart
+    // sits at its owner's, which need not be the running event's player when the set is taken)
+    const ScriptMenu *menu = &g_menu;
+
+    for (int p = 1; p <= coop::kMaxPlayers && !(menu->on && menu->local && !menu->landed); p++) {
+        menu = &MenuOf(p);
+    }
+    if (menu->on && menu->local && !menu->landed) {
         g_menu_sync.present = 1;
-        g_menu_sync.kind = g_menu.kind;
-        g_menu_sync.owner = g_menu.owner;
-        g_menu_sync.opened = g_menu.opened;
+        g_menu_sync.kind = menu->kind;
+        g_menu_sync.owner = menu->owner;
+        g_menu_sync.opened = menu->opened;
     }
 }
 
@@ -351,20 +434,22 @@ void CoopScriptMenuSyncApply() {
     if (g_menu_sync.present == 0) {
         return;
     }
-    g_menu = ScriptMenu{};
-    g_menu.on = true;
-    g_menu.local = true;
-    g_menu.made = true;
-    g_menu.init_ticks = 4;
-    g_menu.kind = g_menu_sync.kind;
-    g_menu.owner = g_menu_sync.owner;
-    g_menu.opened = g_menu_sync.opened;
-    g_menu.carried = true;
+    ScriptMenu &menu = MenuOf(g_menu_sync.owner); // cand1111b: at its owner's (coop-eventslots: one record a player)
+
+    menu = ScriptMenu{};
+    menu.on = true;
+    menu.local = true;
+    menu.made = true;
+    menu.init_ticks = 4;
+    menu.kind = g_menu_sync.kind;
+    menu.owner = g_menu_sync.owner;
+    menu.opened = g_menu_sync.opened;
+    menu.carried = true;
     g_menu_sync = ScriptMenuSync{};
-    if (OwnerHere()) {
-        std::fprintf(stderr, "coop-scriptmenu: the state set brings this copy's own %s open: not this copy's to make (said, left waiting)\n", KindName(g_menu.kind));
+    if (menu.local && NetplayLocalPlayer() == menu.owner) {
+        std::fprintf(stderr, "coop-scriptmenu: the state set brings this copy's own %s open: not this copy's to make (said, left waiting)\n", KindName(menu.kind));
     }
     EdDrawOnAll(); // (the world on this screen: the menu is the opener's)
-    std::fprintf(stderr, "coop-scriptmenu: the state set brings player %d's %s open (local): this copy waits for its end\n", g_menu.owner, KindName(g_menu.kind));
+    std::fprintf(stderr, "coop-scriptmenu: the state set brings player %d's %s open (local): this copy waits for its end\n", menu.owner, KindName(menu.kind));
     std::fflush(stderr);
 }

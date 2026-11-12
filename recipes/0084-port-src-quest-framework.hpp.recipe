@@ -1,0 +1,26 @@
+# port/src/quest/framework.hpp from Chronicle's port/src/quest/framework.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/quest/framework.hpp
+base port/src/quest/framework.hpp
+from d18947cbecb3e01e3c76661c372481e12c0840e1
+to c90bbe2c11175191768968682bac70b8d0339d82
+@@ -394,0 +395,6
++    /**
++     * Jep (co-op, coop-pt1111e): the choices its scenes offer (Scene::Choice), by label key, so a conversation carried to another
++     * copy binds them again (ResolveChoice).
++     */
++    const std::vector<std::pair<std::string, SceneFn>> &Choices() const { return choices; }
++
+@@ -402,0 +409,1
++    std::vector<std::pair<std::string, SceneFn>> choices; // Jep (co-op, coop-pt1111e): Builder::Choice's
+@@ -434,0 +442,5
++    /**
++     * Jep (co-op, coop-pt1111e): a choice its scenes offer by Scene::Choice(label, ...), declared here so a conversation carried
++     * to another copy (a co-op merge) binds it again by its id. Scene::Choice says so loudly for one not declared.
++     */
++    Builder &Choice(Text label, SceneFn on_select);
+@@ -470,0 +483,5
++/**
++ * Jep (co-op, coop-pt1111e): binds item.on_select by item.id for a quest's choice: "<quest>.option<N>" (CollectOptions') or
++ * "<quest>.<label key>" (a Scene::Choice declared by Builder::Choice). False for an id that is no quest's: a dialog resolver.
++ */
++bool ResolveChoice(dialog::ChoiceItem &item);

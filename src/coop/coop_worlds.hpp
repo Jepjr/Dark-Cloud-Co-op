@@ -3,6 +3,7 @@
 #include "coop/game_ns.hpp"
 
 #include <cstdint>
+#include <string>
 
 // coop-worlds: separate worlds for linked copies (game.netplay 1 or 2). One shared game, two copies:
 // while both players are on the same map (the same town, or the same dungeon floor) the copies run in
@@ -79,6 +80,8 @@ bool CoopWorldsScriptWritesHeld();
 
 // coop-mayorhouse: link ticks since the last merge, linked and together; else -1.
 std::int64_t CoopWorldsTicksSinceMerge();
+std::string  CoopWorldsQuestsMoved(); // coop-pt1111e: the quests' progress that moved (not at a first stage with no variables), as JSON text, for the checksum
+void         CoopWorldsTestQuestAtTake(); // coop-pt1111e test hook (DC_QUEST_TEST_STAGE_AT_TAKE): the sender's quest moved as its state set is taken
 
 // coop-heldscene: each room step, before its events start (room_mode: the room's GameMode): the room's arrival event to
 // start now, else 0. After a merge by her state inside a room, on the first walk step, both copies alike: its arrival if its
@@ -197,6 +200,10 @@ bool CoopWorldsGateAskable();
 bool CoopWorldsGateAskBeside(int asker, CDungeonEventData *gate, int answer);
 bool CoopWorldsGateAsking();
 bool CoopWorldsVoteAsks(int player);
+// pt1111c: player user's (1 up) key-picker pick of item at event slot slot, whose script starts a story scene that needs every
+// player (Wise Owl Forest floor 9's switch, Shipwreck floor 17's music box key): true when this took it over (every other player
+// asked first, nothing used yet; or apart, the others called), false when the pick starts the script as before.
+bool CoopWorldsItemSceneAsk(int user, int slot, int item, bool shared);
 // coop-floorgate: the gathered gate's question while it waits on a player (asked and asker 1 or 2; the dungeon and the floor,
 // 0 up; gather 1 its opening scene unseen, 2 its boss alive; cursor 0 go together, 1 not yet), drawn in the game's window
 // on the asked player's copy (coop::DrawGatherQuestion).
@@ -214,10 +221,15 @@ const char *CoopWorldsFloorName(int map, int to);
 // other player, who is at this dungeon's entrance; the merge's resync then takes both to the entrance's floor
 // menu. Up to 20 s, then that floor's gate goes on alone.
 bool CoopWorldsHoldFloorChange(int script_no);
+// pt1111c: whether dungeon script script_no, a story event (it writes a story flag), is held: the game's player is a stand-in
+// (a member who has not joined, as player 2's copy apart can make her), or this copy is any player's but player 1's, apart. marker: asked at the walk's marker check
+// (true: the event is not offered); else at GAME_TASK_SCRIPT_START (true: the task is play again, the script not run).
+bool CoopWorldsHoldStandInStory(int script_no, bool marker);
 
 // Whether the copies are apart: the partner is then on neither copy (not stepped, drawn or targeted).
 bool CoopWorldsApart();
 bool CoopWorldsPeerHeardHere();
+bool CoopWorldsPeerHeard(); // cand1111b: apart, and the other copy has been heard since the split (anywhere)
 long long CoopWorldsHerLeaveMs(); // coop-dunentry: ms since player 2 left this (player 1's, staying) copy's map, else -1
 void CoopWorldsLocalFlags(bool on); // coop-floorscene2: flags set while on stay this copy's (no progress sent)
 

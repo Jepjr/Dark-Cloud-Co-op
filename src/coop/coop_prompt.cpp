@@ -32,6 +32,7 @@
 #include "coop/coop_fullmenu.hpp" // coop-localmenu: FullMenuLocalPick
 #include "coop/coop_inventory.hpp"
 #include "coop/coop_party.hpp"
+#include "coop/coop_zonechara.hpp" // coop-pt1111k
 
 namespace dc::game {
 extern s32 gameTask;
@@ -248,8 +249,24 @@ bool PromptAsksPartner() {
     return g_prompt.active && g_prompt.asker == 0;
 }
 
+bool PromptSwapOpen() {
+    return g_prompt.active && !g_prompt.revive;
+}
+
 void AskSwap(int asker, int wanted, int spot) {
-    if (g_prompt.active || wanted < 0 || wanted > 5) {
+    if (wanted < 0 || wanted > 5) {
+        return;
+    }
+    // coop-pt1111k (Jep 11-11: two trades on one tick, a fixed order decides and the loser is refused): one question at a
+    // time; the step's order (player 1's step before player 2's, the same on every copy) makes the first the one asked, and a
+    // later ask while it is open is refused with the refuse sound on its asker's screen. DC_COOP_MUTATE=swapask_override
+    // (twin): the later ask takes the question's place, unrefused.
+    if (g_prompt.active && !(Mutated("swapask_override") && !g_prompt.revive)) {
+        SoundOwner sound(asker + 1);
+
+        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        std::fprintf(stderr, "coop: player %d's ask for %d refused: player %d's question is open (one at a time) at link tick %lld\n", asker + 1, wanted,
+                     g_prompt.asker + 1, (long long) NetplayLinkTick());
         return;
     }
 
@@ -353,6 +370,8 @@ void StepSwapQuestion() {
     // NO answer's own row is t-triangle-menu-p1alliesno.)
     bool yes = (pressed & kInputCross) != 0 && g_prompt.cursor == 0;
 
+    yes = yes || ZoneTestAnswersYes(); // coop-pt1111k test hook: the one asked says yes
+
     if (yes) {
         SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
         Close();
@@ -430,6 +449,14 @@ int MenuCharaChange(int wanted) {
         UserStatus->cur_chara = (s8) player;
         AskSwap(0, wanted);
         std::printf("coop: 1P's menu asks for the partner's %d; the player stays %d\n", wanted, player);
+        return -1;
+    }
+
+    // coop-pt1111k: his own pick on a character-limited floor, checked as it is taken (BtMenuLoadChara, every copy on one tick):
+    // one that leaves the floor's member unplayed is refused on his screen and he keeps his member.
+    if (wanted != player && !ZonePickLegal(0, wanted)) {
+        UserStatus->cur_chara = (s8) player;
+        ZonePickRefused(0, wanted, "menu");
         return -1;
     }
 

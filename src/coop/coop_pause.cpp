@@ -3,6 +3,7 @@
 #include "coop/game_ns.hpp"
 #include "coop/coop_pause.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -25,6 +26,7 @@
 
 #include "coop/coop.hpp"
 #include "coop/coop_opener.hpp" // coop-opt7: a presentation counts as paused
+#include "coop/coop_interact.hpp" // coop-pt1111d: UsePromptOpen
 #include "coop/coop_audio.hpp" // coop-menuse
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
@@ -76,6 +78,17 @@ bool InMenu(int player) {
     return FullMenuOpenFor(player);
 }
 
+// coop-pt1111d (Jep's 11-11 playtest, item 13: "P1 in his Atla opening + P2 opens a big chest at the same time: world did NOT pause ...
+// and P2 was NOT invulnerable as chest opener"; Jep's log: her large chest's lock question, "partner's prompt ... the game plays on",
+// came up while his Atla presented, the world ran and she was hit twice in it): a trapped or clown chest's questions (and a gate's)
+// run as the user's own prompt beside the running game (coop-p2prompt, coop-hischest), where retail runs them as the world's script
+// task: in the game alone nothing moves while the opener answers. So a player in a prompt of their own is in their opening: in a
+// pause state (every player paused holds the world, coop-opt7's rule) and out of harm (the opener's rule), every player alike.
+// DC_COOP_MUTATE=prompt_runs (twin): a prompt counts as neither, as before.
+bool InOwnPrompt(int player) {
+    return UsePromptOpen(player) && !Mutated("prompt_runs");
+}
+
 void Hold(bool hold) {
     // coop-opt7: while a player presents, the hold is retail's presentation's (monsters and effects): driveStepHold would stand
     // the opener's pose on its first frame each tick.
@@ -94,8 +107,8 @@ void Hold(bool hold) {
     CEffectHold = hold ? 1 : 0;
     PlayTimeCountFlag(hold ? 0 : 1);
     std::fprintf(stderr, "coop-pause: the world %s (P1 %s, P2 %s)\n", hold ? "holds" : "runs",
-                 g_pause.paused[0] ? "paused" : PlayerPresenting(1) ? "in his chest" : InMenu(1) ? "in his menu" : CoopWorldsQuestionHolds(0) ? "in a question" : "playing",
-                 !PartnerInZone() ? "not here" : g_pause.paused[1] ? "paused" : PlayerPresenting(2) ? "in her chest" : InMenu(2) ? "in her menu" : CoopWorldsQuestionHolds(1) ? "in a question" : "playing");
+                 g_pause.paused[0] ? "paused" : PlayerPresenting(1) ? "in his chest" : InOwnPrompt(1) ? "in his prompt" : InMenu(1) ? "in his menu" : CoopWorldsQuestionHolds(0) ? "in a question" : "playing",
+                 !PartnerInZone() ? "not here" : g_pause.paused[1] ? "paused" : PlayerPresenting(2) ? "in her chest" : InOwnPrompt(2) ? "in her prompt" : InMenu(2) ? "in her menu" : CoopWorldsQuestionHolds(1) ? "in a question" : "playing");
 }
 
 // Test hook (DC_COOP_PAUSEHIT=P:T:DAMAGE): at T ticks of the menu presses' clock (netplay's test hook), a hit
@@ -296,6 +309,10 @@ void PauseTick(const InputPadState &one_in, const InputPadState &two_in) {
     TestHit();
     TestAtla();
     TestWake();
+    // coop-pt1111d: player 1 in his own prompt is out of harm as his presentation keeps him (the world's step reads it next).
+    if (InOwnPrompt(1)) {
+        BtActStatus.invincible_frames = std::max<int>(BtActStatus.invincible_frames, 2);
+    }
     Hold(PauseZoneHeld() && !FullMenuLive());
     PresentTestTick(g_pause.held); // coop-opt7: test hook
 }
@@ -318,13 +335,14 @@ bool PauseZoneHeld() {
     // paused in any mix holds the world (his chest and her menu hold it; his chest while she walks does not). DC_COOP_MUTATE=
     // present_runs (twin): a presentation never counts.
     const bool presents_count = !Mutated("present_runs");
-    bool       one = g_pause.paused[0] || InMenu(1) || CoopWorldsQuestionHolds(0) || (presents_count && PlayerPresenting(1));
+    bool       one = g_pause.paused[0] || InMenu(1) || CoopWorldsQuestionHolds(0) || (presents_count && PlayerPresenting(1)) || InOwnPrompt(1);
     // coop-pt1106-lockup (Jep, 2026-11-06: a joiner is never made to wait; x-fixture-join-hostmenu-hit): g_partner.visible comes from the world's own
     // step, so with a menu carried across the join the hold kept it false and the hold stood: the joiner landed in a world held till he closed
     // it, the opener out of all harm. Linked in the lockstep the partner is here, on one tick on both copies. DC_COOP_MUTATE=join_menu_holds_world (twin): as before.
     const bool joined = NetplayLinkUp() && !CoopWorldsApart() && NetplayTestLockstepFrom() >= 0 && NetplayLinkTick() >= NetplayTestLockstepFrom() &&
                         !Mutated("join_menu_holds_world");
-    bool two = !(PartnerInZone() || joined) || g_pause.paused[1] || InMenu(2) || CoopWorldsQuestionHolds(1) || (presents_count && PlayerPresenting(2));
+    bool two = !(PartnerInZone() || joined) || g_pause.paused[1] || InMenu(2) || CoopWorldsQuestionHolds(1) || (presents_count && PlayerPresenting(2)) ||
+               InOwnPrompt(2);
 
     // coop-localfix (Jep, 2026-10-26: "both players being in the triangle menu didnt pause the game in the dungeon"):
     // every player of the zone in a menu holds it too, as one player's menu does in the game alone; a pause was needed

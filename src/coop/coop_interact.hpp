@@ -46,6 +46,11 @@ bool KeyPickOpen();
 bool StepKeyPick(const InputPadState &pad);
 void DrawKeyPick();
 bool KeyPickAnswer();
+// pt1111c: every player said yes to player's (1 up) item scene: its slot's script starts with the held pick (item, from the
+// party's pack when shared) as the window's answer, as the picker starts any slot's (StartWithAnswer). Whether it started.
+bool StartPickedItemScene(int player, int slot, int item, bool shared);
+// pt1111c test hook DC_COOP_TEST_ITEM_SCENE (x-item-scene): stepped each frame.
+void ItemSceneTest();
 // coop-gatekeyno: at a floor's start, a line when the floor's gate key is not the one its lock's script asks for.
 void LogFloorGateKey();
 // Player 1's (Jep: "just like Xiao's game shouldn't pause when p1 is interacting with an item"): DunMoveChara's Square
@@ -155,6 +160,11 @@ void PartnerMarkLogReset();
 // PartnerCheckItemGet / PartnerGetItem (coop-inventory): her own bag's rule and take.
 void PartnerPresentChest(int entry, bool big, int item, bool posed, bool others);
 void PartnerPresentAtla(int entry, bool others, float *turn);
+// coop-pt1111b (item 12): any opener's Atla effect on the ball on a copy that is not the opener's, from the press to the
+// presentation's end (the world's tick steps it; draw only). DC_COOP_MUTATE=atlafx_partner_only (twin): player 2's alone.
+void OthersAtlaFxStart(int opener, int entry, float turn);
+void OthersAtlaFxStep(int opener);
+void OthersAtlaFxEnd(int opener);
 bool PartnerPresentStep(int kind, int ticks, bool others); // true on the tick she holds the item up
 void PartnerPresentEnd(int kind, bool posed);
 bool StepBusy(const InputPadState &pad);

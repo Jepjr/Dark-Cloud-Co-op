@@ -41,6 +41,14 @@ namespace coop {
 // game.coop and game.coop_menus.
 bool MenusOn();
 
+// coop-pt1111o: game.coop_menus and game.coop_menu_panel as this game plays them: the host's (a joiner takes them from its Hello,
+// for this run only, never into config.json), else this copy's own. What a Hello carries (netplay_hello.cpp).
+bool MenusSetting();
+bool MenuPanelSetting();
+void MenusAdopt(bool menus, bool panel);
+// The session is over (the title): this copy's own settings again.
+void MenusAdoptEnd();
+
 // From pad_button_read once a tick (port 0, after the link's exchange): steps both overlays. Then for
 // every port, MenuFilterPort takes from the game's pad what the overlays own: everything while player
 // 1's overlay is open, Triangle while the two play on a floor.

@@ -2,7 +2,7 @@
 target port/src/game/btitem.cpp
 base port/src/game/btitem.cpp
 from df3204ad091eebe8dc91121303fa2655ebc5b25e
-to 062b7ccca6d95b06f013143d67b7c9b18e70aae3
+to 0b3ce5d635431abba4b0c88cb9ab49e688f568c4
 @@ -18,0 +19,3
 +#include "coop/coop_fullmenu.hpp" // coop-chestmenu
 +#include "coop/coop_interact.hpp" // coop-atlaswap: PlayerAtlaPack
@@ -145,7 +145,14 @@ to 062b7ccca6d95b06f013143d67b7c9b18e70aae3
 +                if (!coop::PresentEngine() && (UserStatus->cur_chara == CHARA_TOAN || coop::PlayerAtlaPosed()) && coop::PlayerAtlaPackFits()) { // (coop-opt7: the world's)
 ~297 7ebfed00ee1852d6|                    |
 +                }
-@@ -745,5 +793,11
+@@ -741,1 +789,5
+- f06fe66a3de0aa97
++                // coop-pt1111b (Jep's 11-11 playtest, item 10: the opener read '"" acquired.', the others the name): as its opener's
++                // engine, the Atla the world took at the press. The world's StartAtla took it on every copy a step before
++                // (getAtraToSaveData -> GetAtraData: the registry's id set to -1 as its last ball went), so this read gave -1 and
++                // AtraGetMes named message 999, the empty one. DC_COOP_MUTATE=atlaname_reread (twin): read here, as before.
++                int   atra_id = coop::PresentEngineAtla(map_no, status->atra_registry[map_no][NowDngMap->atra[index].atra_no].id);
+@@ -745,5 +797,11
 - e8fc26310f848a0d
 - 933c09e8d2a1b46b
 - 46198a3846a6e784
@@ -162,28 +169,28 @@ to 062b7ccca6d95b06f013143d67b7c9b18e70aae3
 +                if (float turn = 0.0f; coop::PresentEngine() ? coop::PresentEngineStance(&turn) : coop::PlayerAtlaStance(NowDngMap->atra[index].pos, atraGetPos, &turn)) {
 +                    shortAtraEffect.SetRotation(0.0f, turn, 0.0f);
 +                }
-@@ -763,1 +817,1
+@@ -763,1 +821,1
 - 1a3d19f121ef7ab8
 +            if (!(pose_time < 129.0f) && pose_time <= 130.0f && !coop::PlayerAtlaPosed()) { // coop-atlaswap: her grab holds
-@@ -766,0 +821,4
+@@ -766,0 +825,4
 +            if (!coop::PresentEngine()) { // coop-opt7: the world steps it
 +                coop::PlayerAtlaStep(); // coop-atlaswap: her step back to 9.4
 +            }
 +
-@@ -782,1 +840,2
+@@ -782,1 +844,2
 - 511aa3299a648c7f
 +                // coop-atlaapart; coop-atlaswap: her grab holds to the end, as her partner's does
 +                BtActStatus.motion_no = UserStatus->cur_chara == CHARA_TOAN ? 0x2F : coop::PlayerAtlaPosed() ? BtActStatus.motion_no : 0;
-@@ -819,1 +878,3
+@@ -819,1 +882,3
 - 8825963b507f4cfc
 +            if (!coop::PresentEngine()) { // coop-opt7: the world turns the opener on kCmdPresent
 +                CharaMain.SetRotation(0.0f, coop::PlayerAtlaEndTurn(), 0.0f); // coop-atlaswap: hers round to the ball, Toan's -PI
 +            }
-@@ -963,0 +1025,2
+@@ -963,0 +1029,2
 +    coop::PresentationFilesTrace(BtCashBuffer.base, BtCashBuffer.used * 16); // coop-chestmenu: test hook
 +    coop::PresentationReadsEnd(); // coop-chestmenu
-@@ -979,0 +1043,2
+@@ -979,0 +1047,2
 +    coop::PresentationFilesCheck(GateKey_Sled > 0); // coop-chestmenu: test hook
 +
-@@ -1116,0 +1182,1
+@@ -1116,0 +1186,1
 +    coop::PresentationReadsEnd(); // coop-chestmenu

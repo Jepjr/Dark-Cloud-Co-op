@@ -1218,6 +1218,11 @@ namespace {
 // question three short lines broken by hand, well inside the modal's 280-wide wrap (DrawYesNoPopup logs their widths), then
 // the bubble twin's two rows. The gathered gate's (together) and the call's (apart).
 void GatherText(char *text, int size, int asker, int gather, int to) {
+    // pt1111c: an item used at a spot starts a story scene that needs every player (coop_worlds' kGatherItem).
+    if (gather == 3) {
+        std::snprintf(text, size, "Player %d is starting\na story scene here.\nGo there now?\nGo now\nNot now", asker);
+        return;
+    }
     std::snprintf(text, size, "Player %d is heading to\nFloor %d's %s.\nGo down together?\nGo together\nNot yet", asker, to + 1,
                   gather == 2 ? "boss fight" : "story scene");
 }
@@ -1407,7 +1412,9 @@ bool DrawGateWaitingBox() {
     char title[64];
     char lines[160];
 
-    if (where == 2) {
+    if (where == 3) {
+        std::snprintf(title, sizeof title, "Starting a story scene"); // pt1111c: an item scene (coop_worlds' kGatherItem)
+    } else if (where == 2) {
         std::snprintf(title, sizeof title, "Heading back to town");
     } else if (to >= 0 && (where == 1 || !can_leave)) {
         std::snprintf(title, sizeof title, "Heading down to Floor %d", to + 1);

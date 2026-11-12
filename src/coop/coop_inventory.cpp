@@ -4,6 +4,7 @@
 #include "coop/game_ns.hpp"
 #include "coop/coop_townmenu.hpp" // coop-stage4: CoopTownMenuRunsLocalHere
 #include "coop/coop_inventory.hpp"
+#include "coop/coop_actor.hpp" // coop-eventslots: kMaxPlayers
 #include "coop/coop_audio.hpp" // coop-menuse
 #include "coop/coop_worlds.hpp" // coop-dungeonp2
 
@@ -570,20 +571,38 @@ bool OwnBags() {
     return Enabled() && (dc::platform::ConfigGet().coop_own_bags || launcher);
 }
 
+namespace {
+// coop-pt1111p (pt1111o's find: player 2's overlay crashed both copies in town with game.coop_menu_panel on and the bags shared,
+// 0xC0000005 reading 0x4368 in coop_menu.cpp Rows): the party's status, as player 1's overlay reads it (coop_menu.cpp Status) and
+// the game keeps it: UserStatus on a floor, the save's own in a town, where UserStatus is null. A partner that shares the party's
+// bag and purse reads them there too. DC_COOP_MUTATE=partner_userstatus (twin): UserStatus alone, as before, with a blank status
+// standing in for the null one (before: the crash) so the twin's copies live to show the partner's empty bag and purse.
+CUserStatus *PartyStatus() {
+    if (UserStatus != nullptr) {
+        return UserStatus;
+    }
+    if (Mutated("partner_userstatus")) {
+        alignas(CUserStatus) static unsigned char blank[sizeof(CUserStatus)] = {};
+        return reinterpret_cast<CUserStatus *>(blank);
+    }
+    return SaveData != nullptr ? (CUserStatus *) SaveData->GetDngStatus() : nullptr;
+}
+} // namespace
+
 ITEM_PACK &PartnerPack() {
     if (!OwnBags() || Mutated("invuse")) {
-        return UserStatus->item_pack;
+        return PartyStatus()->item_pack;
     }
 
     return Bag().pack;
 }
 
 int PartnerGilda() {
-    return OwnBags() ? Bag().gilda : UserStatus->money;
+    return OwnBags() ? Bag().gilda : PartyStatus()->money;
 }
 
 std::int32_t *PartnerActiveItemVol() {
-    return OwnBags() ? Bag().active_item_vol : UserStatus->active_item_vol;
+    return OwnBags() ? Bag().active_item_vol : PartyStatus()->active_item_vol;
 }
 
 void PartnerGold(int amount) {
@@ -592,7 +611,7 @@ void PartnerGold(int amount) {
     }
 
     if (!OwnBags() || Mutated("invpickup")) {
-        UserStatus->money = (u16) std::min(kMostGilda, UserStatus->money + amount);
+        PartyStatus()->money = (u16) std::min(kMostGilda, PartyStatus()->money + amount);
         return;
     }
 
@@ -605,7 +624,7 @@ void PartnerSetGilda(int gilda) {
     gilda = std::clamp(gilda, 0, kMostGilda);
 
     if (!OwnBags()) {
-        UserStatus->money = (u16) gilda;
+        PartyStatus()->money = (u16) gilda;
         return;
     }
 
@@ -1681,6 +1700,13 @@ struct ProfileBag {
 
 constexpr const char *kBagsFile = "coop-bags.json";
 
+} // namespace
+// coop-eventslots: each profile's own fishing record (the file's end)
+nlohmann::json FishProfilesJson(const std::string &p2_owner);
+void           FishProfilesRead(const nlohmann::json &root, const std::string &p2_owner);
+void           FishModeSwitch(bool to_per_player);
+namespace {
+
 std::string                       g_bag_owner[2]; // the profile each player's bag is ("" not known: a save from before)
 std::map<std::string, ProfileBag> g_kept;         // the bags of profiles not playing, by name
 bool                              g_owners_for_new_game = false; // the lobby named the owners of the new game about to start
@@ -1838,12 +1864,18 @@ void ProfileBagsStart(const std::string &p1, const std::string &p2, bool new_gam
     g_pending[0] = p1;
     g_pending[1] = p2;
     g_pending_set = !Mutated("profilebags_once"); // (DC_COOP_MUTATE=profilebags_once, twin: the start's giving alone, none at loads)
+    FishModeSwitch(FishingPerPlayer()); // coop-eventslots: the setting changed since the slot's file: every point kept
     ProfileBagsGive(*status, names);
     RingSay("after the lobby's start"); // coop-worldkeys
 }
 
+void FishProfilesGive(const std::string owners[2], const std::string names[2]); // (coop-eventslots, below)
+
 void ProfileBagsGive(CUserStatus &status_ref, const std::string names[2]) {
     CUserStatus *status = &status_ref;
+    const std::string fish_owners[2] = {g_bag_owner[0], g_bag_owner[1]};
+
+    FishProfilesGive(fish_owners, names); // coop-eventslots: each player's own fishing record follows their profile, as their bag
 
     // The bags as they are, under their owners (a save from before the profile bags: whoever plays now owns them).
     const ProfileBag held[2] = {BagOf(status->item_pack, status->active_item_vol, status->money, 1),
@@ -2132,6 +2164,7 @@ void ProfileBagsWrite(const std::filesystem::path &save_directory) {
     nlohmann::json root;
 
     root["owners"] = {{"p1", g_bag_owner[0]}, {"p2", g_bag_owner[1]}};
+    root["fishing"] = FishProfilesJson(g_bag_owner[1]); // coop-eventslots: each profile's own fishing record, and the setting it was kept under
     root["kept"] = nlohmann::json::object();
     for (const auto &[name, bag] : g_kept) {
         root["kept"][name] = BagJson(bag);
@@ -2269,6 +2302,7 @@ void ProfileBagsRead(const std::filesystem::path &save_directory) {
         for (const auto &[name, bag] : root.value("kept", nlohmann::json::object()).items()) {
             g_kept[name] = JsonBag(bag);
         }
+        FishProfilesRead(root, g_bag_owner[1]); // coop-eventslots
     } catch (const std::exception &e) {
         std::fprintf(stderr, "coop-inv: %s not read (%s)\n", kBagsFile, e.what());
         return;
@@ -2617,3 +2651,258 @@ bool CoopRingGet(int item, int *slot) {
     }
     return false;
 }
+
+namespace coop {
+int OwnBagPlayer() {
+    return 2;
+}
+} // namespace coop
+
+// ---- coop-eventslots: each player's own fishing record (Jep 11-11) ----
+namespace coop {
+namespace {
+struct FishRecord {
+    std::int32_t points = 0;
+    SV_FISH_DATA log[64] = {};
+    std::int32_t mardan = 0;
+};
+
+FishRecord                        g_fish_records[kMaxPlayers]; // by actor index; [0] unused (the game's player's is the save's own)
+std::map<std::string, FishRecord> g_fish_kept;                 // the records of profiles not playing, by name (coop-bags.json)
+bool                              g_fish_saved_per_player = false; // the setting the slot's coop-bags.json last had
+
+FishRecord SaveRecord() {
+    FishRecord r;
+
+    if (SaveData != nullptr) {
+        r.points = *SaveData->CoopFishingPointWord();
+        std::memcpy(r.log, SaveData->CoopFishLog(), sizeof r.log);
+        r.mardan = *SaveData->CoopMardanWord();
+    }
+    return r;
+}
+
+void SavePut(const FishRecord &r) {
+    if (SaveData != nullptr) {
+        *SaveData->CoopFishingPointWord() = r.points;
+        std::memcpy(SaveData->CoopFishLog(), r.log, sizeof r.log);
+        *SaveData->CoopMardanWord() = r.mardan;
+    }
+}
+
+// The best of two logs (the larger rank of each fish, as SetFishingRank keeps its best): every entry either has, by fish.
+void LogMerge(SV_FISH_DATA *into, const SV_FISH_DATA *from) {
+    for (int i = 0; i < 64; i++) {
+        if (from[i].rank > into[i].rank) {
+            into[i] = from[i];
+        }
+    }
+}
+
+nlohmann::json RecordJson(const FishRecord &r) {
+    nlohmann::json log = nlohmann::json::array();
+
+    for (const SV_FISH_DATA &e : r.log) {
+        log.push_back({e.fish_id, e.rank, e.unk_8, e.unk_C});
+    }
+    return {{"points", r.points}, {"mardan", r.mardan}, {"log", log}};
+}
+
+FishRecord JsonRecord(const nlohmann::json &j) {
+    FishRecord r;
+
+    r.points = j.value("points", 0);
+    r.mardan = j.value("mardan", 0);
+    const nlohmann::json log = j.value("log", nlohmann::json::array());
+
+    for (std::size_t i = 0; i < 64 && i < log.size(); i++) {
+        r.log[i].fish_id = log[i].at(0).get<std::int32_t>();
+        r.log[i].rank = log[i].at(1).get<float>();
+        r.log[i].unk_8 = log[i].at(2).get<float>();
+        r.log[i].unk_C = log[i].at(3).get<float>();
+    }
+    return r;
+}
+
+std::int64_t TotalPoints() {
+    std::int64_t total = SaveData != nullptr ? *SaveData->CoopFishingPointWord() : 0;
+
+    for (int k = 1; k < kMaxPlayers; k++) {
+        total += g_fish_records[k].points;
+    }
+    for (const auto &[name, r] : g_fish_kept) {
+        total += r.points;
+    }
+    return total;
+}
+} // namespace
+
+bool FishingPerPlayer() {
+    static const bool test = TestEnvOn("DC_COOP_FISHING_PER_PLAYER");
+
+    return OwnBags() && (test || !dc::platform::ConfigGet().coop_fishing_shared);
+}
+
+void FishRecordSwap(int index) {
+    if (index <= 0 || index >= kMaxPlayers || SaveData == nullptr || !FishingPerPlayer()) {
+        return;
+    }
+    FishRecord live = SaveRecord();
+
+    SavePut(g_fish_records[index]);
+    g_fish_records[index] = live;
+}
+
+int FishPointsOf(int index) {
+    if (index <= 0 || !FishingPerPlayer()) {
+        return SaveData != nullptr ? *SaveData->CoopFishingPointWord() : 0;
+    }
+    return index < kMaxPlayers ? g_fish_records[index].points : 0;
+}
+
+void FishTestSeed() {
+    if (static const int points = TestEnvInt("DC_COOP_TEST_FISHING_POINTS_P2", -1); points >= 0) {
+        g_fish_records[1] = FishRecord{};
+        g_fish_records[1].points = points;
+        std::fprintf(stderr, "coop: test: player 2's own fishing points %d\n", points);
+    }
+}
+
+// The setting changed since the slot's file was written: to each player's, the party's pool stays the game's player's record (the save's)
+// and every other player starts from their profile's kept record; to the party's, every kept and playing record's points add to the pool
+// and the log takes the best of each fish, the records emptied. No point is lost either way. DC_COOP_MUTATE=fish_switch_drops (twin):
+// the other records dropped going shared.
+void FishModeSwitch(bool to_per_player) {
+    if (to_per_player == g_fish_saved_per_player) {
+        return;
+    }
+    const std::int64_t before = TotalPoints();
+
+    if (!to_per_player && SaveData != nullptr) {
+        FishRecord pool = SaveRecord();
+        auto       add = [&](FishRecord &r) {
+            if (!Mutated("fish_switch_drops")) {
+                pool.points += r.points;
+                LogMerge(pool.log, r.log);
+                pool.mardan += r.mardan;
+            }
+            r = FishRecord{};
+        };
+
+        for (int k = 1; k < kMaxPlayers; k++) {
+            add(g_fish_records[k]);
+        }
+        for (auto &[name, r] : g_fish_kept) {
+            add(r);
+        }
+        g_fish_kept.clear();
+        SavePut(pool);
+    }
+    g_fish_saved_per_player = to_per_player;
+    std::fprintf(stderr, "coop-inv: fishing points now %s: %lld points before, %lld after\n", to_per_player ? "each player's" : "the party's",
+                 (long long) before, (long long) TotalPoints());
+}
+
+// The profiles' records at a seat change (ProfileBagsGive's names): each player takes their profile's record, the one they held is
+// kept under its owner. Only while the records are each player's (the party's pool belongs to no seat).
+void FishProfilesGive(const std::string owners[2], const std::string names[2]) {
+    if (!FishingPerPlayer() || SaveData == nullptr) {
+        return;
+    }
+    const FishRecord held[2] = {SaveRecord(), g_fish_records[1]};
+
+    for (int p = 0; p < 2; p++) {
+        if (!owners[p].empty() && owners[p] != names[p]) {
+            g_fish_kept[owners[p]] = held[p];
+        }
+    }
+    for (int p = 0; p < 2; p++) {
+        if (owners[p] == names[p] || names[p].empty()) {
+            continue;
+        }
+        auto             found = g_fish_kept.find(names[p]);
+        const FishRecord r = found != g_fish_kept.end() ? found->second : FishRecord{};
+
+        if (found != g_fish_kept.end()) {
+            g_fish_kept.erase(found);
+        }
+        if (p == 0) {
+            SavePut(r);
+        } else {
+            g_fish_records[1] = r;
+        }
+        std::fprintf(stderr, "coop-inv: profile fishing: P%d is %s, %d points\n", p + 1, names[p].c_str(), r.points);
+    }
+}
+
+nlohmann::json FishProfilesJson(const std::string &p2_owner) {
+    nlohmann::json records = nlohmann::json::object();
+
+    if (FishingPerPlayer() && !p2_owner.empty()) {
+        records[p2_owner] = RecordJson(g_fish_records[1]);
+    }
+    for (const auto &[name, r] : g_fish_kept) {
+        records[name] = RecordJson(r);
+    }
+    return {{"per_player", FishingPerPlayer()}, {"records", records}};
+}
+
+void FishProfilesRead(const nlohmann::json &root, const std::string &p2_owner) {
+    g_fish_kept.clear();
+    const nlohmann::json fishing = root.value("fishing", nlohmann::json::object());
+
+    g_fish_saved_per_player = fishing.value("per_player", false);
+    for (const auto &[name, r] : fishing.value("records", nlohmann::json::object()).items()) {
+        if (name == p2_owner && g_fish_saved_per_player) {
+            g_fish_records[1] = JsonRecord(r);
+        } else {
+            g_fish_kept[name] = JsonRecord(r);
+        }
+    }
+}
+
+// Test hook (DC_COOP_TEST_FISH_SWITCH=1, x-eventslots fpswitch): the switch both ways on a made-up save (the pool 100, player 2's own 50
+// with a fish, a kept profile's 30 with another), and the profile file written and read back: each step's totals and the log said.
+void FishSwitchSelfTest(const char *save_directory) {
+    if (save_directory == nullptr || SaveData == nullptr) {
+        return;
+    }
+    FishRecord pool;
+
+    pool.points = 100;
+    SavePut(pool);
+    g_fish_records[1] = FishRecord{};
+    g_fish_records[1].points = 50;
+    g_fish_records[1].log[3] = {3, 41.0f, 0.0f, 0.0f};
+    g_fish_kept.clear();
+    g_fish_kept["BOB"].points = 30;
+    g_fish_kept["BOB"].log[5] = {5, 22.0f, 0.0f, 0.0f};
+    g_fish_saved_per_player = true;
+    // The file: written and read back as the records stand.
+    const std::filesystem::path dir = std::filesystem::path(save_directory) / ("fish-switch-test-p" + std::to_string(NetplayLocalPlayer())); // (each copy its own)
+    std::error_code             error;
+
+    std::filesystem::create_directories(dir, error);
+    {
+        std::ofstream out(dir / "coop-bags.json");
+
+        out << nlohmann::json{{"fishing", FishProfilesJson("ANA")}}.dump(2);
+    }
+    const FishRecord p2_was = g_fish_records[1];
+    try {
+        std::ifstream in(dir / "coop-bags.json");
+
+        FishProfilesRead(nlohmann::json::parse(in), "ANA");
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "coop-inv: test: fish switch: the file not read back (%s)\n", e.what());
+    }
+    std::fprintf(stderr, "coop-inv: test: fish switch: the file read back: player 2's %d (was %d), BOB's %d, fish 3 %.0f\n", g_fish_records[1].points, p2_was.points,
+                 g_fish_kept.count("BOB") != 0 ? g_fish_kept["BOB"].points : -1, (double) g_fish_records[1].log[3].rank);
+    FishModeSwitch(false);
+    std::fprintf(stderr, "coop-inv: test: fish switch: to the party's: the pool %d, fish 3 %.0f, fish 5 %.0f, others %d\n", *SaveData->CoopFishingPointWord(),
+                 (double) SaveData->CoopFishLog()[3].rank, (double) SaveData->CoopFishLog()[5].rank, g_fish_records[1].points + (int) g_fish_kept.size());
+    FishModeSwitch(true);
+    std::fprintf(stderr, "coop-inv: test: fish switch: to each player's: the game's player's %d, player 2's %d\n", *SaveData->CoopFishingPointWord(), g_fish_records[1].points);
+    std::filesystem::remove_all(dir, error);
+}
+} // namespace coop

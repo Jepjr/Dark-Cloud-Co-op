@@ -1,3 +1,4 @@
+#include "coop/coop_zonechara.hpp" // coop-pt1111k
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_perf.hpp"
@@ -1773,6 +1774,7 @@ void CoopStep(bool playing) {
     PartnerCameraTick(); // coop: cameras
     CoopWorldsSimTick(); // coop-worlds: its test exit
     KeyRingTest();       // coop-keyring: its test hook, apart too
+    ItemSceneTest();     // pt1111c: the item scene's test hook
     GateOpenTick();      // coop-gateopen: a gate opened once stays open, apart too
     KeyDoorTick();       // coop-keydoor: key doors opening beside the game, apart too
 
@@ -1832,6 +1834,8 @@ void CoopStep(bool playing) {
     if (rejoined && g_partner.chara != nullptr && g_partner.loaded_chara >= 0) {
         PlaceBesidePlayer("rejoin (twin)");
     }
+
+    ZoneStep(); // coop-pt1111k: a character-limited floor's member kept played (and its test hooks)
 
     int chara = PickPartner();
 

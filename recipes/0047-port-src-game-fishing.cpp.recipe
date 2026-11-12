@@ -1,0 +1,54 @@
+# port/src/game/fishing.cpp from Chronicle's port/src/game/fishing.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/fishing.cpp
+base port/src/game/fishing.cpp
+from 6a44be31c3cb0ccf358434ed2429aacc721678ef
+to 5d650a4f12fb204ab6d70b0eb4e7954bbf7f4608
+@@ -1171,0 +1172,48
++
++// coop-eventslots (Jep's 11-11 item 1: each player fishes on their own): every global of the one fishing (the line, hook and float,
++// the bait, the fish, the rod), as ranges, so each fisher's set is exchanged with the live one around their step and draw
++// (port/src/coop/coop_eventslots.cpp).
++void FishingStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++    add(static_cast<void *>(&draw_under_water), sizeof(draw_under_water), "draw_under_water", context);
++    add(static_cast<void *>(&distp), sizeof(distp), "distp", context);
++    add(static_cast<void *>(&WaterLevel), sizeof(WaterLevel), "WaterLevel", context);
++    add(static_cast<void *>(&GroundLevel), sizeof(GroundLevel), "GroundLevel", context);
++    add(static_cast<void *>(&UkiGroundLevel), sizeof(UkiGroundLevel), "UkiGroundLevel", context);
++    add(static_cast<void *>(&HookGroundLevel), sizeof(HookGroundLevel), "HookGroundLevel", context);
++    add(static_cast<void *>(&LineGroundLevel), sizeof(LineGroundLevel), "LineGroundLevel", context);
++    add(static_cast<void *>(&EsaFrame), sizeof(EsaFrame), "EsaFrame", context);
++    add(static_cast<void *>(&esa_type), sizeof(esa_type), "esa_type", context);
++    add(static_cast<void *>(&HookFrame), sizeof(HookFrame), "HookFrame", context);
++    add(static_cast<void *>(&UkiFrame), sizeof(UkiFrame), "UkiFrame", context);
++    add(static_cast<void *>(&fishing_texb), sizeof(fishing_texb), "fishing_texb", context);
++    add(static_cast<void *>(&fish_texb), sizeof(fish_texb), "fish_texb", context);
++    add(static_cast<void *>(&esa_texb), sizeof(esa_texb), "esa_texb", context);
++    add(static_cast<void *>(&Fish), sizeof(Fish), "Fish", context);
++    add(static_cast<void *>(&AngleFish), sizeof(AngleFish), "AngleFish", context);
++    add(static_cast<void *>(&BattleFish), sizeof(BattleFish), "BattleFish", context);
++    add(static_cast<void *>(&FishNum), sizeof(FishNum), "FishNum", context);
++    add(static_cast<void *>(&cpoly), sizeof(cpoly), "cpoly", context);
++    add(static_cast<void *>(&cpoly_num), sizeof(cpoly_num), "cpoly_num", context);
++    add(static_cast<void *>(&set_hook_pos), sizeof(set_hook_pos), "set_hook_pos", context);
++    add(static_cast<void *>(&set_uki_pos), sizeof(set_uki_pos), "set_uki_pos", context);
++    add(static_cast<void *>(&pull_hook), sizeof(pull_hook), "pull_hook", context);
++    add(static_cast<void *>(&fishing_rect), sizeof(fishing_rect), "fishing_rect", context);
++    add(static_cast<void *>(&fish_rect), sizeof(fish_rect), "fish_rect", context);
++    add(static_cast<void *>(&UkiFrameTop), sizeof(UkiFrameTop), "UkiFrameTop", context);
++    add(static_cast<void *>(&Rod), sizeof(Rod), "Rod", context);
++    add(static_cast<void *>(&point), sizeof(point), "point", context);
++    add(static_cast<void *>(&old_p), sizeof(old_p), "old_p", context);
++    add(static_cast<void *>(&velo), sizeof(velo), "velo", context);
++    add(static_cast<void *>(&hookp), sizeof(hookp), "hookp", context);
++    add(static_cast<void *>(&hookop), sizeof(hookop), "hookop", context);
++    add(static_cast<void *>(&hookv), sizeof(hookv), "hookv", context);
++    add(static_cast<void *>(&hook_dist), sizeof(hook_dist), "hook_dist", context);
++    add(static_cast<void *>(&ukip), sizeof(ukip), "ukip", context);
++    add(static_cast<void *>(&ukiop), sizeof(ukiop), "ukiop", context);
++    add(static_cast<void *>(&ukiv), sizeof(ukiv), "ukiv", context);
++    add(static_cast<void *>(&uki_dist), sizeof(uki_dist), "uki_dist", context);
++    add(static_cast<void *>(&rod_top), sizeof(rod_top), "rod_top", context);
++    add(static_cast<void *>(&fishhook), sizeof(fishhook), "fishhook", context);
++    add(static_cast<void *>(&uki), sizeof(uki), "uki", context);
++}
++

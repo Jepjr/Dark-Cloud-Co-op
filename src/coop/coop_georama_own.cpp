@@ -95,7 +95,21 @@ struct Editor {
     int              select_parts = -1;
     EDIT_MENU_STATUS menu_status{};
     int              move_count = 0;
+    // coop-pt1111d (Jep's 11-11 playtest, items 15 and 15a: a building's name under either hand showed on both screens, and his
+    // name box stayed empty unless she hovered over something): the name label's text is retail's one EditNameMes, which each
+    // editor's step makes from its own focus (MakeMesWin(1)) or clears (MakeMesWin(-1)), and the town's draw shows its text
+    // ungated (EditNameMes.DrawMesWin) under a plate drawn from the editor's own focus (ParamDraw). Shared, the last step
+    // (hers) decided both screens' text. Each editor carries its own: the label's bytes (its text lines are in the object; it is
+    // always copied to and from the one global, so what it points at stays put). DC_COOP_MUTATE=georama_name_shared (twin):
+    // one label, as before.
+    alignas(16) unsigned char name_mes[sizeof(ClsMes)] = {};
+    bool                      name_kept = false;
 };
+
+bool NameShared() {
+    static const bool shared = Mutated("georama_name_shared");
+    return shared;
+}
 
 constexpr std::size_t kCameraFrom = offsetof(CCameraFollow, pos);
 
@@ -142,6 +156,10 @@ void SaveEditor(Editor &e) {
     e.select_parts = NowSelectParts;
     e.menu_status = EditMenuStatus;
     e.move_count = move_count;
+    if (!NameShared()) {
+        std::memcpy(e.name_mes, static_cast<void *>(&EditNameMes), sizeof(ClsMes));
+        e.name_kept = true;
+    }
 }
 
 void LoadEditor(const Editor &e) {
@@ -161,6 +179,9 @@ void LoadEditor(const Editor &e) {
     NowSelectParts = e.select_parts;
     EditMenuStatus = e.menu_status;
     move_count = e.move_count;
+    if (!NameShared() && e.name_kept) {
+        std::memcpy(static_cast<void *>(&EditNameMes), e.name_mes, sizeof(ClsMes));
+    }
 }
 
 struct Own {
@@ -645,6 +666,19 @@ void CoopP2DrawEditorBegin() {
     // This copy's player builds: the hand glides on from where the last frame left it.
     bool building = NetplayLocalPlayer() == 2 ? g_own.on : GameMode == ED_MODE_GEORAMA;
 
+    // coop-pt1111d (DC_COOP_DEBUG): the name label this copy's frame draws (made 1: a text; -1: none), and its own editor's focus, on each change.
+    if (CoopDebug() && building && ECursorFrame != nullptr) {
+        static int said = -2;
+        const int  focus = NowFocusParts != nullptr ? NowFocusParts->parts_no : -1;
+        const int  now = EditNameMes.mes_made * 1000 + focus;
+
+        if (now != said) {
+            said = now;
+            std::fprintf(stderr, "coop-georama: p%d draws name label %d (%d columns), its own focus part %d, link tick %lld\n", NetplayLocalPlayer(),
+                         EditNameMes.mes_made, EditNameMes.text_columns, focus, (long long) NetplayLinkTick());
+        }
+    }
+
     if (building && g_draw_saved && g_part_valid && !Mutated("georama_part_reset") && NowSelectParts == g_part_held) {
         sceVu0CopyVector(NowPartsCursorPos, g_part_glide);
     }
@@ -829,6 +863,16 @@ void CoopP2DrawEditorEnd() {
         g_part_valid = false;
     }
 
+    // coop-pt1111d: the name label as this frame drew it (its Step: the text's fade and reveal) goes on with the editor that drew it, as
+    // the hand's glide does; the steps read only whether it was made (mes_made), which a draw leaves alone.
+    static unsigned char drawn_name[sizeof(ClsMes)];
+    const bool           swapped_drawn = g_own.swapped;
+    const bool           keep_name = !NameShared() && (swapped_drawn || g_draw_saved);
+
+    if (keep_name) {
+        std::memcpy(drawn_name, static_cast<void *>(&EditNameMes), sizeof(ClsMes));
+    }
+
     // Player 1's editor back; hers stays as her step left it (what the drawing touched, her camera among it, is this
     // copy's alone, and the next steps must read the same editor on both copies).
     if (g_own.swapped) {
@@ -839,6 +883,12 @@ void CoopP2DrawEditorEnd() {
     if (g_draw_saved) {
         LoadEditor(g_draw_editor);
         g_draw_saved = false;
+    }
+
+    if (keep_name && swapped_drawn) {
+        std::memcpy(g_own.editor.name_mes, drawn_name, sizeof(ClsMes));
+    } else if (keep_name) {
+        std::memcpy(static_cast<void *>(&EditNameMes), drawn_name, sizeof(ClsMes));
     }
 }
 
@@ -1390,6 +1440,10 @@ bool CoopP2MenuHoldsParts() {
     return CoopP2MenuOpen() && (!PartsMenuLocal() || !HisPartsLocal() || Mutated("p1parts_one_at_a_time"));
 }
 
+bool CoopP1GeoramaBesideHerMenu() {
+    return TownBuilds() && !HisPartsMenuOnHerEngine((int) GameMode);
+}
+
 bool CoopP1PartsMenuElsewhere() {
     return HisPartsLocal() && NetplayLocalPlayer() != kHisPlayer;
 }
@@ -1632,11 +1686,65 @@ static void PlacePartTestTick() {
     CoopTownPlotDoorsForTest(plot);
 }
 
+// coop-pt1111d test hook (DC_COOP_TEST_GEO_HOVER=P, t-triangle-menu -Case townhover1/townhover2): once both players have built for 30 ticks
+// (his Georama and hers open, no parts menu), player P's cursor is put on the nearest spot over a standing part that is not a road (rings
+// of cells around it, each in a fixed order), so that player's own step focuses it; the other's cursor is left where it is. Once; every
+// copy alike (the globals are his editor here, hers swapped in for her).
+static void HoverTestTick() {
+    static const int player = TestEnvInt("DC_COOP_TEST_GEO_HOVER", 0);
+    static int       ticks = 0;
+    static bool      done = false;
+
+    if (player < 1 || player > 2 || done || pEditGround == nullptr || ECursorFrame == nullptr || g_own.swapped) {
+        return;
+    }
+    if (GameMode != ED_MODE_GEORAMA || !g_own.on || g_own.menu != 0 || ++ticks < 30) {
+        ticks = GameMode == ED_MODE_GEORAMA && g_own.on ? ticks : 0;
+        return;
+    }
+    done = true;
+    if (player == 2) {
+        SwapIn();
+    }
+
+    const float *p = ECursorFrame->position;
+    const float  cell = pEditGround->areas[0] != nullptr ? pEditGround->areas[0]->unit_size : 10.0f;
+    float        spot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool         found = false;
+
+    for (int ring = 0; ring <= 40 && !found; ring++) {
+        for (int dz = -ring; dz <= ring && !found; dz++) {
+            for (int dx = -ring; dx <= ring && !found; dx++) {
+                if (dx != -ring && dx != ring && dz != -ring && dz != ring) {
+                    continue;
+                }
+                float at[4] = {p[0] + dx * cell, p[1], p[2] + dz * cell, 1.0f};
+
+                if (InsidePart(at)) {
+                    sceVu0CopyVector(spot, at);
+                    found = true;
+                }
+            }
+        }
+    }
+    if (found) {
+        ECursorFrame->SetPosition(spot);
+        sceVu0CopyVector(NextCursorPos, spot);
+        sceVu0CopyVector(NowCursorPos, spot);
+    }
+    std::fprintf(stderr, "coop-georama: test: player %d's cursor %s (%.0f %.0f), link tick %lld\n", player, found ? "over a part at" : "finds no part near",
+                 found ? spot[0] : p[0], found ? spot[2] : p[2], (long long) NetplayLinkTick());
+    if (player == 2) {
+        SwapOut();
+    }
+}
+
 void CoopP2GeoramaTick() {
     coop::SoundOwner sound(2, true); // coop-menuse: her Georama's menu sounds are hers
     InputPadState    pad;
 
     PlacePartTestTick();
+    HoverTestTick();
 
     // coop-stage4 r4: her Georama carried into the merge holds where it is (no step, no close) until the copies are together and
     // she is shown in the linked town, on both copies alike (the set carried the hold); a link that drops meanwhile closes it.

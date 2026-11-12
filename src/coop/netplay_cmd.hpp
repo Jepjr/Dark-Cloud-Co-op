@@ -37,6 +37,7 @@ enum NetCommandKind : std::uint8_t {
     kCmdPresent = 14, // coop-opt7 (14 in train 56: 11 is coop-scriptmenus', 12-13 coop-small2's): a chest's presentation on its opener's copy ended: a = its kind, b = the player (coop_opener.cpp; 11 is the next free on cand56: renumber at the merge)
     kCmdQuit = 15, // coop-quittitle (15 at the repin's rebase onto train 56: 12-14 are coop-small2's and coop-opt7's): the sender's Quit Game from its in-game menu (no fields): the host's (player 1's) ends the session for
                    // every player, anyone else's takes that player alone to the title (netplay.cpp ApplyQuit)
+    kCmdDialogPick = 16, // coop-pt1111e: a pointer's click on a dialog framework choice: b = the choice + 1, selected in the clicker's session on every copy (coop_town.cpp)
 };
 
 // This copy's own player's command, applied on every copy on its frame's tick (see above).

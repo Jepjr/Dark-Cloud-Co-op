@@ -2,7 +2,7 @@
 target port/src/app/gameloop.cpp
 base port/src/app/gameloop.cpp
 from 3fb86052c81c0d3f4787ea22e2185ee63b0c22ff
-to c595ddb34e46b2eb531eb4232047b548bbc0f677
+to d80f5b77c9d2ba600f1f4ed392952f93658c7bf5
 @@ -10,0 +11,1
 +#include <span>
 @@ -58,0 +60,17
@@ -103,7 +103,7 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +    } else if (name == "pick") {
 +        jump.mode = GAME_MODE_MENU; // debug start: the picker in the developer menu's place
 +        jump.pick = true;
-@@ -666,0 +727,113
+@@ -666,0 +727,114
 +// debug start: once, the floor a dungeon:<n>:<floor> jump enters (0 up), marked reached; -1 otherwise.
 +int GameTakeJumpFloor() {
 +    int floor = g_jump_floor;
@@ -134,6 +134,7 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +    for (int flag : DebugStartMutated("scene") ? std::span<const int>() : std::span<const int>(scenes_seen)) {
 +        SaveData->SetGameFlag(flag, 1);
 +    }
++    DebugStartSeenFlags(floor); // pt1111c: DC_DEBUG_START_SEEN's flags too (a fixture's), and the floor for a join's resync
 +    // The party the story has by the end of this dungeon, each with its starting weapon, as joining gives it: a
 +    // fresh party of Toan alone cannot load some floors, which call on the member who joins in that dungeon
 +    // (Divine Beast Cave's 11th Xiao, Wise Owl Forest's 12th Goro, Shipwreck's 5th every member's weapon).
@@ -217,7 +218,7 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +    }
 +}
 +
-@@ -694,0 +868,12
+@@ -694,0 +869,12
 +// debug start: the press of pad 1's L3+R3 (the lockstep's pad 1 when linked: the host's), outside the menu.
 +bool GameDebugStartRequested() {
 +    static bool   held_before = false;
@@ -230,7 +231,7 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +    return pressed && mode != GAME_MODE_MENU;
 +}
 +
-@@ -715,0 +901,24
+@@ -715,0 +902,24
 +// coop: netplay: leaves the mode mid-frame, as the developer menu does, for the map a resync of
 +// linked copies sends both to (a dungeon's entrance, 200 on, or a town).
 +static void GameLeaveForNetplay(int next_map) {
@@ -255,49 +256,49 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +    return resync;
 +}
 +
-@@ -727,1 +936,2
+@@ -727,1 +937,2
 - 0d0693ab8f5b762a
 +    if (g_autosave && ConfigGet().autosave && !DebugStartSavesOff("the autosave") && // debug start
 +        !SaveSlotWriteAutosave()) {
-@@ -768,0 +979,6
+@@ -768,0 +980,6
 +void GameExtendFrameBudget(std::int64_t frames) {
 +    if (g_frame_budget >= 0) {
 +        g_frame_budget += frames;
 +    }
 +}
 +
-@@ -772,0 +989,4
+@@ -772,0 +990,4
 +bool GameFrameBudgetSpent() {
 +    return g_frame_budget >= 0 && g_frames >= g_frame_budget;
 +}
 +
-@@ -866,1 +1086,1
+@@ -866,1 +1087,1
 - 789e9a918adcb655
 +        if (!DebugMode && mode == GAME_MODE_MENU && !g_jump.pick) { // debug start: the picker needs no debug mode
-@@ -886,0 +1107,1
+@@ -886,0 +1108,1
 +        CoopAreaCardLoadStart(MapNo); // coop-areacard: the load's time against its card's, for the log
-@@ -898,0 +1120,1
+@@ -898,0 +1121,1
 +        DebugStartBeforeModeInit(); // debug start: after a join's resync, the floor the host was on
-@@ -912,0 +1135,1
+@@ -912,0 +1136,1
 +        CoopAreaCardLoaded(); // coop-areacard
-@@ -934,0 +1158,1
+@@ -934,0 +1159,1
 +            NetplayFrameStart(); // coop-snapshot
-@@ -950,0 +1175,6
+@@ -950,0 +1176,6
 +            // coop: netplay: DC_TICK_RAND_LOG=1 logs the random generator after each tick's mode loop, so two runs of the
 +            // same play drawn differently (render size, interpolation) can be shown to step the simulation alike: the
 +            // drawing must never feed its rand (tools/coop-qa/netplay/drawrand.ps1).
 +            if (TickRandLog()) {
 +                std::fprintf(stderr, "tickrand %lld %d %08x\n", (long long) g_frames, (int) mode, PortRandState());
 +            }
-@@ -973,1 +1203,2
+@@ -973,1 +1204,2
 - 98703d1b14d596d3
 +            // coop-quittitle: or a netplay session's Quit Game applied on this copy (its link closed by the take).
 +            if (result == 0 && (battlemenu::TakeBattleMenuTitleRequest() || NetplayTakeQuitToTitle())) {
-@@ -978,0 +1210,1
+@@ -978,0 +1211,1
 +            DebugStartTraceWhere(); // debug start: DC_DEBUG_START_TRACE's place lines for the tests
-@@ -985,0 +1218,1
+@@ -985,0 +1219,1
 +            CoopWorldsAfterFrame(); // coop-worlds: the tests' screen checks after a split
-@@ -992,0 +1226,15
+@@ -992,0 +1227,15
 +            // debug start: pad 1's L3+R3, from the lockstep's pads when linked, so both copies open the picker
 +            // on the same tick and its choice takes both there.
 +            if (GameDebugStartRequested()) {
@@ -313,7 +314,7 @@ to c595ddb34e46b2eb531eb4232047b548bbc0f677
 +                std::fill(std::begin(g_where_last), std::end(g_where_last), -2); // debug start: the place again after it
 +                break;
 +            }
-@@ -993,0 +1242,1
+@@ -993,0 +1243,1
 +        NetplayModeEnded(); // coop: netplay
-@@ -997,0 +1247,1
+@@ -997,0 +1248,1
 +        CoopWorldsCheckTownLeave(old_main_mode, NextMapNo); // coop-worlds: a town exit that did not split

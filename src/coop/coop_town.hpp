@@ -9,6 +9,8 @@ namespace dc::game {
 class CCameraFollow;
 class CCharacter;
 class CCamera;
+class CGamePad;
+class CTexAnimeData;
 } // namespace dc::game
 
 // Player 2 in town (game.coop): pad 2's left stick walks the partner beside Toan in the towns, the way
@@ -20,6 +22,44 @@ class CCamera;
 
 // Steps the partner. The town's walking mode calls it each tick after MainMode.
 void CoopTownStep();
+void CoopEventSlotsStep(); // coop-eventslots (coop_eventslots.cpp): once a town walk tick
+int  CoopEventSlotsStepPlayer();    // coop-eventslots: the player (1 up) whose parked slot's event steps now, 0 none
+bool CoopEventSlotParked(int index); // coop-eventslots: player index (0 up) has an own event running in its parked slot
+void CoopEventSlotsAfterLive();      // coop-eventslots: editloop's event mode, after the live event's step
+void CoopEventSlotsDraw();           // coop-eventslots: the town's draw, beside the talk slots' windows
+bool CoopEventSlotsView(float (*view)[4], float *eye); // coop-eventslots: this copy's player's parked event's camera, if any
+// coop-eventslots: each town player's pieces by actor index (coop_town.cpp)
+dc::game::CCharacter *CoopTownPlayerBody(int index, dc::game::CTexAnimeData **anime, int *anime_count);
+dc::game::CCamera    *CoopTownPlayerCamera(int index);
+int                   CoopTownPlayerEventAt(int index);
+void                  CoopTownHerEventPromoted(int event, const dc::game::CGamePad &pad, dc::game::CCharacter *main, dc::game::CTexAnimeData *anime, int anime_count);
+bool                  CoopTownEventBagSwap(int index);
+void                  CoopTownOwnEventEndNow();
+int                   CoopTownPlayerTextureBlock(int index);
+dc::game::CCameraFollow *CoopTownPlayerFollowCamera(int index);
+bool                  CoopTownPlayerBodyAgain(int index);
+void                  CoopTownWalkersForTest();
+bool                  CoopTownPlayerEventIsMap(int event_no);
+void                  CoopEventSlotsSessionReset();
+int                   CoopSysMesPlayerIn(int player);
+void                  CoopSysMesPlayerOut(int token);
+bool                  CoopSysMesHolds(int player);
+bool                  CoopEventSlotsAnyParked();
+void                  CoopEventSlotsApplied();
+// coop-eventslots: each player's own fishing (coop_eventslots.cpp), and the hooks editloop calls
+bool  CoopEventKeepsVillagers();
+bool  CoopFishingOn(int index);
+bool  CoopFishingHere();
+void  CoopFishingWalkIn();
+void  CoopFishingWalkOut();
+void  CoopFishingStepOthers();
+void  CoopFishingDraw(int pass);
+bool  CoopEventFishingStarts();
+void *CoopEventSlotsLiveInitIn(void *work, int player, int event_no);
+void  CoopEventSlotsLiveInitOut(bool started);
+void  CoopEventSlotsLiveIn();
+void  CoopEventSlotsLiveOut();
+void                  CoopTownTownEventStarts(int event_no);
 
 // Draws the partner. EditMainDraw calls it after the town's characters (and the interior's MainDraw after Toan).
 void CoopTownDraw();
@@ -27,6 +67,8 @@ void CoopTownDraw();
 // coop-fixtures (tests): the link tick DC_COOP_DOORPROMPT's cave door test armed on, -1 before (the press clock of
 // DC_COOP_MENUPRESS_FROM_DOOR counts from it).
 long long CoopTownDoorPromptArmed();
+// coop-cand1111fix: the link tick player P (1 or 2) first stood at the opened cave door with its event ready, -1 before (a test hook).
+long long CoopTownCaveDoorReadyTick(int player);
 
 // coop-inbuild: the partner inside a building (Jep's 2026-10-24 playtest: both in the village head's house, Xiao was gone
 // and could not move). EditInLoop calls it each tick, both copies alike: the room's parts her walk collides with, its
@@ -97,12 +139,17 @@ bool CoopTownHerRoomEventOn();
 // coop-closetglow: the room's key mode for this step (edit_in.cpp's EditInLoop): retail's lock while a message is up or the bag
 // overflows, but not on the room's walk for a message that is player 2's.
 int CoopTownRoomKeyMode(bool message, bool overflow);
+// coop-pt1111d: outdoors (run_event_check), whether the system message up (message) stands player 1's walk: not one that is another
+// player's own (SystemMesFor). DC_COOP_MUTATE=townbox_mes_shared (twin): any message stands him, as before.
+bool CoopTownMesLocksWalker(bool message);
 void CoopTownHerRoomEventStepIn();
 void CoopTownHerRoomEventStepOut();
 void CoopTownHerRoomEventEnd(int result);
 // The camera her event starts from (her own; room: the room's, without hers).
 namespace dc::game {
 class CCamera;
+class CGamePad;
+class CTexAnimeData;
 } // namespace dc::game
 CCamera *CoopTownHerRoomEventCamera(CCamera *room);
 // Toan's draw during her event: the event's info with its player drawn (he walks), else event as given.
@@ -230,6 +277,8 @@ void CoopTownTraceSystemMes();
 // is from (the town's NowCamera when null; the interior passes its own).
 namespace dc::game {
 class CCamera;
+class CGamePad;
+class CTexAnimeData;
 } // namespace dc::game
 void CoopTownViewEnd(CCamera *camera = nullptr);
 // The camera the town's sky is drawn around (EditMainDraw's EdDrawSky): player 2's own on her copy while the frame is
@@ -266,6 +315,8 @@ bool CoopTownMapEventQueued(int event_no); // (a map event Toan's walk queued th
 bool CoopTownRoomEventQueued(int event_no); // (the same in a room: an event point Toan's walk queued; edit_in)
 int  CoopTownOwnTownEvent();
 bool CoopTownWalksThroughOwnEvent(int walker);
+bool CoopTownWalkQueues(); // coop-pt1111a: whether the game's player's walk may queue an event (not beside another player's own town event; editloop's MainMode)
+void CoopTownBesideWalkCamera(bool moved); // coop-pt1111a: whether that walk moved the running event's camera (the test's count)
 void CoopTownHisWalkInHerEventIn();
 void CoopTownHisWalkInHerEventOut();
 bool CoopTownOwnEventHiddenBegin(bool windows);

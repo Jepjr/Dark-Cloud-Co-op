@@ -29,6 +29,9 @@
 
 #include "btitem.hpp"
 #include "clsmes.hpp" // coop-mayorhouse: the talk window's place (DC_COOP_TEST_TALK_RECT)
+#include "dialog/framework.hpp" // coop-pt1111e: each talker's dialog session (TalkSwap)
+#include "dialog/npc.hpp"       // coop-pt1111e: and its window
+#include "coop/netplay_cmd.hpp" // coop-pt1111e: kCmdDialogPick
 #include "camerafollow.hpp"
 #include "character.hpp"
 #include "collision.hpp"
@@ -1394,6 +1397,12 @@ void TownWarpForTest() {
 namespace {
 int           g_split_cam_check = 0;
 sceVu0FVECTOR g_split_cam_eye = {};
+// coop-pt1111i: her talk ran at the split: the walking circle the game camera takes on the next town tick (SplitTalkCircleTick)
+struct SplitTalk {
+    bool  on = false;
+    float distance = 0.0f, height = 0.0f, angle = 0.0f;
+};
+SplitTalk g_split_talk;
 } // namespace
 
 // coop-worlds: player 2's copy staying in town: Toan, the town's player, stands where the partner stood.
@@ -1453,6 +1462,21 @@ bool TownPlacePlayerAtPartner(float *out) {
             hers->GetPos(eye);
             const float dx = eye[0] - hers->follow[0];
             const float dz = eye[2] - hers->follow[2];
+
+            // coop-pt1111i (Jep's 11-11 playtest item 16, P2's side: "a jump"; the tester's log 9297-9317: her talk ended apart just after he
+            // went in, "the game camera's first step after the split moved her eye 94.1 (distance 70.0 height 9.8)", her view 156.8 degrees in a
+            // frame): with her talk running her camera is the talk's (EdTalkMode, follow off, 24 from her), and its eye circle is no walking one.
+            // Handed that, the game camera stood 24 off through the talk the split made the game's, and the walk after it read that beside a wall
+            // as boxed in and turned round at once (EdCameraWalls: under 35, distance 70, height 10, half a turn). Retail's game camera keeps its
+            // walking circle through a talk. This frame is still the walk's (the split comes in its step, and the town draws the game camera
+            // after it), so the game camera takes the talk's pose here as before; from the next town tick, when retail's talk mode draws from
+            // its own talk camera, it takes the circle her camera walked with (its distance, height and angle: a talk leaves them) and stands
+            // on it (SplitTalkCircleTick). The talk's end then cuts to the walking camera, as retail's does.
+            // DC_COOP_MUTATE=split_talk_circle (twin): the talk's eye circle kept, as before.
+            g_split_talk.on = CoopTownHerTalkCamera() != nullptr && !Mutated("split_talk_circle");
+            g_split_talk.distance = hers->distance;
+            g_split_talk.height = hers->height;
+            g_split_talk.angle = hers->GetAngle();
 
             if (Mutated("split_cam_targets")) {
                 MainCamera.SetDistance(hers->distance);
@@ -1722,6 +1746,23 @@ void TownResetForSession() {
     g_town.motion = -1;
     g_town.airborne = 0;
     g_town.has_ground = false;
+    // coop-soakfix62 (the v0.1.1 soak's leave seeds 1431, 1511, 1727: OUT OF SYNC at tick 60 after a rejoin's resync, the town
+    // camera's follow apart from link tick 40, Toan's place alike): her wall in Toan's walk (CoopTownPartnerWall) is keyed on
+    // Town::stood, which her step sets and clears (PartnerStep), and the reset above ends her body in this load but left stood
+    // as the last step before it had it. The resync's town event (ticks 34-38) steps no partner, so at Toan's first walk step
+    // after the load (link tick 39, before her placing that tick) the wall still stood, from her body where each copy last had
+    // it before the resync (the rejoining copy's own fixture spot, 12.5 ahead of Toan's spawn; the host's where she was): his
+    // step slid off her on one copy alone, and the camera's follow (his place plus 7 of that step) stayed apart. Her wall goes
+    // with her body; her next step stands her again, in this load. DC_COOP_MUTATE=reset_keeps_wall (twin): left set, as before.
+    if (g_town.stood) {
+        const bool kept = Mutated("reset_keeps_wall");
+
+        std::fprintf(stderr, "coop-town: the session reset unloads player 2's town body, which stood as a wall in Toan's walk: %s\n",
+                     kept ? "the wall kept (reset_keeps_wall)" : "the wall ends with it");
+        if (!kept) {
+            g_town.stood = false;
+        }
+    }
     g_indoor.was = false; // coop-inbuild
     g_indoor.marker = -1;
     // opt8 (the resync texture flood): her room event and every talk slot end too. A resync takes the host's state and loads the zone
@@ -1739,6 +1780,7 @@ void TownResetForSession() {
         g_room_event.bag_in = false;
         std::memset(static_cast<void *>(g_talks), 0, sizeof g_talks);
     }
+    CoopEventSlotsSessionReset(); // coop-eventslots
 }
 
 } // namespace coop
@@ -1953,6 +1995,8 @@ void XiaoAlwaysJoined() {
 // camera's angle) until she stands on it, as a walk there by hand: her own collision and facing, not a warp. Both
 // linked copies step it alike. DC_COOP_DEBUG: her distance to the door every 30 steps.
 static bool g_away_done = false; // coop-p2doors: DC_COOP_INDOOR_AWAY's warp done in this room (IndoorDoorForTest)
+
+static bool OwnMesHolds(int player); // coop-pt1111d (below, by CoopTownMesLocksWalker)
 
 static void WalkToDoorForTest(float &lx, float &ly, float angle) {
     static const int at = TestEnvInt("DC_COOP_INDOOR_WALK_DOOR", 0);
@@ -2777,6 +2821,7 @@ static void PartnerStep() {
         coop::TownDoorPickOpenFor(2) || // coop-doorprompt: and at her picker by the cave door
         CoopTownCaveActs(2) ||          // coop-doorfix: and while the cave door acts on her
         coop::TownNoteHolds(2) ||       // coop-cavehold: and while a door's message waits for her Cross
+        OwnMesHolds(2) ||               // coop-pt1111d: and while her own message (her town chest's) waits for her Cross
         CoopWorldsQuestionHolds(1)) {   // coop-gatepopup: and in a gate's question, asking or asked
         pad = InputPadState{};
         pad.connected = true;
@@ -3033,17 +3078,21 @@ static void IndoorDoorForTest() {
     IndoorWarpForTest("DC_COOP_INDOOR_AWAY", (float) TestEnvInt("DC_COOP_INDOOR_AWAY_DIST", 45), g_away_done);
 }
 
-// coop-p2doors test hook (DC_COOP_INDOOR_DOOR_APART=K): player 2's copy apart inside a building (she went in alone) puts
-// its player, her, at the room's first door facing out once K of its walking steps have passed in the room, as her walk
-// there would; once per room.
+// coop-p2doors test hook (DC_COOP_INDOOR_DOOR_APART=K[:pN]): player N's copy (2 unless said) apart inside a building (its
+// player went in alone) puts its player at the room's first door facing out once K of its walking steps have passed in the
+// room, as a walk there would; once per room. coop-pt1111g (Jep's 11-11 playtest item 16: Toan back out of a house while she
+// talks in town): ":p1" for Toan on his copy (DC_COOP_INDOOR_DOOR, the linked room's, puts nobody apart).
 static void ApartDoorForTest(int mode) {
     static char room[16] = "";
     static int  steps = 0;
     static bool done = false;
 
-    const int at = TestEnvInt("DC_COOP_INDOOR_DOOR_APART", 0);
+    const int  at = TestEnvInt("DC_COOP_INDOOR_DOOR_APART", 0);
+    const char *spec = TestEnv("DC_COOP_INDOOR_DOOR_APART");
+    const char *role_at = spec != nullptr ? std::strstr(spec, ":p") : nullptr;
+    const int  role = role_at != nullptr ? std::atoi(role_at + 2) : 2;
 
-    if (at <= 0 || NetplayRole() != 2 || Chara == nullptr || Chara->frame == nullptr) {
+    if (at <= 0 || NetplayRole() != role || Chara == nullptr || Chara->frame == nullptr) {
         return;
     }
 
@@ -3072,13 +3121,20 @@ static void ApartDoorForTest(int mode) {
     Chara->frame->SetPosition(pos);
     Chara->SetRotation(0.0f, rot, 0.0f);
     Chara->Step();
-    std::printf("coop: test: apart door warp in %s at step %d: player 2 to (%.1f %.1f %.1f) facing %.2f\n", EdInteriorName, steps, pos[0], pos[1], pos[2], rot);
+    std::printf("coop: test: apart door warp in %s at step %d: player %d to (%.1f %.1f %.1f) facing %.2f\n", EdInteriorName, steps, role, pos[0], pos[1], pos[2], rot);
     std::fflush(stdout);
 }
 
 // coop-closet: where the game's own search (EdGetEvent) finds the room's event N from a pose near from: a scan of the floor
 // around it, 2 units and eight facings apart. False when none is in reach.
+static bool EventSpotNearKind(const float *from, int kind, int event, float *pos, float *yaw);
+
 static bool EventSpotNear(const float *from, int event, float *pos, float *yaw) {
+    return EventSpotNearKind(from, ED_EVENT_POINT_EVENT, event, pos, yaw);
+}
+
+// (coop-pt1111a: any kind of point; event -1 any side)
+static bool EventSpotNearKind(const float *from, int kind, int event, float *pos, float *yaw) {
     for (int r = 0; r <= 120; r += 2) {
         for (int dx = -r; dx <= r; dx += 2) {
             for (int dz = -r; dz <= r; dz += 2) {
@@ -3091,8 +3147,8 @@ static bool EventSpotNear(const float *from, int event, float *pos, float *yaw) 
                     sceVu0FVECTOR  rot = {0.0f, -PI + f * (PI / 4.0f), 0.0f, 0.0f};
                     ED_EVENT_PARAM param;
 
-                    if (EdGetEvent(EdInInfo->event_points, 32, &param, at, rot, NowTime) == 0 || param.kind != ED_EVENT_POINT_EVENT ||
-                        param.point == nullptr || param.point->side != event) {
+                    if (EdGetEvent(EdInInfo->event_points, 32, &param, at, rot, NowTime) == 0 || param.kind != kind || param.point == nullptr ||
+                        (event >= 0 && param.point->side != event)) {
                         continue;
                     }
 
@@ -3155,6 +3211,124 @@ static void ApartEventForTest(int mode) {
     std::printf("coop: test: apart event warp in %s at step %d: player 2 to (%.1f %.1f %.1f) facing %.2f, at event %d\n", EdInteriorName, steps, pos[0],
                 pos[1], pos[2], yaw, event);
     std::fflush(stdout);
+}
+
+// coop-pt1111f: where the game's search (EdGetEvent) places a room point: on its part's object (its own position is local
+// to it) or its map object, else its own. False when its part is not built.
+static bool PointWorld(const ED_EVENT_POINT &point, float *pos) {
+    float       rot[4] = {point.rotation[0], point.rotation[1], point.rotation[2], point.rotation[3]};
+    CMapObject *object = point.map_object;
+
+    std::copy(point.position, point.position + 4, pos);
+    if (point.parts_no >= 0) {
+        object = EdExchangeInfo.ground != nullptr ? (CMapObject *) EdExchangeInfo.ground->GetPartsObject(point.parts_no) : nullptr;
+        if (object == nullptr) {
+            return false;
+        }
+    }
+    if (object != nullptr) {
+        GetPosRot(object, pos, rot);
+    }
+    return true;
+}
+
+// coop-pt1111f test hook (DC_COOP_TEST_ROOM_BOX=P:K): on player P's copy (P 0: either copy) apart inside a building, at its
+// Kth walk step there each time it comes in, every item box of the room is logged (its flag's value, opened 1, and this
+// copy's first-visit mark for it), and its player is put where the game's own search (EdGetEvent) finds a box still shut,
+// so its Cross opens it as the game's walk does (ebattle.cpp); 60 steps on, the boxes are logged again.
+static void ApartBoxForTest(int mode) {
+    static const char *const spec = TestEnv("DC_COOP_TEST_ROOM_BOX");
+    static char              room[16] = "";
+    static int               player = 0, at = 0, steps = 0, entry = 0;
+    static bool              read = false;
+
+    if (!read) {
+        read = true;
+        if (spec == nullptr || std::sscanf(spec, "%d:%d", &player, &at) != 2 || at <= 0) {
+            player = -1;
+        }
+    }
+    if (player < 0 || (player > 0 && NetplayRole() != player) || Chara == nullptr || Chara->frame == nullptr || EdInInfo == nullptr) {
+        return;
+    }
+
+    // A new entry: another room, or this one again after a gap in the room's frames (this runs on every one of them, any
+    // mode, so a gap is the town between: its load alone is longer).
+    static std::chrono::steady_clock::time_point last{};
+    const auto                                   now = std::chrono::steady_clock::now();
+
+    if (std::strncmp(room, EdInteriorName, sizeof room) != 0 || now - last > std::chrono::milliseconds(300)) {
+        std::snprintf(room, sizeof room, "%s", EdInteriorName);
+        steps = 0;
+        entry++;
+    }
+    last = now;
+    if (mode != 0 || (++steps != at && steps != at + 60)) { // ED_IN_MODE_WALK
+        return;
+    }
+
+    for (ED_EVENT_POINT &point : EdInInfo->event_points) {
+        if (point.enabled != 0 && point.event_type == ED_EVENT_POINT_ITEM_BOX && point.completion_flag > 0) {
+            sceVu0FVECTOR where;
+            const bool    placed = PointWorld(point, where);
+
+            std::fprintf(stderr,
+                         "coop: test: room box in %s, entry %d %s: flag %d (map %d) opened %d, first-visit mark %d, item %d, needs floor %d, at (%.1f %.1f %.1f)%s, "
+                         "live %d\n",
+                         EdInteriorName, entry, steps == at ? "as it comes in" : "60 steps on", point.completion_flag, MapNo, EdGetMapFlag(point.completion_flag),
+                         SaveData->GetMapInitFlag(MapNo, point.completion_flag), point.side, point.minimum_progress, where[0], where[1], where[2],
+                         placed ? "" : " (no part)", CheckEventPoint(&point, NowTime));
+        }
+    }
+    std::fflush(stderr);
+    if (steps != at) {
+        return;
+    }
+
+    sceVu0FVECTOR toan;
+
+    Chara->GetPosition(toan);
+    // Around each box in turn (the room's first first), on the player's floor (the search takes a box from 1 below the
+    // player's feet to 20 above them).
+    for (const ED_EVENT_POINT &box : EdInInfo->event_points) {
+        sceVu0FVECTOR where;
+
+        if (box.enabled == 0 || box.event_type != ED_EVENT_POINT_ITEM_BOX || box.completion_flag <= 0 || !PointWorld(box, where)) {
+            continue;
+        }
+
+        const float y = where[1] < toan[1] - 1.0f || where[1] > toan[1] + 20.0f ? where[1] : toan[1];
+
+        for (int r = 2; r <= 30; r += 2) {
+            for (int dx = -r; dx <= r; dx += 2) {
+                for (int dz = -r; dz <= r; dz += 2) {
+                    if (std::max(std::abs(dx), std::abs(dz)) != r) {
+                        continue;
+                    }
+                    for (int f = 0; f < 8; f++) {
+                        sceVu0FVECTOR  pos = {where[0] + dx, y, where[2] + dz, 1.0f};
+                        sceVu0FVECTOR  rot = {0.0f, -PI + f * (PI / 4.0f), 0.0f, 0.0f};
+                        ED_EVENT_PARAM param;
+
+                        if (EdGetEvent(EdInInfo->event_points, 32, &param, pos, rot, NowTime) == 0 || param.kind != ED_EVENT_POINT_ITEM_BOX) {
+                            continue;
+                        }
+                        Chara->SetPosition(pos);
+                        Chara->frame->SetPosition(pos);
+                        Chara->SetRotation(0.0f, rot[1], 0.0f);
+                        Chara->Step();
+                        std::fprintf(stderr, "coop: test: room box warp in %s, entry %d: player %d to (%.1f %.1f %.1f) facing %.2f, by the shut box\n",
+                                     EdInteriorName, entry, NetplayRole(), pos[0], pos[1], pos[2], rot[1]);
+                        std::fflush(stderr);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    std::fprintf(stderr, "coop: test: room box warp in %s, entry %d: no shut box in reach (player at %.1f %.1f %.1f)\n", EdInteriorName, entry, toan[0], toan[1],
+                 toan[2]);
+    std::fflush(stderr);
 }
 
 // coop-mayorhouse test hook (DC_COOP_TEST_ROOM_TALK=N:M): Toan put before the room's first villager (the mayor, i01h06),
@@ -3347,6 +3521,85 @@ static void IndoorHisClosetForTest() {
     std::fflush(stderr);
 }
 
+// coop-pt1111a test hook (DC_COOP_TEST_ROOM_BOX=P, x-room-chest): linked and together in a room, the fixture's state back, player P
+// (1 Toan, 2 her) is put where the game's own search finds the room's nearest shut item box (its red chest), the other left where the
+// fixture stood them, in the room; once. Both linked copies step it alike. (A line anchors the test's press.)
+static void RoomBoxForTest() {
+    COOP_TEST_SWITCH(int, who, TestEnvInt("DC_COOP_TEST_ROOM_BOX", 0));
+    static bool done = false;
+    CCharacter *const toan = EdExchangeInfo.player; // (the room's Toan, as IndoorHisClosetForTest)
+    static int  box_flag = -1; // (its opened flag: said once set, whoever opened it)
+
+    if (done && box_flag > 0 && EdGetMapFlag(box_flag) != 0) {
+        std::fprintf(stderr, "coop: test: room box flag %d set at link tick %lld\n", box_flag, (long long) NetplayLinkTick());
+        std::fflush(stderr);
+        box_flag = -1;
+    }
+    if (who <= 0 || done || !NetplayStateFileLoaded() || EdInInfo == nullptr || g_indoor.mode != 0 || g_town.body == nullptr || toan == nullptr || toan->frame == nullptr || CoopWorldsApart()) {
+        return;
+    }
+    done = true;
+
+    sceVu0FVECTOR pos;
+    float         yaw = 0.0f;
+
+    // (the room's first shut box (Jep's mayor's-house chest is point 1, upstairs at y 35), searched round its own place)
+    bool placed = false;
+
+    for (int i = 0; i < 32 && !placed; i++) {
+        const ED_EVENT_POINT &one = EdInInfo->event_points[i];
+
+        if (one.event_type != ED_EVENT_POINT_ITEM_BOX || (one.completion_flag > 0 && EdGetMapFlag(one.completion_flag) != 0)) {
+            continue;
+        }
+        sceVu0FVECTOR at = {one.position[0], one.position[1], one.position[2], 1.0f};
+
+        // (a box waits for a dungeon floor reached (CheckEventPoint): the fixture's save is earlier than Jep's, so its progress is
+        // raised to the box's, both copies alike, as TownBoxWarpForTest does)
+        if (CDngStatusData *status = SaveData != nullptr ? SaveData->GetDngStatus() : nullptr;
+            status != nullptr && one.minimum_progress > 0 && status->floor_reached[0] + 1 < one.minimum_progress) {
+            status->floor_reached[0] = (s8) (one.minimum_progress - 1);
+            std::fprintf(stderr, "coop: test: room box: floor reached raised to %d for point %d\n", one.minimum_progress - 1, i);
+        }
+        placed = EventSpotNearKind(at, ED_EVENT_POINT_ITEM_BOX, one.side, pos, &yaw);
+    }
+    if (!placed) {
+        std::fprintf(stderr, "coop: test: room box: no shut item box in reach in %s\n", EdInteriorName);
+        for (int i = 0; i < 32; i++) { // (what the room's points are)
+            const ED_EVENT_POINT &q = EdInInfo->event_points[i];
+
+            if (q.event_type != 0) {
+                std::fprintf(stderr, "coop: test: room box: point %d kind %d side %d flag %d (%s) progress %d at (%.1f %.1f %.1f)\n", i, q.event_type, q.side, q.completion_flag,
+                             q.completion_flag > 0 && EdGetMapFlag(q.completion_flag) != 0 ? "set" : "clear", q.minimum_progress, q.position[0], q.position[1], q.position[2]);
+            }
+        }
+        return;
+    }
+    if (who == 1) {
+        toan->SetPosition(pos);
+        toan->frame->SetPosition(pos);
+        toan->SetRotation(0.0f, yaw, 0.0f);
+        toan->frame->SetRotation(0.0f, yaw, 0.0f);
+        toan->Step();
+    } else {
+        sceVu0CopyVector(g_town.pos, pos);
+        g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
+        g_town.body->frame->SetRotation(0.0f, yaw, 0.0f);
+        g_town.body->SetRotation(0.0f, yaw, 0.0f);
+    }
+    {
+        sceVu0FVECTOR  face = {0.0f, yaw, 0.0f, 0.0f};
+        ED_EVENT_PARAM param;
+
+        if (EdGetEvent(EdInInfo->event_points, 32, &param, pos, face, NowTime) != 0 && param.point != nullptr) {
+            box_flag = param.point->completion_flag;
+        }
+    }
+    std::fprintf(stderr, "coop: test: room box (flag %d): %s to (%.1f %.1f %.1f) facing %.2f in %s at link tick %lld\n", box_flag, who == 1 ? "Toan" : "player 2", pos[0], pos[1], pos[2], yaw,
+                 EdInteriorName, (long long) NetplayLinkTick());
+    std::fflush(stderr);
+}
+
 // coop-hertalk test hook (DC_COOP_INDOOR_TALK_SPOT=K): linked and together in a room, at her Kth step in it (as
 // DC_COOP_INDOOR_EVENT), she is put 9 units before the room's first villager drawn (the mayor in i01h06), facing him, as
 // her walk there would; once per room. Both linked copies step it alike.
@@ -3418,6 +3671,8 @@ static void IndoorTalkSpotForTest() {
     }
 }
 
+static bool PartnerOpenBox(const ED_EVENT_PARAM &param); // (coop-pt1111a: a room's item box, HerRoomBoxAt)
+
 // coop-roomevent (Jep's 2026-10-27 playtest of main 52fe4b4: with P1 in the mayor's house P2 saw no "!" at the closet; her
 // Cross there warped Toan to it, the item's scene played on his screen, both screens faded, and then her pad drove Toan):
 // her Cross was put on Toan's pad, so the closet ran as his event (Toan the script's main character, its camera, window
@@ -3465,6 +3720,31 @@ int HerRoomPickupAt(const void *program) {
     }
 
     return checked ? event : -1;
+}
+
+// coop-pt1111a (Jep's 11-11 playtest, items 7/7a: "P2 cannot open the red chest in the mayor's house while P1 is in the house; she
+// can once he leaves"): a room's red chest is an item box (ED_EVENT_POINT_ITEM_BOX on the room's points), and only Toan's walk
+// (EdMoveChara's item box branch) opens one. Apart her copy's player is the game's walker, so hers opened there; together her
+// room Cross took event points and villagers alone (HerRoomPickupAt: "no pickup or villager in reach", Jep's log 4120-4276). The
+// town's own (coop-townchest, PartnerTownBox) had the same cause and fix; the room's is that fix on the room's points: her Cross
+// where the game's own search from her pose finds a shut box opens it as Toan's walk does (PartnerOpenBox). Not a P1-presence
+// gate. DC_COOP_MUTATE=no_partner_room_box (twin): her Cross opens nothing in a room, as before.
+bool HerRoomBoxAt() {
+    if (!g_town.visible || !g_indoor.was || CoopWorldsApart() || g_town.body == nullptr || EdInInfo == nullptr || !CoopWorldsPartnerMayStart(nullptr, -1) ||
+        Mutated("no_partner_room_box")) {
+        return false;
+    }
+
+    sceVu0FVECTOR  rotation;
+    ED_EVENT_PARAM param;
+
+    g_town.body->frame->GetRotation(rotation);
+    if (EdGetEvent(EdInInfo->event_points, 32, &param, g_town.pos, rotation, NowTime) == 0 || param.kind != ED_EVENT_POINT_ITEM_BOX) {
+        return false;
+    }
+    std::fprintf(stderr, "worlds: player 2's Cross at the room's item box (item %d, flag %d) at link tick %lld\n", param.point != nullptr ? param.point->side : -1,
+                 param.point != nullptr ? param.point->completion_flag : -1, (long long) NetplayLinkTick());
+    return PartnerOpenBox(param);
 }
 
 // coop-pt1106-batch (Jep's 2026-11-06 playtest, item 3: "P2 can only use the fishing board sign while P1 is out of the area"):
@@ -3743,6 +4023,14 @@ void TalkSwap(int k) {
     for (std::size_t i = 0; i < sizeof(ClsMes); i++) {
         std::swap(live[i], g_talks[k].window[i]);
     }
+    // coop-pt1111e (design for three): the slot's dialog framework session and its window too (a quest's choices: the mayor's
+    // supplies), each talker's own; one global session made two framework talks at once one conversation. The window's text is this
+    // copy's own buffer, so EditMes1 is pointed at the one swapped in. DC_COOP_MUTATE=dialog_session_shared (twin): one for all.
+    if (!Mutated("dialog_session_shared")) {
+        dc::dialog::SwapSession(k);
+        dc::dialog::DialogNpcSwapWindow(k);
+        dc::dialog::DialogNpcRepoint();
+    }
 }
 
 void HerTalkStateFresh() {
@@ -3881,6 +4169,11 @@ int CoopTownHerRoomEvent(const void *program, int room_mode) {
     if (!pressed || Mutated("no_room_event") || g_room_event.on) { // coop-hertalk: (her Cross is her talk's while it runs)
         return -1;
     }
+    // coop-eventslots: her Cross is her own parked event's or her fishing's while either runs: it starts nothing of the town's
+    // (it read the board a second time, as the town's, on the tick his ended). DC_COOP_MUTATE=busy_cross_starts (twin): as before.
+    if ((CoopEventSlotParked(kTownBodyPlayer - 1) || CoopFishingOn(kTownBodyPlayer - 1)) && !Mutated("busy_cross_starts")) {
+        return -1;
+    }
 
     // coop-joinfix (Jep's 2026-10-29 playtest, parked 1: her talk with the mayor started again at each Cross on its last window,
     // so she could not leave it; tonight's log: "talk ends at link tick 1336", "talks to the room's villager 0 ... at link tick
@@ -3891,6 +4184,10 @@ int CoopTownHerRoomEvent(const void *program, int room_mode) {
     }
 
     g_room_event.villager = -1;
+    // coop-pt1111a: a room's item box in reach: opened as Toan's walk opens one (her Cross is spent on it)
+    if (room_mode == 0 && EdInteriorFlag != 0 && HerRoomBoxAt()) { // ED_IN_MODE_WALK
+        return -1;
+    }
     // (coop-talks2: a pickup, a script of the room's, only in its walk; a talk beside his talk or menu too)
     int event = room_mode == 0 ? HerRoomPickupAt(program) : -1; // ED_IN_MODE_WALK
 
@@ -4179,10 +4476,41 @@ int CoopTownRoomKeyMode(bool message, bool overflow) {
     return overflow || (message && !hers) ? 0 : 0xFFFF;
 }
 
+// coop-pt1111d (Jep's 11-11 playtest, item 9: "Town: P2 opens a red chest -> P2 can keep walking, P1 is frozen until the confirmation"):
+// outdoors the town's walk takes the pad from player 1 while any system message is up (run_event_check: EdSystemMesCheck), retail's
+// walker standing while his own box's message waits, so her box's message (PartnerOpenBox: hers, SystemMesFor 2) stood Toan, and
+// nothing stood her. coop-closetglow gave a room this rule (CoopTownRoomKeyMode); the town's walk had none. Now a message that is
+// another player's leaves his walk his, and her own holds her (PartnerTownStep's pad, the opener held as retail holds Toan) until
+// her Cross takes it (her box's message waits for it, as Toan's does). Both copies alike (the message and whose it is are the same on
+// every copy). DC_COOP_MUTATE=townbox_mes_shared (twin): all three as before.
+bool CoopTownMesLocksWalker(bool message) {
+    if (!message || Mutated("townbox_mes_shared")) {
+        return message;
+    }
+    const int whose = coop::SystemMesFor();
+
+    return whose == 0 || whose == 1;
+}
+
+// coop-pt1111d: whether a system message up now waits for this player's own Cross (the opener held as retail holds its walker).
+// cand1111b: with coop-eventslots' message slots a player's own message (her box's: MessageBy, CoopSysMesSetIn) is up in that
+// player's own slot, not the live one, so it is asked there too (CoopSysMesHolds); the live one's whose-rule stays for the rest.
+static bool OwnMesHolds(int player) {
+    if (Mutated("townbox_mes_shared")) {
+        return false;
+    }
+    if (player > 1 && CoopSysMesHolds(player)) {
+        return true;
+    }
+    return EdSystemMesCheck() != 0 && coop::SystemMesFor() == player;
+}
+static int g_her_sys_token = 0; // coop-eventslots: her message slot live around her own event's step
+
 void CoopTownHerRoomEventStepIn() {
     if (!g_room_event.on) {
         return;
     }
+    g_her_sys_token = CoopSysMesPlayerIn(g_room_event.player > 0 ? g_room_event.player : 2); // coop-eventslots: her messages her own
 
     EdSetKeyMode(EdSystemMesCheck() != 0 || EdCheckItemOver() != 0 ? 0 : 0xFFFF); // coop-closetglow: her step under retail's lock
 
@@ -4204,6 +4532,8 @@ void CoopTownHerRoomEventStepIn() {
 
 void CoopTownHerRoomEventStepOut() {
     RoomEventStepOut();
+    CoopSysMesPlayerOut(g_her_sys_token); // coop-eventslots
+    g_her_sys_token = 0;
     if (g_room_event.on) {
         EdSetKeyMode(CoopTownRoomKeyMode(EdSystemMesCheck() != 0, EdCheckItemOver() != 0)); // coop-closetglow: the room's again
     }
@@ -4570,7 +4900,38 @@ static void TalkTake(int k) {
 // Once a tick, before the town's (editloop) or the room's (edit_in) mode switch, on every copy alike.
 static void CarriedTalkBecomesHers(); // (below, coop-pt1109a)
 
+static void DialogHooksOnce(); // coop-pt1111e (below, with the draws)
+static void TestDialogMouse();
+
+// coop-pt1111i: the tick after a split that made her talk the game's (TownPlacePlayerAtPartner), before the town's mode switch: the game camera,
+// which the split's walk frame drew from at the talk's pose, takes the walking circle her camera had (retail's game camera through a talk), placed
+// on it at once; retail's talk mode draws from its talk camera from here, and the talk's end cuts to this one.
+static void SplitTalkCircleTick() {
+    if (!g_split_talk.on) {
+        return;
+    }
+    g_split_talk.on = false;
+    if (EdInteriorFlag != 0 || Chara == nullptr) {
+        return;
+    }
+    sceVu0FVECTOR at;
+
+    Chara->GetPosition(at);
+    MainCamera.FollowOn();
+    MainCamera.SetFollow(at[0], at[1] + 14.0f, at[2]);
+    MainCamera.SetDistance(g_split_talk.distance);
+    MainCamera.SetHeight(g_split_talk.height);
+    MainCamera.SetAngleSoon(g_split_talk.angle);
+    MainCamera.Step(-1);
+    std::fprintf(stderr, "coop-town: her talk goes on apart: the game camera walks on her circle, distance %.1f height %.1f (town mode %d)\n", MainCamera.distance,
+                 MainCamera.height, (int) ::GameMode);
+}
+
 void CoopTalkIntoSlots() {
+    SplitTalkCircleTick(); // coop-pt1111i (apart too)
+    DialogHooksOnce(); // coop-pt1111e
+    CoopTownMenuQuestShopTick();
+    TestDialogMouse();
     if (!Linked() || CoopWorldsApart() || Mutated("talk_town_mode")) {
         return;
     }
@@ -4605,6 +4966,16 @@ void CoopTalkIntoSlots() {
     std::fflush(stderr);
 }
 
+// coop-pt1111e (x-talk-follow -Both): each talker's dialog framework session as it opens and ends in its talk's step (its own, swapped
+// in with the slot), said with DC_COOP_DEBUG.
+static void TalkDialogSaid(int k, bool was) {
+    const bool now = dc::dialog::IsSessionActive();
+
+    if (CoopDebug() && now != was) {
+        std::fprintf(stderr, "coop-talk: player %d's dialog session %s at link tick %lld\n", k + 1, now ? "opens" : "ends", (long long) NetplayLinkTick());
+    }
+}
+
 // One step of slot k's talk (the caller asks only for a slot that is on): retail's talk step for that player's body, its pad,
 // bag and sounds, its camera. The game's player (k 0) is the resident: retail's TalkMode stand, its sounds on its copy. Player 2
 // (the town's second walker today) through her step's pad, bag, sound owner and view (CoopTownHerTalkStepIn). Returns
@@ -4624,7 +4995,9 @@ int CoopTalkStep(int k, CCharacter *resident, CCamera *room, CCameraFollow *came
     }
     if (k != 0) {
         CoopTownHerTalkStepIn(room);
-        const int result = EdTalkMode(CoopTownHerTalkBody(), CoopTownHerTalkCamera(), 0, choice);
+        const bool dialog_was = dc::dialog::IsSessionActive();
+        const int  result = EdTalkMode(CoopTownHerTalkBody(), CoopTownHerTalkCamera(), 0, choice);
+        TalkDialogSaid(k, dialog_was);
         CoopTownHerTalkStepOut();
         return result;
     }
@@ -4652,7 +5025,9 @@ int CoopTalkStep(int k, CCharacter *resident, CCamera *room, CCameraFollow *came
     resident->ShadowStep();
     resident->ClothStep(0);
 
-    const int result = EdTalkMode(resident, camera, view_mode, choice);
+    const bool dialog_was = dc::dialog::IsSessionActive();
+    const int  result = EdTalkMode(resident, camera, view_mode, choice);
+    TalkDialogSaid(0, dialog_was);
 
     sound.reset();
     TalkSwap(0);
@@ -4693,8 +5068,112 @@ bool HideDraw() {
 }
 } // namespace
 
+// coop-pt1111e (coordinator 11-11: the pointer in a framework window must not part the copies): the window's selection is every
+// copy's (the session steps on every copy from the agreed pads), and the dialog's pointer moved it on its own copy alone as it
+// hovered, so the copies confirmed two choices. Now a hover is the viewer's own hand (dialog's DialogNpcHoverDraw, on the window
+// the viewer's own talk draws) and a click (its choice and the buttons it stands for: Cross, Circle, the wheel's Up and Down) is
+// a command (kCmdDialogPick) every copy applies on its tick (the pointer's own presses reach GamePad on its copy alone, past the
+// agreed pads). DC_COOP_MUTATE=dialog_hover_shared (twin): no hooks, the hover the selection and the click a local press.
+static int g_drawing_slot = -1; // the slot whose window draws now (CoopTalkDrawBegin to End), -1 none
+
+static bool DialogPick(int choice, int pad_down) {
+    NetCommand command;
+
+    command.kind = kCmdDialogPick;
+    command.b = (std::uint16_t) (choice + 1);
+    command.c = (std::uint32_t) pad_down;
+    NetplayQueueCommand(command);
+    return true;
+}
+
+static bool DialogWithOwn(void (*fn)(void *), void *ctx) {
+    const int own = coop::ActorLocalIndex();
+
+    if (!Linked() || CoopWorldsApart() || own < 0 || own >= coop::kMaxPlayers || !g_talks[own].on) {
+        return false; // (the open conversation is this copy's own: apart, or not yet in a slot)
+    }
+    TalkSwap(own);
+    fn(ctx);
+    TalkSwap(own);
+    return true;
+}
+
+static bool DialogOwns() {
+    if (g_drawing_slot >= 0) {
+        return g_drawing_slot == coop::ActorLocalIndex();
+    }
+    return !Linked() || CoopWorldsApart() || coop::ActorLocalIndex() == 0;
+}
+
+static void ApplyDialogPick(int player, const NetCommand &command, std::int64_t tick) {
+    const int  slot = player - 1;
+    const int  choice = (int) command.b - 1;
+    const bool slotted = slot >= 0 && slot < coop::kMaxPlayers && g_talks[slot].on;
+
+    if (slotted) {
+        TalkSwap(slot);
+    }
+    const bool taken = choice < 0 || dc::dialog::SelectChoice(choice);
+    {
+        SoundOwner sound(player, true); // (its cursor and confirm sounds on its clicker's copy alone)
+
+        dc::dialog::DialogNpcPress((int) command.c);
+    }
+    if (slotted) {
+        TalkSwap(slot);
+    }
+    std::fprintf(stderr, "coop-talk: player %d's dialog pick %d (a pointer's click) at link tick %lld: %s, buttons %04x\n", player, choice, (long long) tick,
+                 choice < 0 ? "no choice" : taken ? "selected" : "no such choice", (unsigned) command.c);
+}
+
+static void DialogHooksOnce() {
+    static bool done = false;
+
+    if (done || !NetplayHasPlayer()) {
+        return;
+    }
+    done = true;
+    NetplaySetCommandHandler(kCmdDialogPick, ApplyDialogPick);
+    if (!Mutated("dialog_hover_shared")) {
+        dc::dialog::DialogNpcSetCoopHooks(DialogPick, DialogWithOwn, DialogOwns);
+    }
+}
+
+// coop-pt1111e test hook (DC_DIALOG_TEST_MOUSE=P:HOVER:FROM:FOR:CLICK:AT, x-talk-follow -Mouse): on player P's copy, the pointer on
+// choice row HOVER from FROM link ticks after the merge for FOR ticks, then a click on choice row CLICK at AT ticks after it, as the
+// mouse puts them (DialogNpcTestPointer).
+static void TestDialogMouse() {
+    static const char *const spec = TestEnv("DC_DIALOG_TEST_MOUSE");
+    static int               who = 0, hover = -1, from = 0, span = 0, click = -1, at = -1;
+    static bool              parsed = false, clicked = false;
+
+    if (spec == nullptr) {
+        return;
+    }
+    if (!parsed) {
+        parsed = true;
+        std::sscanf(spec, "%d:%d:%d:%d:%d:%d", &who, &hover, &from, &span, &click, &at);
+    }
+    if (NetplayLocalPlayer() != who || CoopWorldsApart() || !Linked()) {
+        return;
+    }
+    const std::int64_t since = CoopWorldsTicksSinceMerge();
+
+    if (since >= from && since < from + span) {
+        dc::dialog::DialogNpcTestPointer(hover, false);
+        if (since == from) {
+            std::fprintf(stderr, "coop-talk: test: the pointer hovers choice row %d on player %d's copy (link tick %lld)\n", hover, who, (long long) NetplayLinkTick());
+        }
+    } else if (!clicked && since >= at && at >= 0) {
+        clicked = true;
+        dc::dialog::DialogNpcTestPointer(click, true);
+        std::fprintf(stderr, "coop-talk: test: the pointer clicks choice row %d on player %d's copy (link tick %lld)\n", click, who, (long long) NetplayLinkTick());
+    }
+}
+
 bool CoopTalkDrawBegin(int k) {
     TalkSwap(k);
+    g_drawing_slot = k; // coop-pt1111e (DialogOwns)
 
     // Test hook (DC_COOP_TEST_TALK_RECT=1): each talk's window, once its text is laid out, on every copy: where its text is.
     if (static const bool rect_log = TestEnvOn("DC_COOP_TEST_TALK_RECT"); rect_log && g_slot_rect_said[k] != g_talks[k].tick && EditMes1.text_width > 0) {
@@ -4720,6 +5199,7 @@ bool CoopTalkDrawBegin(int k) {
 }
 
 void CoopTalkDrawEnd(int k, bool hidden) {
+    g_drawing_slot = -1;
     if (hidden) {
         gfx::SetRenderTarget(g_slot_previous);
     }
@@ -4851,7 +5331,7 @@ static void HerTalkAtTheSplit(bool walks) {
     RoomEventOver("goes on as this copy's own talk (the pair split)");
 }
 
-// coop-pt1109f test hook (DC_COOP_TEST_TALK_DOOR=her|his, x-talk-door): linked and together, once a state file is put back, the talker (her, or Toan) put 9 before the first villager there;
+// coop-pt1109f test hook (DC_COOP_TEST_TALK_DOOR=her|his[@x:z:yaw], x-talk-door): linked and together, once a state file is put back, the talker (her, or Toan) put 9 before the first villager there;
 // each of the talk's steps then said: when it runs (the row's Crosses wait on it), and how long it ran after the split on the copy that stayed.
 static void TalkDoorForTest() {
     static const char *const spec = TestEnv("DC_COOP_TEST_TALK_DOOR");
@@ -4859,12 +5339,48 @@ static void TalkDoorForTest() {
     if (spec == nullptr || !NetplayStateFileLoaded() || Chara == nullptr || Chara->frame == nullptr || g_town.body == nullptr || g_town.body->frame == nullptr) {
         return;
     }
-    const bool her = std::strcmp(spec, "her") == 0;
+    const bool her = std::strncmp(spec, "her", 3) == 0; // (coop-pt1111i: "her@x:z:yaw", below)
     // (opt8: the game's player's talk, from its slot together or on retail's mode)
     const bool retail = g_talks[0].on || (EdInteriorFlag == 0 ? ::GameMode == ED_MODE_TALK : CoopTownIndoorMode() == 3);
     static bool      placed = false, said = false, apart_said = false, over = false;
     static int       apart_steps = 0; // (apart the link's tick stands: its own count)
 
+    // (coop-pt1111i probe, DC_COOP_TEST_WALLPROBE=x0:z0:x1:z1:step: once, where retail's walk camera at a talk's circle, 24 off and 8 up, turns round at once)
+    if (static bool probed = false; !probed && EdInteriorFlag == 0 && pEditGround != nullptr && TestEnv("DC_COOP_TEST_WALLPROBE") != nullptr) {
+        float x0 = 0, z0 = 0, x1 = 0, z1 = 0, step = 25;
+
+        probed = true;
+        if (std::sscanf(TestEnv("DC_COOP_TEST_WALLPROBE"), "%f:%f:%f:%f:%f", &x0, &z0, &x1, &z1, &step) == 5) {
+            CCameraFollow probe(60.0f, 20.0f, 0.0f, 4.0f);
+            sceVu0FVECTOR toan;
+
+            Chara->GetPosition(toan);
+            for (float x = x0; x <= x1; x += step) {
+                for (float z = z0; z <= z1; z += step) {
+                    for (int k = 0; k < 8; k++) {
+                        int turned[2] = {};
+
+                        for (int far = 0; far < 2; far++) {
+                            EdCameraWallInfo info = {1, 1, 1, 0};
+
+                            probe.FollowOn();
+                            probe.SetFollow(x, toan[1] + 14.0f, z);
+                            probe.SetDistance(far != 0 ? 70.0f : 24.2f);
+                            probe.SetHeight(far != 0 ? 5.0f : 8.0f);
+                            probe.SetAngleSoon(k * 0.785f);
+                            probe.Step(-1);
+                            EdCameraWalls(&probe, pEditGround, 0, 0, 1, &info);
+                            turned[far] = info.turned;
+                        }
+                        if (turned[0] != 0 && turned[1] == 0) {
+                            std::fprintf(stderr, "coop: test: wall probe: turns at (%.0f %.0f) angle %.2f, not at 70\n", x, z, k * 0.785f);
+                        }
+                    }
+                }
+            }
+            std::fprintf(stderr, "coop: test: wall probe done\n");
+        }
+    }
     if (!placed && Linked() && !CoopWorldsApart() && (EdInteriorFlag == 0 ? ::GameMode == ED_MODE_WALK : CoopTownIndoorMode() == 0)) {
         for (int i = 0; i < 10 && !placed; i++) {
             CNPCharacter &villager = EdVillager[i];
@@ -4880,6 +5396,22 @@ static void TalkDoorForTest() {
 
             villager.GetPosition(him);
             villager.GetRotation(rot);
+            // (coop-pt1111i: "...@x:z:yaw" the villager stood there first, facing yaw: a talk beside a wall, as Jep's 11-11 one by villager 5)
+            if (const char *at = std::strchr(spec, '@'); at != nullptr) {
+                float x = 0.0f, z = 0.0f, face = 0.0f;
+
+                if (std::sscanf(at + 1, "%f:%f:%f", &x, &z, &face) == 3) {
+                    him[0] = x;
+                    him[2] = z;
+                    rot[1] = face;
+                    villager.SetPosition(him);
+                    villager.SetRotation(0.0f, face, 0.0f);
+                    if (villager.frame != nullptr) {
+                        villager.frame->SetPosition(him);
+                        villager.frame->SetRotation(0.0f, face, 0.0f);
+                    }
+                }
+            }
             to[0] = him[0] + 9.0f * std::sin(rot[1]);
             to[1] = him[1];
             to[2] = him[2] + 9.0f * std::cos(rot[1]);
@@ -4966,6 +5498,10 @@ static bool RoomPointEvent(int event_no) {
 }
 
 bool CoopTownRoomKeepsPeople(const void *program, int event_no) {
+    // coop-eventslots: outdoors, a player's own event together never displaced the town's villagers (its own arena and blocks)
+    if (EdInteriorFlag == 0 && CoopEventKeepsVillagers()) {
+        return true;
+    }
     if (Mutated("room_people_wiped") || program == nullptr || program != EdEventData || !g_indoor.was) {
         return false;
     }
@@ -5004,6 +5540,27 @@ static bool AtCaveDoor(const ED_EVENT_PARAM &param) {
 // over that player's bag alone (her copy: the ring beside the game's pack, so no cave key listed). Now the walker's Square
 // at the door opens their own picker apart too, read from the game's pad (no agreed pads apart). DC_COOP_MUTATE=
 // cavepick_linked_only (twin): linked and together only, as before.
+// coop-pt1111f: Norune's cave door opened (the flag its event 130 reads, game flag 1: the cave key used).
+static bool CaveDoorOpened() {
+    int flag = -1;
+
+    return EdEventData != nullptr && coop::TownDoorShutMessage(EdEventData, 130, &flag) >= 0 && flag >= 0 && SaveData != nullptr && SaveData->GetGameFlag(flag) != 0;
+}
+
+// coop-pt1111f: a Square at the opened cave door, together: what its Cross does there (retail's event 130 takes either).
+static void CaveSquareWalksIn(int player) {
+    std::fprintf(stderr, "coop-town: player %d's Square at the opened cave door at link tick %lld: as its Cross (no picker)\n", player,
+                 (long long) NetplayLinkTick());
+    std::fflush(stderr);
+    CoopTownCaveCross(player, true);
+}
+
+static long long g_cave_door_ready[2] = {-1, -1}; // (CoopTownCaveDoorReadyTick)
+
+long long CoopTownCaveDoorReadyTick(int player) {
+    return player == 1 || player == 2 ? g_cave_door_ready[player - 1] : -1;
+}
+
 static void CaveDoorSquares() {
     static bool   his_was = false;
     static bool   her_was = false;
@@ -5038,10 +5595,38 @@ static void CaveDoorSquares() {
     }
     his_open_was = his_open;
 
-    if (his_press && EdMoveCharaInfo.event_ready != 0 && AtCaveDoor(EdMoveCharaInfo.param) && !coop::TownDoorPickOpenFor(walker) && !CoopTownCaveActs(walker)) {
+    // coop-pt1111f (Jep's 2026-11-11 playtest item 8: "Square (Use Item) still opens the item screen at the Norune dungeon door after
+    // it is already unlocked"): retail's event 130 (event.stb gedit/e01, code 71604) takes Cross or Square, then reads the door's
+    // flag (game flag 1): only while it is clear does Square go to _GOTO_USE_ITEM(236); opened, either goes straight to the
+    // door's opening and the walk in (72540). The picker here stood in for that window whatever the flag. Now, at the opened
+    // door, a Square is what its Cross is: together, that player's walk in beside the game (CoopTownCaveCross); apart, the
+    // game's own event takes it as retail's. DC_COOP_MUTATE=cavesquare_picker (twin): the picker opens there too, as before.
+    const bool opened = CaveDoorOpened() && !Mutated("cavesquare_picker");
+
+    // coop-cand1111fix (test hook DC_COOP_MENUPRESS_FROM_DOOR_READY): the link tick each player first stood there ready for the Square.
+    if (CaveDoorOpened() && g_cave_door_ready[0] < 0 && EdMoveCharaInfo.event_ready != 0 && AtCaveDoor(EdMoveCharaInfo.param)) {
+        g_cave_door_ready[0] = NetplayLinkTick();
+    }
+    if (CaveDoorOpened() && g_cave_door_ready[1] < 0 && !apart && EditMapInfo != nullptr) {
+        sceVu0FVECTOR ready_pos;
+        sceVu0FVECTOR ready_rot;
+        ED_EVENT_PARAM ready_param;
+
+        if (CoopTownPartnerPose(ready_pos, ready_rot) && EdGetEvent(EditMapInfo->work.events.points, EditMapInfo->event_count, &ready_param, ready_pos, ready_rot, NowTime) != 0 &&
+            AtCaveDoor(ready_param)) {
+            g_cave_door_ready[1] = NetplayLinkTick();
+        }
+    }
+
+    if (his_press && EdMoveCharaInfo.event_ready != 0 && AtCaveDoor(EdMoveCharaInfo.param) && !coop::TownDoorPickOpenFor(walker) && !CoopTownCaveActs(walker) &&
+        !(opened && apart)) {
         data[0].input.status.button &= ~kInputSquare;
         if (!CoopWorldsCaveDoorRefused(walker)) { // coop-doorgate: B1's story needs both players
-            coop::OpenTownDoorPickFor(walker);
+            if (opened) {
+                CaveSquareWalksIn(walker);
+            } else {
+                coop::OpenTownDoorPickFor(walker);
+            }
         }
     }
 
@@ -5057,7 +5642,11 @@ static void CaveDoorSquares() {
         EditMapInfo != nullptr &&
         CoopTownPartnerPose(pos, rot) && EdGetEvent(EditMapInfo->work.events.points, EditMapInfo->event_count, &param, pos, rot, NowTime) != 0 &&
         AtCaveDoor(param) && !CoopWorldsCaveDoorRefused(2)) {
-        coop::OpenTownDoorPickFor(2);
+        if (opened) {
+            CaveSquareWalksIn(2);
+        } else {
+            coop::OpenTownDoorPickFor(2);
+        }
     }
 }
 
@@ -5120,6 +5709,7 @@ bool CoopTownHerPadFree() {
     }
 
     return !CoopP2TownMenuHoldsPad() && !CoopP2Building() && !coop::TownWheelHoldsPad() && !CoopTownCaveActs(2) && // (coop-doorfix: nor her act)
+           !CoopSysMesHolds(2) &&                                                                          // (coop-eventslots: nor her own message)
            !coop::TownNoteHolds(2) && (coop::TownNoteHeldAfter(2) & kInputCross) == 0; // (coop-cavehold: nor her door message, nor its Cross)
 }
 
@@ -5253,8 +5843,12 @@ static bool PartnerOpenBox(const ED_EVENT_PARAM &param) {
     }
 
     {
+        // coop-pt1111d: hers waits for her Cross as Toan's does (EdItemGetMes: 40 frames, then the button; SystemMesCross reads her
+        // agreed pad), and holds her meanwhile (OwnMesHolds); the timed one (0x96, no button) stays the twin's.
         const coop::present::Scope hers(coop::present::For{2}, COOP_PRESENT_HERE);
-        ItemGetMes(item, attach, 0x96, 0);
+        const bool                 own_wait = !Mutated("townbox_mes_shared");
+
+        ItemGetMes(item, attach, own_wait ? 40 : 0x96, own_wait ? 1 : 0);
     }
 
     sceVu0FVECTOR rotation = {param.rotation[0], param.rotation[1], param.rotation[2], param.rotation[3]};
@@ -5280,7 +5874,8 @@ static void PartnerTownBox() {
     cross_was = cross;
 
     if (!pressed || EdInteriorFlag != 0 || EditMapInfo == nullptr || !CoopWorldsPartnerMayStart(nullptr, -1) || !CoopTownPartnerPose(pos, rot) ||
-        coop::TownDoorPickOpenFor(2) || coop::PlayerInMenu(2, coop::kActorMenuTown) || CoopP2TownPaused() || CoopP2Building()) {
+        coop::TownDoorPickOpenFor(2) || coop::PlayerInMenu(2, coop::kActorMenuTown) || CoopP2TownPaused() || CoopP2Building() ||
+        OwnMesHolds(2)) { // coop-pt1111d: the Cross that takes her box's message opens nothing more
         return;
     }
 
@@ -5300,10 +5895,13 @@ static void TownBoxWarpForTest() {
     static const int  at = TestEnvInt("DC_COOP_TOWN_BOX", 0);
     // (DC_COOP_TOWN_WARP_PRESS=1: K on the press clock instead, alike on both copies after a fixture's load)
     static const bool on_press = TestEnvOn("DC_COOP_TOWN_WARP_PRESS");
+    // (coop-pt1111d: DC_COOP_TOWN_BOX_WHO=1: Toan is put by the box instead, his Cross then retail's own open)
+    static const int  who = TestEnvInt("DC_COOP_TOWN_BOX_WHO", 2) == 1 ? 1 : 2;
     static int        steps = 0;
     static bool       done = false;
 
-    if (at <= 0 || done || EdInteriorFlag != 0 || EditMapInfo == nullptr || g_town.body == nullptr || !g_town.visible || !CoopWorldsLinkedTogether()) {
+    if (at <= 0 || done || EdInteriorFlag != 0 || EditMapInfo == nullptr || g_town.body == nullptr || !g_town.visible || !CoopWorldsLinkedTogether() ||
+        (who == 1 && Chara == nullptr)) {
         return;
     }
     if (on_press ? (steps = (int) NetplayTestPressClock()) < at : ++steps < at) {
@@ -5311,6 +5909,11 @@ static void TownBoxWarpForTest() {
     }
 
     done = true;
+    sceVu0FVECTOR from = {g_town.pos[0], g_town.pos[1], g_town.pos[2], 1.0f};
+
+    if (who == 1) {
+        Chara->GetPosition(from);
+    }
 
     ED_EVENT_POINT *points = EditMapInfo->work.events.points;
     float           best = -1.0f;
@@ -5344,7 +5947,7 @@ static void TownBoxWarpForTest() {
             one.minimum_progress = 0;
         }
         for (int dy = -200; dy <= 200 && !found; dy += 10) {
-            sceVu0FVECTOR level = {g_town.pos[0], g_town.pos[1] + dy, g_town.pos[2], 1.0f};
+            sceVu0FVECTOR level = {from[0], from[1] + dy, from[2], 1.0f};
 
             found = EdGetEvent(&one, 1, &param, level, rot, NowTime) != 0;
         }
@@ -5365,8 +5968,8 @@ static void TownBoxWarpForTest() {
             continue;
         }
 
-        const float dx = param.position[0] - g_town.pos[0];
-        const float dz = param.position[2] - g_town.pos[2];
+        const float dx = param.position[0] - from[0];
+        const float dz = param.position[2] - from[2];
         const float dist = dx * dx + dz * dz;
 
         if (best < 0.0f || dist < best) {
@@ -5401,14 +6004,104 @@ static void TownBoxWarpForTest() {
     ED_EVENT_PARAM check;
     const bool     finds = EdGetEvent(points, EditMapInfo->event_count, &check, spot, face, NowTime) != 0 && check.kind == ED_EVENT_POINT_ITEM_BOX;
 
-    sceVu0CopyVector(g_town.pos, spot);
-    g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
-    g_town.body->frame->SetRotation(0.0f, face[1], 0.0f);
-    g_town.body->SetRotation(0.0f, face[1], 0.0f);
-    std::fprintf(stderr, "coop: test: town box warp at step %d: player 2 to (%.1f %.1f %.1f) by the box at (%.1f %.1f %.1f) (point %d of %d boxes, flag %d), %s\n",
-                 steps, spot[0], spot[1], spot[2], best_at[0], best_at[1], best_at[2], best_no, boxes, points[best_no].completion_flag,
+    if (who == 1) {
+        Chara->SetPosition(spot);
+        Chara->frame->SetPosition(spot);
+        Chara->SetRotation(0.0f, face[1], 0.0f);
+        Chara->Step();
+    } else {
+        sceVu0CopyVector(g_town.pos, spot);
+        g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
+        g_town.body->frame->SetRotation(0.0f, face[1], 0.0f);
+        g_town.body->SetRotation(0.0f, face[1], 0.0f);
+    }
+    std::fprintf(stderr, "coop: test: town box warp at step %d: player %d to (%.1f %.1f %.1f) by the box at (%.1f %.1f %.1f) (point %d of %d boxes, flag %d), %s\n",
+                 steps, who, spot[0], spot[1], spot[2], best_at[0], best_at[1], best_at[2], best_no, boxes, points[best_no].completion_flag,
                  finds ? "the game finds it from there" : "NOT found from there");
     std::fflush(stderr);
+}
+
+// coop-pt1111a: a spot in reach of the town's door point to "dungeon" (the cave door) and the facing the game's search finds it with
+// (a door is found only facing its way): its place by the search with the reach widened (as CoopTownDoorWorldForTest), then steps
+// out from it along each facing until the search from there finds the door.
+static bool CaveDoorSpotForTest(float *spot, float *face) {
+    ED_EVENT_POINT *points = EditMapInfo->work.events.points;
+
+    for (int i = 0; points != nullptr && i < EditMapInfo->event_count; i++) {
+        if (points[i].event_type != ED_EVENT_POINT_DOOR || std::strcmp(points[i].destination, "dungeon") != 0) {
+            continue;
+        }
+        ED_EVENT_POINT one = points[i];
+        ED_EVENT_PARAM param;
+        sceVu0FVECTOR  from = {};
+        bool           found = false;
+
+        Chara->GetPosition(from);
+        one.trigger_range[0] = 1.0e9f;
+        one.completion_flag = 0;
+        for (int turn = 0; turn < 8 && !found; turn++) {
+            sceVu0FVECTOR facing = {0.0f, -PI + turn * (PI / 4.0f), 0.0f, 0.0f};
+
+            for (int dy = -1000; dy <= 1000 && !found; dy += 10) {
+                sceVu0FVECTOR level = {from[0], from[1] + dy, from[2], 1.0f};
+
+                found = EdGetEvent(&one, 1, &param, level, facing, NowTime) != 0;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+        // (the nearest spot first: deep in its reach, so his stand there keeps it while the row runs)
+        for (float out = 1.0f; out <= 20.0f; out += 1.0f) {
+            for (int turn = 0; turn < 16; turn++) {
+                const float yaw = -PI + turn * (PI / 8.0f);
+
+                sceVu0FVECTOR  at = {param.position[0] - out * std::sin(yaw), param.position[1], param.position[2] - out * std::cos(yaw), 1.0f};
+                sceVu0FVECTOR  facing = {0.0f, yaw, 0.0f, 0.0f};
+                ED_EVENT_PARAM check;
+
+                if (EdGetEvent(points, EditMapInfo->event_count, &check, at, facing, NowTime) != 0 && check.kind == ED_EVENT_POINT_DOOR && check.point == &points[i]) {
+                    at[1] += 27.0f; // (the point stands below the ground there: dropped in from 20 above it, as w-town-cavereach's stand)
+                    std::copy(at, at + 4, spot);
+                    std::copy(facing, facing + 4, face);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+// coop-pt1111d test trace (DC_COOP_TOWN_BOX_HOLD=1, w-town-chest -Hold): while a system message is up, whose it is (SystemMesFor) and
+// where both players stand, as it comes, every 15 ticks and as it goes; both copies alike.
+static void MesHoldTraceForTest() {
+    static const bool on = TestEnvOn("DC_COOP_TOWN_BOX_HOLD");
+    static int        was = 0, ticks = 0;
+
+    if (!on || Chara == nullptr) {
+        return;
+    }
+    int whose = EdSystemMesCheck() != 0 ? std::max(1, coop::SystemMesFor() == 0 ? 1 : coop::SystemMesFor()) * (coop::SystemMesFor() == 0 ? -1 : 1) : 0;
+
+    if (whose == 0 && CoopSysMesHolds(2)) { // cand1111b: her own message up in her own slot (coop-eventslots)
+        whose = 2;
+    }
+
+    if (whose == 0 && was == 0) {
+        return;
+    }
+    sceVu0FVECTOR toan;
+
+    Chara->GetPosition(toan);
+    if (whose != was || (whose != 0 && ++ticks % 15 == 0)) {
+        std::fprintf(stderr, "coop: test: message %s for player %d, Toan at (%.1f %.1f), player 2 at (%.1f %.1f), link tick %lld%c",
+                     whose == 0 ? "gone" : "up", whose != 0 ? whose : was, toan[0], toan[2], g_town.pos[0], g_town.pos[2], (long long) NetplayLinkTick(), 10);
+    }
+    if (whose != was) {
+        ticks = 0;
+    }
+    was = whose;
 }
 
 // Test hook (DC_COOP_TEST_AT_MAP_EVENT=W; coop-pt1106-batch, x-town-sign): on the town's first walk step (a fixture's load, linked
@@ -5424,8 +6117,9 @@ static void AtMapEventForTest() {
         return;
     }
 
-    const bool toan = std::strchr(who, '1') != nullptr;
-    const bool her = std::strchr(who, '2') != nullptr;
+    // (coop-pt1111a: "2d" / "1d": the one named at the board, the other at the cave door)
+    const bool toan = std::strchr(who, '1') != nullptr || std::strchr(who, 'd') != nullptr;
+    const bool her = std::strchr(who, '2') != nullptr || std::strchr(who, 'd') != nullptr;
 
     if (her && (g_town.body == nullptr || !CoopWorldsLinkedTogether())) {
         return;
@@ -5492,6 +6186,37 @@ static void AtMapEventForTest() {
         ED_EVENT_PARAM check;
         const bool     finds = EdGetEvent(points, EditMapInfo->event_count, &check, spot, face, NowTime) != 0 && check.kind == ED_EVENT_POINT_EVENT;
 
+        // coop-pt1111a ("2d" / "1d": the one named reads at the board, the other stands at the cave door, its "!" over their head;
+        // x-town-sign -Case doorherreads / doorhisreads): in reach of the town's door point to "dungeon", as the game's search finds
+        // it facing its way.
+        if (std::strchr(who, 'd') != nullptr && p != who[0] - '0') {
+            sceVu0FVECTOR door_spot = {};
+            sceVu0FVECTOR door_face = {};
+            const bool    door = CaveDoorSpotForTest(door_spot, door_face);
+            int           door_flag = -1;
+
+            // (the door open, as at Jep's playtest: its event's game flag set; shut, its script plays its message once and the
+            // walk's queue ends 20 ticks on)
+            if (coop::TownDoorShutMessage(EdEventData, 130, &door_flag) >= 0 && door_flag >= 0 && SaveData != nullptr && SaveData->GetGameFlag(door_flag) == 0) {
+                SaveData->SetGameFlag(door_flag, 1);
+                std::fprintf(stderr, "coop: test: at the cave door: its game flag %d set (the door open)\n", door_flag);
+            }
+
+            if (p == 1) {
+                Chara->SetPosition(door_spot);
+                Chara->frame->SetPosition(door_spot);
+                Chara->SetRotation(0.0f, door_face[1], 0.0f);
+                Chara->Step();
+            } else {
+                sceVu0CopyVector(g_town.pos, door_spot);
+                g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
+                g_town.body->frame->SetRotation(0.0f, door_face[1], 0.0f);
+                g_town.body->SetRotation(0.0f, door_face[1], 0.0f);
+            }
+            std::fprintf(stderr, "coop: test: at the cave door: %s to (%.1f %.1f %.1f) facing %.2f, link tick %lld, %s\n", p == 1 ? "Toan" : "player 2", door_spot[0],
+                         door_spot[1], door_spot[2], door_face[1], (long long) NetplayLinkTick(), door ? "the game finds it from there" : "NOT found from there");
+            continue;
+        }
         if (p == 1) {
             Chara->SetPosition(spot);
             Chara->frame->SetPosition(spot);
@@ -5512,6 +6237,8 @@ static void AtMapEventForTest() {
         SaveData->SetFishingPoint(points); // (x-town-sign -Menu exchange: points to exchange)
         std::fprintf(stderr, "coop: test: fishing points %d\n", points);
     }
+    coop::FishTestSeed(); // coop-eventslots: player 2's own points (DC_COOP_TEST_FISHING_POINTS_P2)
+    coop::FishSwitchSelfTest(TestEnv("DC_COOP_TEST_FISH_SWITCH")); // coop-eventslots: the setting's switch, both ways (x-eventslots fpswitch)
     std::fflush(stderr);
 }
 
@@ -5601,11 +6328,29 @@ static void EventPointsForTest() {
         }
         CoopTownDoorWorldForTest(i, -1);
     }
+    // coop-eventslots: DC_COOP_TEST_EVENT_EXTS=<event>,<event>...: the same ext-call list for script events no point names
+    // (the fishing mode's own: Circle queues 133, Square 134).
+    if (const char *more = TestEnv("DC_COOP_TEST_EVENT_EXTS"); more != nullptr && EdEventData != nullptr) {
+        for (const char *at = more; *at != '\0';) {
+            const int event = std::atoi(at);
+            std::string exts;
+
+            for (int ext = 0; event > 0 && ext < 1200; ext++) {
+                if (const int n = ScriptExtCalls(reinterpret_cast<const RS_PROG_HEADER *>(EdEventData), event, ext, nullptr, 0); n > 0) {
+                    exts += " " + std::to_string(ext) + ":" + std::to_string(n);
+                }
+            }
+            std::fprintf(stderr, "coop-town: test: map %d script event %d exts%s\n", MapNo, event, exts.c_str());
+            const char *comma = std::strchr(at, ',');
+            at = comma != nullptr ? comma + 1 : at + std::strlen(at);
+        }
+    }
 }
 
 void CoopTownStep() {
     coop::BagSizeStep(); // coop-bags
     EventPointsForTest(); // coop-pt1106-batch
+    CoopEventSlotsStep(); // coop-eventslots
     AtMapEventForTest();  // coop-pt1106-batch
     HerHeldCrossTrace(); // coop-menucross
     coop::StepTownNotes(); // coop-menucross
@@ -5647,8 +6392,9 @@ void CoopTownStep() {
     g_indoor.on = false; // coop-inbuild
 
     // coop-machotalk: her own talk outdoors stands her (EdTalkMode turns her to the villager and steps her, CoopTownHerTalkStepIn),
-    // shown where it has her, as in a room (CoopTownInteriorStep).
-    if (g_room_event.on && !CoopWorldsApart() && g_town.body != nullptr) {
+    // shown where it has her, as in a room (CoopTownInteriorStep). coop-eventslots: her own event in her parked slot too (its main character).
+    if ((g_room_event.on || CoopEventSlotParked(1) || CoopFishingOn(1)) && !CoopWorldsApart() && g_town.body != nullptr) {
+        CoopFishingStepOthers(); // coop-eventslots: her own fishing, where her walk would run
         g_town.body->GetPosition(g_town.pos);
         g_town.pos[3] = 1.0f;
         g_town.visible = true;
@@ -5656,6 +6402,7 @@ void CoopTownStep() {
     }
     TownBoxWarpForTest(); // coop-townchest: test hook
     PartnerTownBox();     // coop-townchest: her Cross at a town chest
+    MesHoldTraceForTest(); // coop-pt1111d: test trace
     PartnerStep();
 }
 
@@ -5815,6 +6562,14 @@ bool CoopTownSceneWatchedTogether() {
     if (!NetplayHasPlayer() || CoopWorldsApart() || g_room_event.on) {
         return false;
     }
+    // coop-pt1111b (Jep 11-11, item 20: a monster's drop picked up on a floor showed its "acquired" on both screens): the town's
+    // modes are the town's own statics, which nothing outside the town sets: the dungeon's entrance is a town event (GameMode
+    // ED_MODE_EVENT), and the floors reached through it kept that mode, so every message on them read as a scene's, both
+    // players'. In town only (main.cpp's mode, GAME_MODE_EDIT), as CoopWorldsPartnerSpeaks reads it. DC_COOP_MUTATE=scene_any_mode
+    // (twin): any game mode, as before.
+    if (mode != GAME_MODE_EDIT && !coop::Mutated("scene_any_mode")) {
+        return false;
+    }
     return EdInteriorFlag != 0 ? g_indoor.mode == 4 /* ED_IN_MODE_EVENT */ : ::GameMode == ED_MODE_EVENT;
 }
 
@@ -5919,6 +6674,7 @@ bool CoopTownInteriorStep(CMapParts *parts, int parts_count, CCameraFollow *room
 
         ApartDoorForTest(mode);
         ApartEventForTest(mode); // coop-closet
+        ApartBoxForTest(mode);   // coop-pt1111f
 
         // coop-housefade (Jep's 2026-11-02 playtest: "when P1 leaves a house, P2 vanishes from P1's screen right away instead
         // of staying until the fade-out"): his Cross on the room's door splits the pair on its tick, and apart this step
@@ -5997,6 +6753,7 @@ bool CoopTownInteriorStep(CMapParts *parts, int parts_count, CCameraFollow *room
     IndoorDoorForTest();
     IndoorEventForTest(); // coop-p2collide
     IndoorTalkSpotForTest(); // coop-hertalk
+    RoomBoxForTest(); // coop-pt1111a
     return IndoorPartnerDoor();
 }
 
@@ -6065,6 +6822,8 @@ int          g_own_event_no = 0;
 std::int64_t g_own_event_tick = 0;
 float        g_own_event_clock = 0.0f; // the clock as it began
 int          g_own_event_hidden = 0; // its windows' frames drawn out of sight on the other copy
+int          g_own_event_end_reader = 0; // coop-pt1111b: whose own town event ended, and on which link tick (its last frame)
+std::int64_t g_own_event_end_tick = -1;
 float        g_own_event_from[3] = {}; // where the other player stood as it began
 float        g_own_event_far = 0.0f;   // and the furthest they walked from there through it
 
@@ -6096,9 +6855,41 @@ void OtherPlayerAt(int reader, float *at) {
 // nothing ran. A queued one of those (story-free: either player's own) is hers to take with her Cross, unless his own Cross
 // is down this tick (both at once: his, as his walk asked first). DC_COOP_MUTATE=queued_event_holds (twin): his queue holds
 // the town, as before.
+//
+// coop-pt1111a (Jep's 11-11 playtest, item 3: "P1 standing at the dungeon entrance with his red '!': P2 cannot open the fishing
+// sign at all; not when reversed"): only a queued story-free map event was hers to take, so the event his walk queues at the cave
+// door (editloop's door point to "dungeon": RunEvent(130) on every step in its reach, Cross or not, its script waiting for his
+// Cross) held the town, and her Cross read nothing. What decides is how it was queued, not which event: his walk's reach probe
+// this step (EdMoveCharaInfo: the event point he stands at, or the cave door's 130), never his Cross (a queued event that runs at
+// once without a Cross has already started by the time hers reads it). Her own event is checked as before (HerTownEventAt).
+// DC_COOP_MUTATE=queued_story_holds (twin): only a queued story-free map event is hers to take, as before.
+static bool HisWalkProbes(int event_no) {
+    const ED_EVENT_PARAM &param = EdMoveCharaInfo.param;
+    const bool            probe = EdMoveCharaInfo.interior == 0 && EdMoveCharaInfo.event_ready != 0 && param.point != nullptr &&
+                       ((param.kind == ED_EVENT_POINT_EVENT && param.point->side == event_no && EdMoveCharaInfo.event_no == event_no) ||
+                        (param.kind == ED_EVENT_POINT_DOOR && event_no == 130 && std::strcmp(param.point->destination, "dungeon") == 0));
+
+    if (Mutated("queued_story_holds")) {
+        const bool held = !(TownMapEvent(event_no) && CoopWorldsPartnerRoomEvent(EdEventData, event_no));
+        InputPadState her{};
+
+        // (the twin's stop line: the old rule held the town on a tick her Cross came)
+        if (held && probe && NetplayPad(1, her) && (her.buttons & kInputCross) != 0) {
+            static std::int64_t said = -1;
+
+            if (said != NetplayLinkTick()) {
+                said = NetplayLinkTick();
+                std::fprintf(stderr, "coop-town: twin: his walk's probe of event %d holds the town against her Cross (queued_story_holds, link tick %lld)\n", event_no,
+                             (long long) NetplayLinkTick());
+            }
+        }
+        return !held;
+    }
+    return probe;
+}
+
 bool CoopTownMapEventQueued(int event_no) {
-    if (EdInteriorFlag != 0 || !Linked() || CoopWorldsApart() || EditMapInfo == nullptr || !TownMapEvent(event_no) ||
-        !CoopWorldsPartnerRoomEvent(EdEventData, event_no) || Mutated("queued_event_holds")) {
+    if (EdInteriorFlag != 0 || !Linked() || CoopWorldsApart() || EditMapInfo == nullptr || !HisWalkProbes(event_no) || Mutated("queued_event_holds")) {
         return false;
     }
 
@@ -6170,6 +6961,9 @@ int CoopTownOwnTownEvent() {
     return ::GameMode == ED_MODE_EVENT && EdInteriorFlag == 0 ? g_own_event_reader : 0;
 }
 
+static int g_beside_asked = 0; // coop-pt1111a: the game's player's walk steps beside another's own event that stood in an event's reach
+static int g_beside_moved = 0; // and the steps the running event's camera moved through that walk (CoopTownWalkQueues)
+
 // Each town tick: how far the other player walked through it, and its end said (the tests read both).
 static void OwnTownEventTick() {
     if (g_own_event_reader == 0) {
@@ -6188,13 +6982,70 @@ static void OwnTownEventTick() {
                  g_own_event_hidden, 3 - g_own_event_reader);
     std::fflush(stderr);
     std::fprintf(stderr, "coop-town: the clock moved %.3f through that event\n", SaveData != nullptr ? SaveData->GetNowTime() - g_own_event_clock : 0.0f); // (x-town-sign's line)
+    // coop-pt1111a: the game's player's walk beside it: the steps it stood in an event's reach, and the steps the event's camera moved through it (none)
+    std::fprintf(stderr, "coop-town: beside player %d's own town event %d the walk stood in an event's reach on %d steps, moved its camera on %d\n", g_own_event_reader,
+                 g_own_event_no, g_beside_asked, g_beside_moved);
+    g_beside_asked = 0;
+    g_beside_moved = 0;
+    g_own_event_end_reader = g_own_event_reader;
+    g_own_event_end_tick = NetplayLinkTick();
     g_own_event_reader = 0;
+}
+
+// coop-pt1111b (Jep's 11-11 playtest, item 4: "P1's screen flashes for one frame when P2 closes the fishing menu"): the reader of
+// the own town event this tick's frame belongs to. Its last tick is still the event's frame: editloop's event step looks through
+// the event's camera (NowCamera = &EventCamera) and its end (EventMode: GameMode back to walking) comes inside that step, so that
+// frame is drawn through the event's camera while the town is out of event mode (CoopTownOwnTownEvent: 0). Retail's one screen
+// was the reader's, who looks through that camera anyway; the other player's copy drew that frame from the reader's event camera
+// (shown: x-town-sign herboard, his frame on the tick her sign closed was her view of the sign). DC_COOP_MUTATE=ownevent_end_frame
+// (twin): its last frame no longer the event's, as before.
+static int OwnTownEventOfFrame() {
+    if (const int reader = CoopTownOwnTownEvent(); reader != 0) {
+        return reader;
+    }
+    if (Mutated("ownevent_end_frame") || EdInteriorFlag != 0) {
+        return 0;
+    }
+    if (g_own_event_reader != 0 && ::GameMode != ED_MODE_EVENT) { // (it ended in this tick's step; its end not said yet)
+        return g_own_event_reader;
+    }
+    return g_own_event_end_tick == NetplayLinkTick() ? g_own_event_end_reader : 0;
+}
+
+// coop-eventslots: the live own event's end said now (a parked one moves into the live engine on the tick it ended, before the
+// town's next tick would say it).
+void CoopTownOwnEventEndNow() {
+    OwnTownEventTick();
 }
 
 // Through his own town event she walks on (editloop's event mode steps her as its walk does); through hers he does.
 // DC_COOP_MUTATE=town_event_shared (twin): she stands through his, as before.
 bool CoopTownWalksThroughOwnEvent(int walker) {
     return CoopTownOwnTownEvent() == 3 - walker;
+}
+
+// coop-pt1111a (Jep's 11-11 playtest, items 2/2a: "P2 in the fishing sign's menu, its camera on the sign: the moment Toan walks
+// up to the sign (his '!'), P2's camera pans to Toan"; not reversed): through another player's own town event the game's player
+// walks on (editloop's event mode runs MainMode for him), and his walk's step asks for the event point he stands at, as retail's
+// does each step in its reach (RunEvent(EdMoveCharaInfo.event_no, &MainCamera)). An event running leaves start_event_no at -1,
+// so RunEvent's own guard let it through, and it copied his walk's camera into the one EventCamera the running event plays
+// through; editloop put start_event_no back after, never the camera. Retail never walks during an event, so nothing of his walk
+// may queue one beside it: no event, no system event (a room already does the same: edit_in's walk through her room event).
+// DC_COOP_MUTATE=beside_walk_queues (twin): his walk queues as before, the event's camera moved to him.
+bool CoopTownWalkQueues() {
+    constexpr int kWalker = 1; // (MainMode walks the game's character, Chara: together, player 1's)
+
+    if (CoopTownOwnTownEvent() == 0 || CoopTownOwnTownEvent() == kWalker || Mutated("beside_walk_queues")) {
+        return true;
+    }
+    if (EdMoveCharaInfo.event_no > 0 || EdMoveCharaInfo.system_event_no > 0 || EdMoveCharaInfo.event_ready != 0) {
+        g_beside_asked++;
+    }
+    return false;
+}
+
+void CoopTownBesideWalkCamera(bool moved) {
+    g_beside_moved += moved ? 1 : 0;
 }
 
 // Toan's walk beside her event: his Cross starts nothing (the town has one script engine: no door, talk or event of his till hers
@@ -6205,6 +7056,11 @@ void CoopTownHisWalkInHerEventIn() {
     PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1]
 
     g_his_cross_was = data[0].input.status.button & kInputCross;
+    // coop-eventslots: his fishing's Cross is his fishing's own (it casts and reels; it starts no event of the town's)
+    if (CoopFishingOn(0) && !Mutated("fishing_cross_stripped")) {
+        g_his_cross_was = 0;
+        return;
+    }
     data[0].input.status.button &= ~kInputCross;
 }
 
@@ -6249,6 +7105,9 @@ bool CoopTownOwnEventIsOthers() {
 // NetplayGamePadPlayer). DC_COOP_MUTATE=scriptmenu_owner_gamepad (twin): the game pad's player always, the room event's player
 // not read.
 int CoopTownEventPadPlayer() {
+    if (const int parked = CoopEventSlotsStepPlayer(); parked > 0) { // coop-eventslots: a parked slot's event steps: its player's
+        return parked;
+    }
     if (g_room_event.pad_in && g_room_event.player > 0 && !Mutated("scriptmenu_owner_gamepad")) {
         return g_room_event.player;
     }
@@ -6890,10 +7749,17 @@ void OwnTownView(float (*view)[4], float *eye, bool walking) {
         window_own = window_his = 0;
     }
 
+    // coop-eventslots: this copy's player's own event in their parked slot (another's holds the live engine): its camera here.
+    if (EdInteriorFlag == 0 && CoopEventSlotsView(view, eye)) {
+        g_town_view.active = true;
+        HoldDrawRng();
+        return;
+    }
+
     // coop-pt1106-batch: her own town event outdoors (Norune's fishing board): the event's camera on her copy, his own (the town's
     // MainCamera, following him on through it) on his. DC_COOP_MUTATE=roomevent_shown (twin): the event's camera on both.
-    if (CoopTownOwnTownEvent() == 2 && NetplayHasPlayer() && !Mutated("roomevent_shown")) {
-        if (NetplayLocalPlayer() == CoopTownOwnTownEvent()) { // (the reader's copy: hers)
+    if (const int reader = OwnTownEventOfFrame(); reader == 2 && NetplayHasPlayer() && !Mutated("roomevent_shown")) { // (coop-pt1111b: its last frame too)
+        if (NetplayLocalPlayer() == reader) { // (the reader's copy: hers)
             g_room_event.view = "event";
             return;
         }
@@ -7060,6 +7926,160 @@ void CoopTownView(float (*view)[4], float *eye, bool walking) {
     g_town_view.own = false;
 
     OwnTownView(view, eye, walking);
+    // coop-pt1111i test hook (DC_COOP_TEST_EYETRACE=1; Jep's 11-11 playtest item 16, P2's side: "a jump"): every drawn town frame on every
+    // copy, its drawn eye and look, the town's mode, which camera the game draws through, and her talk's and the merge's state.
+    if (static const bool trace = TestEnvOn("DC_COOP_TEST_EYETRACE"); trace) {
+        static long long frame_no = 0;
+
+        std::fprintf(stderr, "eyetrace: p%d f%lld lt%lld apart %d mode %d now %s eye (%.1f %.1f %.1f) fwd (%.2f %.2f %.2f) hertalk %d defer %d skin %d own %d\n",
+                     NetplayLocalPlayer(), frame_no++, (long long) NetplayLinkTick(), CoopWorldsApart() ? 1 : 0, (int) ::GameMode,
+                     NowCamera == (CCamera *) &MainCamera ? "main" : NowCamera == (CCamera *) &TalkCamera ? "talk" : "other", eye[0], eye[1], eye[2], view[0][2],
+                     view[1][2], view[2][2], g_room_event.on ? 1 : 0, CoopTownSwapDeferred() ? 1 : 0, g_town_skin ? 1 : 0, g_town_view.own ? 1 : 0);
+    }
+    // coop-pt1111b (item 4, DC_COOP_DEBUG): on a copy whose player is not the reader of the own town event running, the most its
+    // drawn eye moved in one frame through that event and the 10 frames after it (a frame drawn from the reader's event camera
+    // shows as a jump there and back), said once it is over (x-town-sign's line).
+    if (static const bool debug = CoopDebug(); debug && NetplayHasPlayer()) {
+        // (a frame's spike: the lesser of its eye's distances to the frame before and the one after, when those two lie near each other: out and back in one frame;
+        // a camera's cut, which stays, is no spike)
+        static int           watched = 0, after = 0, have = 0;
+        static float         most = 0.0f;
+        static std::int64_t  most_at = -1;
+        static sceVu0FVECTOR before = {}, last = {};
+        const int            reader = OwnTownEventOfFrame();
+        const bool           others = reader != 0 && reader != NetplayLocalPlayer();
+        auto                 apart = [](const float *a, const float *b) { return std::hypot(std::hypot(a[0] - b[0], a[1] - b[1]), a[2] - b[2]); };
+
+        if (others || after > 0) {
+            if (others) {
+                watched = reader;
+                after = 10;
+            }
+            if (have >= 2) {
+                // (out and back: the frames on either side near each other; a fast move one way is no spike)
+                const float out = std::min(apart(last, before), apart(last, eye));
+                const float spike = apart(before, eye) < 0.5f * out ? out : 0.0f;
+
+                if (spike > most) {
+                    most = spike;
+                    most_at = NetplayLinkTick() - 1;
+                }
+            }
+            std::copy(last, last + 3, before);
+            std::copy(eye, eye + 3, last);
+            have++;
+            if (!others && --after == 0) {
+                std::fprintf(stderr, "coop-town: p%d's drawn eye through player %d's own town event and 10 frames after: at most %.1f out and back in one frame (link tick %lld)\n",
+                             NetplayLocalPlayer(), watched, most, (long long) most_at);
+                most = 0.0f;
+                most_at = -1;
+                have = 0;
+            }
+        }
+    }
+    // coop-pt1111g (Jep's 11-11 playtest, item 16: "P2 in a dialogue; P1 enters and exits -> P1's camera warps to P2 for one frame, and P2's
+    // screen also glitches briefly"; DC_COOP_DEBUG): on every copy, over its last 60 town frames before the pair is together again after being
+    // apart (a merge in town) and the 60 after it: the most its drawn eye went out and came back in one frame (a frame from someone else's
+    // camera), the farthest it stood from the copy's own player (Toan on player 1's copy, her on the others'; a camera left at someone else and
+    // sliding back), and the most it moved in one frame (a cut, retail's at a talk's end too), said once it is over (x-talk-door -Back's line);
+    // and each frame of those whose eye moved 40 or more. A walking camera moves a few units a frame and stands some 30 to 90 from its player.
+    if (static const bool debug = CoopDebug(); debug && NetplayHasPlayer()) {
+        struct EyeFrame {
+            float        move, spike, off;
+            std::int64_t tick;
+        };
+        static EyeFrame      ring[60] = {};
+        static EyeFrame      most = {}, back = {}, far = {};
+        static int           ring_n = 0, left = 0, have = 0;
+        static bool          apart_was = false;
+        static std::int64_t  from = -1;
+        static sceVu0FVECTOR before = {}, last = {};
+        const bool           apart_now = CoopWorldsApart();
+        auto                 dist = [](const float *a, const float *b) { return std::hypot(std::hypot(a[0] - b[0], a[1] - b[1]), a[2] - b[2]); };
+        auto                 summed = []() {
+            for (int k = 0; k < std::min(ring_n, 60); k++) {
+                most = ring[k].move > most.move ? ring[k] : most;
+                back = ring[k].spike > back.spike ? ring[k] : back;
+                far = ring[k].off > far.off ? ring[k] : far;
+            }
+            ring_n = 0;
+        };
+
+        if (EdInteriorFlag != 0 || Chara == nullptr) {
+            have = 0;
+            ring_n = 0;
+        } else {
+            sceVu0FVECTOR own;
+
+            // (her copy: Toan's body while it walks as her apart, her skin on it; her partner's place otherwise, the merge's state set's too)
+            if (NetplayRole() != 2 || g_town_skin) { // (coop-cand1111fix: the copy whose own player is the game's Toan, by its role: apart the link is down and no local player is set)
+                Chara->GetPosition(own);
+            } else {
+                std::copy(g_town.pos, g_town.pos + 3, own);
+            }
+            EyeFrame frame = {have >= 1 ? dist(last, eye) : 0.0f, 0.0f, std::hypot(eye[0] - own[0], eye[2] - own[2]), NetplayLinkTick()};
+
+            if (have >= 2) { // (the frame before this one: out and back, the frames on either side near each other)
+                const float out = std::min(dist(last, before), dist(last, eye));
+
+                frame.spike = dist(before, eye) < 0.5f * out ? out : 0.0f;
+            }
+            std::copy(last, last + 3, before);
+            std::copy(eye, eye + 3, last);
+            have++;
+            if (apart_was && !apart_now) {
+                left = 61;
+                from = NetplayLinkTick();
+                most = back = far = EyeFrame{};
+                summed(); // (the 60 before it)
+            }
+            if (left > 0 && frame.move >= 40.0f) {
+                std::fprintf(stderr, "coop-town: p%d's drawn eye moved %.1f in one frame at link tick %lld (%d frames from the merge): eye (%.0f %.0f %.0f), %.0f from its own player\n",
+                             NetplayLocalPlayer(), frame.move, (long long) frame.tick, 61 - left, eye[0], eye[1], eye[2], frame.off);
+            }
+            ring[ring_n++ % 60] = frame;
+            if (left > 0 && --left == 0) {
+                summed(); // (and the 60 after it)
+                std::fprintf(stderr, "coop-town: p%d's drawn eye through the merge in town (link tick %lld): at most %.1f out and back in one frame (link tick %lld), at most %.0f from its own player (link tick %lld), at most %.1f in one frame (link tick %lld)\n",
+                             NetplayLocalPlayer(), (long long) from, back.spike, (long long) back.tick, far.off, (long long) far.tick, most.move, (long long) most.tick);
+            }
+        }
+        apart_was = apart_now;
+    }
+    // coop-pt1111i (Jep's 11-11 playtest item 16, P2's side: "a jump"; DC_COOP_DEBUG): on a copy apart in a town, once the game's own talk there ends
+    // (the town walks again after it: a talk that went on as this copy's own at the split), the most its drawn eye moved and its view turned in one
+    // frame over the 60 frames after (fewer when the town leaves walking first: another talk), said once they are over (x-talk-door -EndCam's line).
+    // Retail's end of a talk cuts once to the walking camera where it stood (the first frame, said apart); after that it walks.
+    if (static const bool debug = CoopDebug(); debug && NetplayRole() != 0) {
+        static int           left = 0, mode_was = -1;
+        static float         most = 0.0f, turned = 0.0f, cut = 0.0f, cut_turn = 0.0f, fwd_last[3] = {};
+        static sceVu0FVECTOR last = {};
+        const float          fwd[3] = {view[0][2], view[1][2], view[2][2]};
+        const float          move = std::hypot(std::hypot(eye[0] - last[0], eye[1] - last[1]), eye[2] - last[2]);
+        const float          turn = std::acos(std::clamp(fwd[0] * fwd_last[0] + fwd[1] * fwd_last[1] + fwd[2] * fwd_last[2], -1.0f, 1.0f)) * 57.29578f;
+
+        if (EdInteriorFlag == 0 && CoopWorldsApart() && mode_was == ED_MODE_TALK && ::GameMode == ED_MODE_WALK) {
+            left = 61;
+            most = turned = 0.0f;
+            cut = move;
+            cut_turn = turn;
+        } else if (left > 0) {
+            const bool walks = ::GameMode == ED_MODE_WALK;
+
+            if (walks) {
+                most = std::max(most, move);
+                turned = std::max(turned, turn);
+            }
+            if (--left == 0 || !walks) {
+                std::fprintf(stderr, "coop-town: p%d's drawn eye as its talk ended apart: the cut %.1f (%.1f degrees), then at most %.1f in one frame, its view at most %.1f degrees (%d frames)\n",
+                             NetplayRole(), cut, cut_turn, most, turned, walks ? 60 : 60 - left);
+                left = 0;
+            }
+        }
+        mode_was = EdInteriorFlag == 0 ? (int) ::GameMode : -1;
+        std::copy(eye, eye + 3, last);
+        std::copy(fwd, fwd + 3, fwd_last);
+    }
     // (coop-pt1109e: what this copy drew from, for the debug line: the two copies of a scene alike)
     g_drawn_eye[0] = eye[0];
     g_drawn_eye[1] = eye[1];
@@ -7360,6 +8380,7 @@ void CoopTownSnapshotTexturesOut() {
 }
 
 void CoopTownSnapshotApplied() {
+    CoopEventSlotsApplied(); // coop-eventslots
     // coop-townstand: a state file's partner this copy had not loaded yet (CoopTownSyncApply): loaded now, at its place.
     if (g_file_load_due) {
         g_file_load_due = false;
@@ -7776,6 +8797,26 @@ bool CoopTownBecomePartner(const float *toan, float yaw) {
             std::printf("coop: her merge: he comes in on her spot: he steps aside\n");
         }
     }
+    // coop-pt1111g (Jep's 11-11 playtest, item 16: "P2 in a dialogue; P1 enters and exits -> P1's camera warps to P2"): the game's
+    // camera followed her skin apart, so it stood at her as Toan came in at his door; her camera took it above, and the game's then
+    // slid from her to him over the next frames on his copy, whose screen it is (shown: x-talk-door-townher-back, his eye 506 from
+    // Toan on the merge's first frame, 91 a frame back to him). Outdoors it comes with him now, as the town's own arrival puts it:
+    // behind him, on every copy alike (the state both step). DC_COOP_MUTATE=merge_cam_left (twin): left at her, as before.
+    if (!indoors && !Mutated("merge_cam_left")) {
+        sceVu0FVECTOR turn;
+        float         angle = 0.0f;
+
+        Chara->frame->GetRotation(turn);
+        angle = turn[1] - PI_SHORT; // (as editloop's staying: Toan put back facing away from the door)
+        if (angle < -PI_SHORT) {
+            angle += TWO_PI_SHORT;
+        }
+        MainCamera.FollowOn();
+        MainCamera.SetAngleSoon(angle);
+        MainCamera.SetFollow(at[0], at[1] + Chara->body_height - 3.0f, at[2]);
+        MainCamera.Step(-1);
+        std::fprintf(stderr, "coop: her merge: the game camera comes to Toan at (%.0f %.0f %.0f)\n", at[0], at[1], at[2]);
+    }
     std::printf("coop: her merge: she is the partner at (%.0f %.0f %.0f), Toan at (%.0f %.0f %.0f)\n", g_town.pos[0], g_town.pos[1], g_town.pos[2],
                 at[0], at[1], at[2]);
     // coop-uiflash: her facing as she stood apart, for the merge's facing check (DC_COOP_DEBUG).
@@ -8141,7 +9182,10 @@ static bool OwnEventTalkClock() {
 }
 
 bool CoopTownDayChangeHeld() {
-    return Linked() && !Mutated("day_change_no_hold") && (::GameMode == ED_MODE_TALK || CoopTalkAny() || OwnEventTalkClock()); // (opt8: anyone's talk, from its slot; coop-scriptmenus: one player's own town event)
+    // (coop-eventslots: or anyone's own event in their parked slot, as the live one's: the change's scene never starts under it; a scene
+    // begun under a parked event's menu parted the copies at x-eventslots catch. DC_COOP_MUTATE=dayhold_ignores_parked: as before)
+    return Linked() && !Mutated("day_change_no_hold") && (::GameMode == ED_MODE_TALK || CoopTalkAny() || OwnEventTalkClock() ||
+                                                          (CoopEventSlotsAnyParked() && !Mutated("dayhold_ignores_parked"))); // (opt8: anyone's talk, from its slot; coop-scriptmenus: one player's own town event)
 }
 
 // cand57 (opt8 with coop-scriptmenus): the clock steps through a talk or one player's own town event as through a walk, for the others (Jep's talk
@@ -8204,13 +9248,14 @@ static void TalkClockForTest() {
     static int       stage = 0;
     static bool      her = spec != nullptr && std::strstr(spec, "her") != nullptr;
     static bool      own_event = spec != nullptr && std::strstr(spec, "event") != nullptr;
+    static bool      parked = spec != nullptr && std::strstr(spec, "parked") != nullptr; // (coop-eventslots: anyone's own event in their parked slot)
 
     if (spec == nullptr || SaveData == nullptr || (a < 0.0f && std::sscanf(spec, "%f,%f", &a, &b) != 2)) {
         return;
     }
 
     const bool game_player_talks = g_talks[0].on || ::GameMode == ED_MODE_TALK; // (opt8: from its slot together)
-    const bool talk = own_event ? CoopTownOwnTownEvent() != 0 : her ? CoopTownHerTalkOn() && !game_player_talks : game_player_talks;
+    const bool talk = parked ? CoopEventSlotsAnyParked() : own_event ? CoopTownOwnTownEvent() != 0 : her ? CoopTownHerTalkOn() && !game_player_talks : game_player_talks;
 
     if (!talk) {
         from = -1;
@@ -8894,4 +9939,114 @@ int CoopTownCaveKeyUsed(bool *walked) {
     std::fprintf(stderr, "coop-town: player %d used the cave key at the cave door: the door opens (flag 1) for both\n", user);
     std::fflush(stderr);
     return CoopTownCaveEntry(user) ? 0 : user;
+}
+
+// coop-eventslots (design for three: Jep 11-09, the coordinator's 11-11 list): each town player's own pieces, by actor index (0 the game's
+// player: retail's Chara, MainCamera, block 8, the game's pack). Every other player who walks the town has a walker of their own
+// (Town: body, texture animation, own camera, texture block, bag, Cross search); WalkerFor names the one an index has, or none.
+// Today the town has one: g_town, the walker of the player g_town_owner names (player 2's, actor index 1). A third walker joins by
+// another entry here; nothing below names player 2.
+int g_town_owner = 1;
+
+decltype(g_town) *WalkerFor(int index) {
+    return index > 0 && index == g_town_owner ? &g_town : nullptr;
+}
+
+TownCam *WalkerCam(int index) {
+    return WalkerFor(index) != nullptr ? &g_town_cam : nullptr;
+}
+
+CCharacter *CoopTownPlayerBody(int index, CTexAnimeData **anime, int *anime_count) {
+    if (index == 0) {
+        if (anime != nullptr) {
+            *anime = nullptr; // (retail's own: the event keeps its main character's as EdEventInfo has them)
+        }
+        return Chara;
+    }
+    decltype(g_town) *walker = WalkerFor(index);
+
+    if (walker == nullptr || walker->body == nullptr || !walker->visible) {
+        return nullptr;
+    }
+    if (anime != nullptr) {
+        *anime = walker->anime;
+        *anime_count = 64;
+    }
+    return walker->body;
+}
+
+CCamera *CoopTownPlayerCamera(int index) {
+    return CoopTownPlayerFollowCamera(index);
+}
+
+// The story-free town map event (either player's own, CoopWorldsPartnerRoomEvent) player index stands in reach of, facing it, or -1:
+// the game's player's by his walk's probe this step (EdMoveChara's EdGetEvent), a walker's by the same search from their pose.
+int CoopTownPlayerEventAt(int index) {
+    if (EdInteriorFlag != 0 || EditMapInfo == nullptr || EdEventData == nullptr) {
+        return -1;
+    }
+    int event = -1;
+
+    if (index == 0) {
+        const ED_EVENT_PARAM &param = EdMoveCharaInfo.param;
+
+        if (EdMoveCharaInfo.interior == 0 && EdMoveCharaInfo.event_ready != 0 && param.point != nullptr && param.kind == ED_EVENT_POINT_EVENT) {
+            event = param.point->side;
+        }
+    } else if (WalkerFor(index) != nullptr) {
+        return HerTownEventAt(EdEventData); // (g_town's search: the walker's pose)
+    }
+    return event > 0 && TownMapEvent(event) && CoopWorldsPartnerRoomEvent(EdEventData, event) ? event : -1;
+}
+
+
+// The bag the running event's script reads (its rod check): player index's own (coop_menu's swap with the game's pack, for the player
+// whose bag P2Bag keeps), the game's for the game's player. Returns whether it was swapped (swap back with the same call).
+bool CoopTownEventBagSwap(int index) {
+    return index > 0 && index == coop::OwnBagPlayer() - 1 ? MenuSwapP2Bag() : false;
+}
+
+// coop-eventslots: player index's own body's texture block (the game's player: retail's main character's, 8; a walker: its own).
+int CoopTownPlayerTextureBlock(int index) {
+    return index == 0 ? 8 : WalkerFor(index) != nullptr ? PartnerTextureBlock() : -1;
+}
+
+// coop-eventslots: player index's own camera as a follow camera (the game's player's MainCamera, a walker's own).
+CCameraFollow *CoopTownPlayerFollowCamera(int index) {
+    if (index == 0) {
+        return &MainCamera;
+    }
+    TownCam *cam = WalkerCam(index);
+
+    return cam != nullptr && cam->ready ? cam->camera : nullptr;
+}
+
+// coop-eventslots: player index's own body again where it stands (after another model, their fishing's, was loaded into it).
+bool CoopTownPlayerBodyAgain(int index) {
+    if (WalkerFor(index) == nullptr) {
+        return false;
+    }
+    const bool was = g_reload_in_place;
+
+    g_reload_in_place = true;
+    const bool ok = TownLoad(TownMember());
+
+    g_reload_in_place = was;
+    std::fprintf(stderr, "coop-eventslots: player %d's own body loaded again in place at link tick %lld: %s\n", index + 1, (long long) NetplayLinkTick(), ok ? "done" : "FAILED");
+    std::fflush(stderr);
+    return ok;
+}
+
+// Test hook (DC_COOP_TEST_EVENTSLOT_TRIP): each actor index's walker as this table has it (the self-test's line).
+void CoopTownWalkersForTest() {
+    for (int index = 0; index < coop::kMaxPlayers; index++) {
+        std::fprintf(stderr, "coop-eventslots: test: walker %d (player %d): body %s, camera %s, block %d, bag %s\n", index, index + 1,
+                     CoopTownPlayerBody(index, nullptr, nullptr) != nullptr ? "yes" : "no", CoopTownPlayerFollowCamera(index) != nullptr ? "yes" : "no",
+                     CoopTownPlayerTextureBlock(index), index == 0 ? "the game's" : index == coop::OwnBagPlayer() - 1 ? "own" : "none");
+    }
+}
+
+// coop-eventslots: event_no is one of the town's map event points' (the board's 11), not a door's, a talk's or a story's.
+bool CoopTownPlayerEventIsMap(int event_no) {
+    return TownMapEvent(event_no);
 }

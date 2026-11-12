@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=flat-square)](#what-you-need)
 [![Players](https://img.shields.io/badge/players-2-green?style=flat-square)](#known-issues)
 
-[How it works](#how-it-works) • [Co-op features](#co-op-features) • [Where it's at](#where-its-at) • [What you need](#what-you-need) • [Installing](#installing) • [Playing together](#playing-together) • [Reporting bugs](#reporting-bugs) • [Building it yourself](#building-it-yourself) • [Credits](#credits)
+[How it works](#how-it-works) • [Features](#features) • [Where it's at](#where-its-at) • [What you need](#what-you-need) • [Installing](#installing) • [Playing together](#playing-together) • [Reporting bugs](#reporting-bugs) • [Building it yourself](#building-it-yourself) • [Credits](#credits)
 
 </div>
 
@@ -34,17 +34,37 @@ Player 2 can hop in and out at any time and plays as a separate person from play
 
 If players fall out of sync, the zone reloads. You don't lose anything, but if you're in the dungeon you will restart the floor.
 
-## Co-op features
+## Features
 
-**Dungeons:** when one player tries to leave, it will offer to take the other player with them. If the second player declines, the door remains unlocked for them to exit. Exiting the dungeon through the stairs brings you back to the dungeon floor select screen, which you can back out of to leave. This made character syncing for special levels easier and felt like a nice QoL anyways.
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="FEATURES.md#fighting-together"><img src="https://github.com/user-attachments/assets/97e8b66d-b229-4457-acc0-ef47d5e14dce" alt="Fight together" width="100%"></a>
+<br><b>Fight together.</b> Same monsters on both screens, each with your own lock-on. <a href="FEATURES.md#fighting-together">More</a>
+</td>
+<td width="50%" valign="top">
+<a href="FEATURES.md#send-items"><img src="https://github.com/user-attachments/assets/2398b616-7508-482b-8644-0676221f5d82" alt="Send items" width="100%"></a>
+<br><b>Send items.</b> <kbd>Select</kbd> on your bag's Items page sends it to your friend. <a href="FEATURES.md#send-items">More</a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="FEATURES.md#trade-characters"><img src="https://github.com/user-attachments/assets/439a95bf-0cf8-4788-88e4-bbabc75de9e2" alt="Trade characters" width="100%"></a>
+<br><b>Trade characters.</b> Switch to any character you've unlocked, or trade with your friend. <a href="FEATURES.md#trade-characters">More</a>
+</td>
+<td width="50%" valign="top">
+<a href="FEATURES.md#story-scenes-that-need-everyone"><img src="https://github.com/user-attachments/assets/14f29866-75f4-41f0-a16e-ff00a75ad262" alt="Story scenes" width="100%"></a>
+<br><b>Story scenes.</b> Item-started story scenes wait until everyone says yes. New in v0.1.1. <a href="FEATURES.md#story-scenes-that-need-everyone">More</a>
+</td>
+</tr>
+</table>
 
-**Key items:** both players have a shared key items inventory tab to make sure both players always have access to all of the key items.
+- <b>Drop in, drop out.</b> Join or leave any time. The host never stops for you. <a href="FEATURES.md#drop-in-drop-out">More</a>
+- <b>Play apart.</b> One in town, one in the dungeon. Same world, your own way. <a href="FEATURES.md#play-apart">More</a>
+- <b>Leave together.</b> Take an exit and your friend is asked to come along. <a href="FEATURES.md#leaving-a-floor">More</a>
+- <b>Fish together.</b> Both at the fishing sign at once, each with your own fish. New in v0.1.1. <a href="FEATURES.md#fishing-together">More</a>
 
-**Characters:** players can trade characters and switch between any unlocked character.
-
-**Sending items:** press <kbd>Select</kbd> on the Items page of your bag to send an item to the other player.
-
-The full list of what's in this release is in the [release notes](../../releases).
+Also: [shared key items](FEATURES.md#shared-key-items), [shared storage](FEATURES.md#shared-storage), [profiles](FEATURES.md#profiles), [pausing only when everyone pauses](FEATURES.md#pausing) and more. **[All features](FEATURES.md)**
 
 ## Where it's at
 
@@ -85,7 +105,7 @@ The game balance is a bit skewed with every additional player. It's fine if you'
 It builds the mod from source on your PC, which takes a few minutes. When it's done, run **`Play Dark Cloud Co-op.exe`** in `mods\Dark Cloud Co-op`.
 
 > [!WARNING]
-> Nothing here is signed, so Windows may show "Windows protected your PC" the first time. Click **More info**, then **Run anyway**. Windows 11's Smart App Control blocks unsigned programs completely, so that has to be off. Windows Defender (or another antivirus) may also flag the freshly built game as it is made; if it does, the setup stops and says so: add your Chronicle folder's `mods` folder (for example `C:\Chronicle\mods`) as an exclusion in Windows Security, then run the setup again.
+> Nothing here is signed, so Windows may show "Windows protected your PC" the first time. Click **More info**, then **Run anyway**. Windows 11's Smart App Control blocks unsigned programs completely, so that has to be off. Windows Defender (or another antivirus) may also flag the freshly built game, or hold one of the build's programs while it checks it; if it does, the setup stops and names it: add two folders of your Chronicle folder as exclusions in Windows Security, `mods` and `.kazarov` (for example `C:\Chronicle\mods` and `C:\Chronicle\.kazarov`), then run the setup again. It carries on where it stopped.
 
 > [!NOTE]
 > **Playing with a friend:** they run the same setup on their own Chronicle with their own disc. Two people on the same release end up with exactly the same game, which is what lets you connect.
@@ -170,7 +190,6 @@ You'll need Git, PowerShell 7, Python 3, CMake 3.28 or newer, 7-Zip, and a Chron
 | `build\` | The build scripts |
 | `launcher\` | The launcher |
 | `release\` | The setup |
-| [`docs/upstream-divergences.md`](docs/upstream-divergences.md) | Every place the mod deliberately does something different from Chronicle, and why |
 
 </details>
 
