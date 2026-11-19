@@ -849,6 +849,21 @@ bool SteamCorePaced() {
     return FixedRate() == 0 && !NetplayMutated("steam_pace_off");
 }
 
+// coop-hostquit: Steam's state of the session to a SteamID (k_ESteamNetworkingConnectionState: 0 none, 1 connecting, 2 finding
+// a route, 3 connected, 4 closed by the peer, 5 a problem detected locally (its timeout)); -1 when Steam or the call is out.
+int SteamCoreSessionState(std::uint64_t to) {
+    if (!g_up || g_api.SessionInfo == nullptr) {
+        return -1;
+    }
+
+    Identity who{};
+    alignas(8) unsigned char info[2048] = {};
+    alignas(8) unsigned char status[512] = {};
+
+    g_api.SetId(&who, to);
+    return g_api.SessionInfo(g_messages, &who, info, status);
+}
+
 bool SteamCoreQueue(std::uint64_t to, int &pending_bytes, int &rate) {
     pending_bytes = rate = 0;
 

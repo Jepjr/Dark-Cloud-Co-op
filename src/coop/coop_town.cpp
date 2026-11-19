@@ -26,6 +26,8 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <limits> // coop-georamavillagers
+#include <vector> // coop-wave2: a talking villager's frames saved for a draw
 
 #include "btitem.hpp"
 #include "clsmes.hpp" // coop-mayorhouse: the talk window's place (DC_COOP_TEST_TALK_RECT)
@@ -34,6 +36,7 @@
 #include "coop/netplay_cmd.hpp" // coop-pt1111e: kCmdDialogPick
 #include "camerafollow.hpp"
 #include "character.hpp"
+#include "gameutil.hpp" // coop-wave2: SetMotionEX (a talking villager posed for a draw)
 #include "collision.hpp"
 #include "dataalloc.hpp"
 #include "dataread.hpp"
@@ -42,12 +45,14 @@
 #include "ebattle.hpp"
 #include "gamepad.hpp" // coop-localfix: the door trace
 #include "edit.hpp"
+#include "platform/config.hpp" // coop-drawwrite: ConfigDetailDistance
 #include "boxvu0.hpp"
 #include "editground.hpp"
 #include "editloop.hpp"
 #include "editloop3.hpp" // EdLimitShadowLight; coop-closet: EdGetEvent
 #include "edit_in.hpp"   // coop-closet: EdInInfo, the room's event points
 #include "editmapscript.hpp"
+#include "fishing.hpp" // coop-xiaofish: FishingPickUpPoly (her walk with the rod)
 #include "frame.hpp"
 #include "frameattr.hpp"
 #include "main.hpp"
@@ -58,14 +63,21 @@
 #include "npcharacter.hpp" // coop-menuanim: the villagers' trace
 #include "objanime.hpp"    // coop-menuanim: and the map's object animations
 #include "texture.hpp"
+#include "mdt.hpp"               // coop-villagerinvis: MDT_HEADER (a villager's models in its pack)
+#include "data/data_read.hpp"     // coop-villagerinvis: DataFileSize
+#include "framevu1.hpp"           // coop-villagerinvis: a villager's frames and their models (the mesh trace)
+#include "coop/coop_faces.hpp" // coop-faces
 #include "textureanime.hpp"
 #include "savedata.hpp"
 #include "dngstatusdata.hpp"
 #include "userstatus.hpp"
 
 #include "coop/coop_camera.hpp" // coop-drawrng: DrawRngEnter/Leave
+#include "coop/coop_fishbody.hpp" // coop-xiaofish: a fisher drawn as their own member
 #include "coop/coop_core.hpp"
 #include "coop/coop_party.hpp"
+#include "coop/coop_members.hpp" // coop-memberstage4: Member
+#include "coop/coop_prompt.hpp" // coop-p1body: g_member_of (the game's player's kept member)
 #include "coop/coop_combat.hpp"
 #include "coop/coop_wheel.hpp"
 #include "coop/coop_spawn.hpp"
@@ -82,6 +94,12 @@
 #include "sound_effect.h"         // coop-townchest: SE_BOX_OPEN
 
 
+
+namespace dc::game {
+extern sceVu0FVECTOR camera_pos; // coop-herscreen: the sound listener (snd.cpp)
+extern sceVu0FVECTOR camera_dir;
+extern sceVu0FVECTOR fix_camera_pos; // coop-housecam2: retail's camera spot out of the last door taken (editloop.cpp)
+} // namespace dc::game
 
 namespace dc::game {
 int keyCtrl(float x, float y, MOTION_INFO *motion);
@@ -101,9 +119,12 @@ struct EdCameraWallInfo {      // ebattle.cpp (coop-housecam: EdMoveChara's came
     int turned;
 };
 void EdCameraWalls(CCameraFollow *camera, CEditGround *ground, int shallow, int fishing, int turn_at_once, EdCameraWallInfo *info);
+// ebattle.cpp (coop-herswing): EdMoveChara's swing round behind its character, run on her camera too
+void EdCameraSwingBehind(CCameraFollow *camera, float facing, int pressed, int left_clear, int right_clear, int *count);
 } // namespace dc::game
 namespace dc::render {
 unsigned long PortTextureMisses(); // render/texture_registry.hpp (coop-localfix: her model's draw misses)
+bool          PortKeyLive(unsigned key); // (rejointex: her blocks' keys bound in a test frame)
 } // namespace dc::render
 
 namespace coop {
@@ -190,6 +211,7 @@ struct RoomEvent {
     float          cam_angle_from = 0.0f;   // opt8: her camera's angle as her talk began
 } g_room_event;
 
+
 // opt8 (Jep 11-09: one talk path for every player): each player's talk in a slot of its own, indexed as the actor table
 // (entry 0 the game's player, the resident; entry 1 player 2), holding what retail's one talk keeps in statics: editloop3's
 // talk state (EdTalkStateSwap's block) and the message window. Together every talk runs from its slot through one step
@@ -201,11 +223,30 @@ struct TalkSlot {
     bool      on;       // the talk runs
     long long tick;     // the link tick it began on
     int       event;    // its result's event (retail's result 4), to start as its talker's own on the next free step; 0 none
+    // coop-wave2 (talks local): its talker's end command applied this tick (every copy), with what the talker's own copy's window
+    // ended with: retail's result, its choice (the event of result 4), the shop it named and the villager's talk flags it set.
+    bool      end_due;
+    int       end_result;
+    int       end_choice;
+    int       end_shop;
+    int       end_npc_flags;
 };
 TalkSlot g_talks[coop::kMaxPlayers] = {};
 
+// coop-wave2: this copy's own part of its own player's talk in retail's window, never state: its end sent and waiting for its
+// command's tick, the villager's talk flags its window set (held back from the save till that tick) and the shop it named.
+struct TalkOwn {
+    bool      sent = false;
+    long long talk = -1; // the slot's tick (which talk)
+    int       npc_flags = 0;
+    int       villager_motion = 0; // the motion the window last asked of its villager (3 talking while a message shows): drawn only
+};
+TalkOwn g_talk_own[coop::kMaxPlayers];
+
 int  GatherTownPolys(const float *pos, CCPoly **out);
 void TownSecondSpot(const float *spot, float yaw, const float *other, float *out);
+bool TownGroundAt(float x, float y, float z, float *ground, int *kind); // (below)
+bool TownStepClearFrom(const float *from, const float *to); // coop-storywarp: TownStepClear (below), for PlaceBesideToan
 
 // While player 2's copy draws the town from player 2's offset.
 struct TownView {
@@ -256,7 +297,32 @@ int TownMember() {
         return forced;
     }
 
-    return TownPickable(g_partner.choice) ? g_partner.choice : CHARA_XIAO;
+    // coop-memberstage4 (item 4): her town body is her member, the members' word (coop_members: Member(1)); g_partner.choice is the
+    // partner body's wish (a floor's role swap points it at player 1's member on her copy apart) and only stands in while no member
+    // is kept for her (a state file's start). A town where the two differ says so once per pair (the measure that this read
+    // changes nothing on screen where they agree). DC_COOP_MUTATE=town_body_pick (twin): the partner body's pick, as before.
+    // (coop-memberstage4: on a floor too: her page's change writes her pick with her member, and the apart trade's apply reads her
+    // body before its writes; before, a floor read the pick, which her page left behind and a bump on her copy apart points at
+    // player 1's member)
+    const int kept = Mutated("town_body_pick") ? -1 : Member(1);
+    const int wish = g_partner.choice;
+    static int said = -2;
+
+    if (kept >= 0 && kept != wish && said != kept * 8 + (wish & 7)) {
+        said = kept * 8 + (wish & 7);
+        std::fprintf(stderr, "coop-member: town body: her member %d, the partner body's pick %d differ on player %d's copy%s at link tick %lld\n", kept, wish,
+                     CoopWorldsApart() ? CoopWorldsSelf() : NetplayLocalPlayer(), CoopWorldsApart() ? " (apart)" : "", (long long) NetplayLinkTick());
+    }
+    const int pick = kept >= 0 ? kept : wish;
+
+    // coop-swapcombo (the b9arrive row x-entrwin-p2late-traded: a trade undone at a split): Toan is no town pick of hers (the town's
+    // player is Toan), but a trade gives him to her: her member stays him, apart and in town alike, not Xiao.
+    // DC_COOP_MUTATE=traded_toan_xiao (twin): Xiao, as before.
+    if (pick == CHARA_TOAN && !Mutated("traded_toan_xiao")) {
+        return CHARA_TOAN;
+    }
+
+    return TownPickable(pick) ? pick : CHARA_XIAO;
 }
 
 void PlaceBesideToan(const char *reason) {
@@ -268,6 +334,51 @@ void PlaceBesideToan(const char *reason) {
     g_town.pos[0] = at[0] - kTownSpawn * cosf(rotation[1]);
     g_town.pos[1] = at[1];
     g_town.pos[2] = at[2] + kTownSpawn * sinf(rotation[1]);
+    // coop-storywarp (Jep's rc1 playtest 11-13: out of Toan's house after its scene, P2 hung in the air, then dropped): his side at his
+    // height was her spot, ground or not (Toan on the porch at 43, her spot beside it over the yard at 10: x-door-finished -Case door,
+    // "P2 placed beside Toan (out of a building) at (-320 43 -185)", then 10). Now a clear spot beside him on the ground (TownSecondSpot:
+    // his side first, then around him, each on ground within a step of his and reached by a walk from him), its height the ground's.
+    // DC_COOP_MUTATE=beside_his_height (twin): his side at his height, as before.
+    // No such spot on his level (Toan's porch is one body wide: walls to the sides, the steps a drop of 33): the nearest clear ground
+    // round him at any lower height within reach (the yard below the porch), stood on at its own height, off any town event's ground
+    // and not past a wall; only with none at all, his own spot (on him sooner than in the air).
+    if (!Mutated("beside_his_height")) {
+        float spot[3];
+
+        TownSecondSpot(at, rotation[1], at, spot);
+        if (std::fabs(spot[0] - at[0]) < 1.0f && std::fabs(spot[2] - at[2]) < 1.0f) {
+            bool found = false;
+
+            for (int ring = 1; ring <= 6 && !found; ring++) {
+                for (int way = 0; way < 8 && !found; way++) {
+                    const float angle = rotation[1] + way * 0.785398f;
+                    const float x = at[0] + ring * kSpawnSpot * std::sin(angle);
+                    const float z = at[2] + ring * kSpawnSpot * std::cos(angle);
+
+                    for (float y = at[1]; y >= at[1] - 64.0f && !found; y -= 12.0f) {
+                        float ground = 0.0f;
+                        int   kind = 0;
+                        const float to[3] = {x, at[1], z};
+
+                        float again = 0.0f; // (the ground her walk reads from that height: the same, or a stair's edge it slides off)
+
+                        if (TownGroundAt(x, y, z, &ground, &kind) && ground <= at[1] + 1.0f && kind == 0 && TownGroundAt(x, ground, z, &again, nullptr) &&
+                            std::fabs(again - ground) < 0.05f && TownStepClearFrom(at, to)) {
+                            spot[0] = x;
+                            spot[1] = ground;
+                            spot[2] = z;
+                            found = true;
+                        }
+                    }
+                }
+            }
+            std::printf("coop: beside Toan at (%.0f %.0f %.0f) no spot on his level: %s (%.0f %.0f %.0f)\n", at[0], at[1], at[2], found ? "the ground below at" : "his own spot",
+                        spot[0], spot[1], spot[2]);
+        }
+        g_town.pos[0] = spot[0];
+        g_town.pos[1] = spot[1];
+        g_town.pos[2] = spot[2];
+    }
     g_town.pos[3] = 1.0f;
     g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
     g_town.body->frame->SetPosition(g_town.pos);
@@ -276,6 +387,16 @@ void PlaceBesideToan(const char *reason) {
     g_town.body->SetRotation(0.0f, rotation[1], 0.0f);
     std::printf("coop: P2 placed beside Toan (%s) at (%.0f %.0f %.0f)\n", reason, g_town.pos[0], g_town.pos[1], g_town.pos[2]);
 }
+
+// coop-housecam2: the arriver's own game camera, taken across a merge's state set (CoopTownOwnCameraBefore, below)
+namespace {
+struct OwnCamera {
+    bool          held = false;  // taken before this apply
+    bool          kept = false;  // kept aside for the deferred swap
+    unsigned char bytes[sizeof(CCameraFollow) - offsetof(CCameraFollow, pos)] = {};
+};
+OwnCamera g_own_camera;
+} // namespace
 
 // coop-spawn: a town merge keeps player 2 where her copy had her (the host's stand, the same on both copies) instead of
 // beside Toan; if the two stand on one spot, the one who arrived last moves to spot 2 of its arrival. Without a stand (no
@@ -372,6 +493,29 @@ void PlaceAfterLoad(const char *reason) {
     }
 }
 
+// rejointex (jointake's two differences after a rejoin in town): in a frame a test writes to a file, her texture blocks as this copy
+// draws them: how many slots each holds and how many are bound (image key live in the renderer's registry, a palette's too).
+// A slot's key is this copy's own handle (render/texture_registry.hpp: handed out round-robin per process), so it differs between
+// copies by design; bound and not empty is what her picture needs. The test reads it beside the frame's pixels.
+void SayHerBlocksBound() {
+    int slots[2] = {}, bound = 0;
+
+    for (const CTexture &texture : TexManager.textures) {
+        const int which = texture.block == PartnerTextureBlock() ? 0 : texture.block == PartnerWeaponBlock() ? 1 : -1;
+
+        if (texture.name[0] == 0 || which < 0) {
+            continue;
+        }
+        slots[which]++;
+        const unsigned tbp = (unsigned) (texture.tex0 & 0x3FFF), cbp = (unsigned) ((texture.tex0 >> 37) & 0x3FFF);
+        if (dc::render::PortKeyLive(tbp) && (cbp == 0 || dc::render::PortKeyLive(cbp))) {
+            bound++;
+        }
+    }
+    std::fprintf(stderr, "coop-town: p%d her blocks in the test frame: %d slots in block %d, %d in block %d, %d bound\n", NetplayLocalPlayer(), slots[0],
+                 PartnerTextureBlock(), slots[1], PartnerWeaponBlock(), bound);
+}
+
 bool BlockEmptyNow() {
     for (const CTexture &texture : TexManager.textures) {
         if (texture.block == PartnerTextureBlock()) {
@@ -389,7 +533,267 @@ bool  g_join_place = false;     // coop-joindesync: her copy's first load after 
 float g_join_yaw = 0.0f;
 bool  g_file_load_due = false; // coop-townstand: a state file's partner to load right after its apply (CoopTownSnapshotApplied)
 
+// jointake: the last TownLoad's time on the game thread, its file read and its pack's load apart (CoopTownSyncTake says them)
+double g_town_load_ms = 0.0, g_town_file_ms = 0.0, g_town_pack_ms = 0.0, g_town_weapon_ms = 0.0;
+// towncrash: a floor partner's load wrote over the model the town body's frames lie in (TownModelArenaTaken), till its next load
+bool g_town_body_under = false;
+using LoadClock = std::chrono::steady_clock;
+
+double LoadMsSince(LoadClock::time_point at) {
+    return std::chrono::duration<double, std::milli>(LoadClock::now() - at).count();
+}
+
+// jointake (the coordinator's option B, 11-12): her model loaded ahead of the state set's take, the frame between its checkpoint and
+// the take, into a model set of its own (her body, its texture animations, the pack and model buffers and their arena, the
+// weapon), so g_town.body and g_partner's buffers are untouched till the take's TownLoad swaps it in (g_town.loaded stays -1
+// and nothing steps, draws or reads it). What it shares: TexManager's partner and weapon blocks, loaded then. chara -1: none.
+struct ModelSet {
+    CCharacter     *body = nullptr;
+    CTexAnimeData  *anime = nullptr;
+    u_int          *pack = nullptr;
+    u_char         *model = nullptr;
+    CDataAlloc2<1>  arena{};
+    CCharacter     *weapon = nullptr;
+    int             weapon_mark = 0;
+    bool            weapon_loaded = false;
+};
+ModelSet ModelSetNow() {
+    return {g_town.body, g_town.anime, g_partner.pack, g_partner.model, g_partner.arena, g_partner.weapon, g_partner.weapon_mark, g_partner.weapon_loaded};
+}
+void ModelSetPut(const ModelSet &set) {
+    g_town.body = set.body;
+    g_town.anime = set.anime;
+    g_partner.pack = set.pack;
+    g_partner.model = set.model;
+    g_partner.arena = set.arena;
+    g_partner.weapon = set.weapon;
+    g_partner.weapon_mark = set.weapon_mark;
+    g_partner.weapon_loaded = set.weapon_loaded;
+}
+
+// coop-p1body: a member's dungeon model into any body's set and texture blocks (one routine for every player's town body: Jep's
+// rule, P2 like P1, design for 6): its file, the pack into the set's body, arena and block, the weapon in its hand in weapon_block.
+// Nothing of a place, facing or state. Returns 0 when the file did not load (the set's buffers made, nothing else touched), 1 when
+// the pack gave no model, 2 loaded. ms (may be null): the file read, the pack's load and the weapon's, apart. size: the file's bytes.
+int LoadBodyInto(ModelSet &set, int chara, int block, int weapon_block, const char *whose, double *ms = nullptr, int *bytes = nullptr) {
+    auto since = LoadMsSince;
+
+    if (set.pack == nullptr) {
+        set.pack = reinterpret_cast<u_int *>(new (std::align_val_t{64}) u_char[kPackBytes]);
+        set.model = new (std::align_val_t{64}) u_char[static_cast<size_t>(kModelQuads) * 16];
+    }
+
+    if (set.body == nullptr) {
+        set.body = new CCharacter();
+        set.anime = new CTexAnimeData[64];
+    }
+
+    int        size = 0;
+    const auto file_start = LoadClock::now();
+
+    if (LoadFile(const_cast<char *>(charaNameTbl[chara]), set.pack, &size) == 0 || size <= 0 || size > kPackBytes) {
+        std::fprintf(stderr, "coop: cannot load %s for town\n", charaNameTbl[chara]);
+        return 0;
+    }
+    if (bytes != nullptr) {
+        *bytes = size;
+    }
+    if (ms != nullptr) {
+        ms[0] = since(file_start);
+    }
+    const auto pack_start = LoadClock::now();
+    TexManager.DeleteTextureBlock(block);
+    TexManager.DeleteTextureBlock(weapon_block);
+    TexManager.CleanUpBuffer();
+    TexManager.CleanUpTextureList();
+
+    CDataAlloc2<1> &arena = set.arena;
+
+    arena.base = set.model;
+    arena.buffer = set.model;
+    arena.used = 0;
+    arena.limit = kModelQuads;
+
+    CCharacter *body = set.body;
+
+    body->Initialize();
+
+    for (int i = 0; i < 64; i++) {
+        set.anime[i].Initialize();
+    }
+
+    body->InitializeTexAnime(set.anime, 64);
+    body->LoadPackData2(set.pack, (char *) "base.cfg", &arena, block, &arena, 0);
+    coop::FacesPrepare(); // coop-faces: the face sheets with a body's load, once
+    if (ms != nullptr) {
+        ms[1] = since(pack_start);
+    }
+
+    if (body->frame == nullptr) {
+        return 1;
+    }
+
+    CFrameAttr attr;
+
+    attr.fog_enable = true;
+    attr.clip_enable = false;
+    attr.program_option = 0;
+    body->frame->SetAttr(attr, 1, 4);
+    // coop-doorfade (Jep, 2026-10-27: "both players ... no longer ... hear P2's footsteps"; older: no Xiao footsteps): her steps
+    // sound on both copies, as Toan's do, by the ground under her (PartnerStep). DC_COOP_MUTATE=town_silent (twin): off, as before.
+    body->FootSoundEnable(Mutated("town_silent") ? 0 : 1);
+    body->EventEnable(0);
+    // The weapon in its hand, as in a dungeon: the members' town walks are their dungeon walks, posed
+    // to hold it, and only Toan has a town model of his own (Jep, 2026-10-20). It goes just above the body.
+    set.weapon_mark = arena.used;
+    set.weapon_loaded = false;
+
+    const auto weapon_start = LoadClock::now();
+    if (!Mutated("town_weapon")) {
+        LoadWeaponInto(chara, body, set.pack, set.arena, set.weapon, set.weapon_mark, weapon_block, set.weapon_loaded, whose);
+    }
+    if (ms != nullptr) {
+        ms[2] = since(weapon_start);
+    }
+    return 2;
+}
+
+// jointake: her model alone (her file, its pack into her body and texture block, the weapon in her hand): nothing of her
+// place, facing or state. TownLoad's own, or ahead of a state set's take (CoopTownPreloadForTake), held there unused.
+bool TownLoadModel(int chara) {
+    ModelSet  set = ModelSetNow();
+    double    ms[3] = {g_town_file_ms, g_town_pack_ms, g_town_weapon_ms};
+    const int got = LoadBodyInto(set, chara, PartnerTextureBlock(), PartnerWeaponBlock(), "partner", ms);
+
+    ModelSetPut(set);
+    g_town_file_ms = ms[0];
+    g_town_pack_ms = ms[1];
+    g_town_weapon_ms = ms[2];
+    if (got >= 1) {
+        // The dungeon partner's model shared these buffers; it loads again on the next floor.
+        g_partner.loaded_chara = -1;
+        g_town_body_under = false; // towncrash
+    }
+    return got == 2;
+}
+
+// coop-p1body (the spec's first step: "measure the memory budget" before a second town body is built; TESTING-STANDARD: budgets are
+// measured, not assumed): DC_COOP_TEST_BODY_BUDGET=1, once outdoors and once indoors on the town's first walking tick there: what
+// the town's texture table holds (slots of its limit: texture.hpp kTextureCount, or DC_COOP_TEST_TEXSLOTS_LIMIT in a slot row (texslots);
+// staging quadwords of its buffer, each block in use), then every member's dungeon
+// model and weapon loaded as one more town body each, into sets and free blocks of the test's own, one after another (six more
+// bodies at the end, or as many as fit: a body that would pass a limit is said and not loaded, since the texture manager stops the
+// game there). The test's bodies are deleted again after. A player never sets the variable.
+void BodyBudgetMeasure(const char *kind, int map, const char *place);
+
+void BodyBudgetForTest() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_BODY_BUDGET");
+    static bool       done[2] = {};
+    const int         where = EdInteriorFlag != 0 ? 1 : 0;
+
+    static int        ticks[2] = {};
+
+    // (the 120th walking tick there: the other player's body is loaded by then, so it is in the "before" line)
+    if (!on || done[where] || (where != 0 ? g_indoor.mode != 0 : ::GameMode != ED_MODE_WALK) || EditMapInfo == nullptr || ++ticks[where] < 120) {
+        return;
+    }
+    done[where] = true;
+    BodyBudgetMeasure("town", MapNo, where != 0 ? "indoors" : "outdoors");
+}
+
+// The measure itself, wherever it runs (a town's, a dungeon floor's: kind and map name the place in each line).
+void BodyBudgetMeasure(const char *kind, int map, const char *place) {
+    auto slots_used = [] {
+        int used = 0;
+
+        for (const CTexture &texture : TexManager.textures) {
+            used += texture.name[0] != 0 ? 1 : 0;
+        }
+        return used;
+    };
+    auto block_slots = [](int block) {
+        int used = 0;
+
+        for (const CTexture &texture : TexManager.textures) {
+            used += texture.name[0] != 0 && texture.block == block ? 1 : 0;
+        }
+        return used;
+    };
+
+    TexManager.CleanUpBuffer();
+    std::fprintf(stderr, "coop-budget: %s %d %s before: texture slots %d of %d, staging %d of %d quadwords\n", kind, map, place, slots_used(), PortTextureSlotsLimit(),
+                 TexManager.buffer_used, TexManager.buffer_size);
+    for (int block = 0; block < kTextureBlockCount; block++) {
+        const CTextureBlock &entry = TexManager.blocks[block];
+        const int            slots = block_slots(block);
+
+        if (slots > 0 || entry.buffer != nullptr) {
+            std::fprintf(stderr, "coop-budget: %s %d %s block %d: %d slots, %d quadwords staged, vram %d of %d\n", kind, map, place, block, slots,
+                         (int) (entry.buffer_end - entry.buffer), entry.vram_end - entry.vram_top, TexManager.vram_max - entry.vram_top);
+        }
+    }
+
+    static ModelSet sets[6];
+    int             blocks[12] = {};
+    int             found = 0;
+
+    for (int block = 71; block > 0 && found < 12; block--) {
+        if (block_slots(block) == 0 && TexManager.blocks[block].buffer == nullptr && block != PartnerTextureBlock() && block != PartnerWeaponBlock()) {
+            blocks[found++] = block;
+        }
+    }
+    int worst_slots = 0, worst_quads = 0, fit = 0;
+
+    for (int chara = 0; chara < 6 && found >= 2 * (chara + 1); chara++) {
+        const int slots = slots_used(), quads = TexManager.buffer_used;
+
+        if (slots + worst_slots > kTextureCount || (worst_quads > 0 && quads + worst_quads >= TexManager.buffer_size)) {
+            std::fprintf(stderr, "coop-budget: %s %d %s body %d (%s) not loaded: the largest so far (%d slots, %d quadwords) would pass %s\n", kind, map, place,
+                         chara + 1, charaNameTbl[chara], worst_slots, worst_quads, slots + worst_slots > kTextureCount ? "the table's slots" : "the staging buffer");
+            break;
+        }
+        std::fprintf(stderr, "coop-budget: %s %d %s loading body %d (%s) into blocks %d and %d\n", kind, map, place, chara + 1, charaNameTbl[chara],
+                     blocks[2 * chara], blocks[2 * chara + 1]);
+        std::fflush(stderr);
+        int       bytes = 0;
+        // DC_COOP_MUTATE=budget_floor_unloaded (t-p1body-floorbudget's twin): a floor's measure loads nothing (the row reads the loads)
+        const bool skip = Mutated("budget_floor_unloaded"); // (a floor's or a town's)
+        const int  got = skip ? 0 : LoadBodyInto(sets[chara], chara, blocks[2 * chara], blocks[2 * chara + 1], "budget test's", nullptr, &bytes);
+
+        worst_slots = std::max(worst_slots, slots_used() - slots);
+        worst_quads = std::max(worst_quads, TexManager.buffer_used - quads);
+        fit += got == 2 ? 1 : 0;
+        std::fprintf(stderr,
+                     "coop-budget: %s %d %s body %d (%s) loaded %d: +%d slots (%d body, %d weapon), +%d quadwords staged, model arena %d of %d quadwords, "
+                     "file %d of %d bytes; now slots %d of %d, staging %d of %d\n",
+                     kind, map, place, chara + 1, charaNameTbl[chara], got, slots_used() - slots, block_slots(blocks[2 * chara]), block_slots(blocks[2 * chara + 1]),
+                     TexManager.buffer_used - quads, sets[chara].arena.used, kModelQuads, bytes, kPackBytes, slots_used(), PortTextureSlotsLimit(), TexManager.buffer_used,
+                     TexManager.buffer_size);
+    }
+    const int slots_left = PortTextureSlotsLimit() - slots_used(), quads_left = TexManager.buffer_size - TexManager.buffer_used;
+
+    std::fprintf(stderr, "coop-budget: %s %d %s result: %d more bodies loaded; left %d slots, %d quadwords; the largest body takes %d slots, %d quadwords\n", kind, map,
+                 place, fit, slots_left, quads_left, worst_slots, worst_quads);
+    for (int i = 0; i < found; i++) {
+        TexManager.DeleteTextureBlock(blocks[i]);
+    }
+    TexManager.CleanUpBuffer();
+    TexManager.CleanUpTextureList();
+    std::fflush(stderr);
+}
+
+struct TownPreload {
+    int      chara = -1;
+    int      map = -1;
+    double   ms = 0.0;
+    ModelSet set; // the model loaded ahead (chara >= 0), else a spare one (the last swapped out), filled again next time
+};
+TownPreload g_preload;
+bool        g_town_ahead = false; // the last TownLoad took up a model loaded ahead
+
 bool TownLoad(int chara) {
+    const auto load_start = LoadClock::now();
+    auto       since = LoadMsSince;
     // Another member in the same town (pad 2's wheel): it takes the place and facing of the one before.
     const bool    join = g_join_place && g_town.loaded < 0 && !g_reload_in_place;
     bool          swap = g_reload_in_place || join ||
@@ -406,71 +810,25 @@ bool TownLoad(int chara) {
         g_town.body->frame->GetRotation(facing);
     }
 
-    if (g_partner.pack == nullptr) {
-        g_partner.pack = reinterpret_cast<u_int *>(new (std::align_val_t{64}) u_char[kPackBytes]);
-        g_partner.model = new (std::align_val_t{64}) u_char[static_cast<size_t>(kModelQuads) * 16];
-    }
+    // jointake: her model loaded ahead of the take is swapped in as it is (what was there kept as the spare); only her place and
+    // the rest below
+    const bool ahead = g_preload.chara == chara && g_preload.map == MapNo && g_preload.set.body != nullptr && g_preload.set.body->frame != nullptr;
 
-    if (g_town.body == nullptr) {
-        g_town.body = new CCharacter();
-        g_town.anime = new CTexAnimeData[64];
-    }
+    g_preload.chara = -1;
+    g_town_ahead = ahead;
+    if (ahead) {
+        const ModelSet was = ModelSetNow();
 
-    int size = 0;
-
-    if (LoadFile(const_cast<char *>(charaNameTbl[chara]), g_partner.pack, &size) == 0 || size <= 0 || size > kPackBytes) {
-        std::fprintf(stderr, "coop: cannot load %s for town\n", charaNameTbl[chara]);
+        ModelSetPut(g_preload.set);
+        g_preload.set = was;
+        g_partner.loaded_chara = -1; // (as TownLoadModel: the dungeon partner's model loads again on the next floor)
+    } else if (!TownLoadModel(chara)) {
         return false;
     }
-
-    TexManager.DeleteTextureBlock(PartnerTextureBlock());
-    TexManager.DeleteTextureBlock(PartnerWeaponBlock());
-    TexManager.CleanUpBuffer();
-    TexManager.CleanUpTextureList();
-
-    CDataAlloc2<1> &arena = g_partner.arena;
-
-    arena.base = g_partner.model;
-    arena.buffer = g_partner.model;
-    arena.used = 0;
-    arena.limit = kModelQuads;
-
-    // The dungeon partner's model shared these buffers; it loads again on the next floor.
-    g_partner.loaded_chara = -1;
-
+    if (ahead) {
+        g_town_file_ms = g_town_pack_ms = g_town_weapon_ms = 0.0; // (none of them on this tick)
+    }
     CCharacter *body = g_town.body;
-
-    body->Initialize();
-
-    for (int i = 0; i < 64; i++) {
-        g_town.anime[i].Initialize();
-    }
-
-    body->InitializeTexAnime(g_town.anime, 64);
-    body->LoadPackData2(g_partner.pack, (char *) "base.cfg", &arena, PartnerTextureBlock(), &arena, 0);
-
-    if (body->frame == nullptr) {
-        return false;
-    }
-
-    CFrameAttr attr;
-
-    attr.fog_enable = true;
-    attr.clip_enable = false;
-    attr.program_option = 0;
-    body->frame->SetAttr(attr, 1, 4);
-    // coop-doorfade (Jep, 2026-10-27: "both players ... no longer ... hear P2's footsteps"; older: no Xiao footsteps): her steps
-    // sound on both copies, as Toan's do, by the ground under her (PartnerStep). DC_COOP_MUTATE=town_silent (twin): off, as before.
-    body->FootSoundEnable(Mutated("town_silent") ? 0 : 1);
-    body->EventEnable(0);
-    // The weapon in its hand, as in a dungeon: the members' town walks are their dungeon walks, posed
-    // to hold it, and only Toan has a town model of his own (Jep, 2026-10-20). It goes just above the body.
-    g_partner.weapon_mark = arena.used;
-    g_partner.weapon_loaded = false;
-
-    if (!Mutated("town_weapon")) {
-        LoadWeapon(chara, body);
-    }
 
     g_town.loaded = chara;
     g_town.map = MapNo;
@@ -489,6 +847,7 @@ bool TownLoad(int chara) {
     }
 
     std::printf("coop: town partner %d (%s) in town %d\n", chara, charaNameTbl[chara], MapNo);
+    g_town_load_ms = since(load_start);
     return true;
 }
 
@@ -643,6 +1002,10 @@ static bool TownStepClear(const float *from, const float *to) {
     return true;
 }
 
+bool TownStepClearFrom(const float *from, const float *to) {
+    return TownStepClear(from, to);
+}
+
 // coop-p2ground (Jep's 2026-10-27 run: "P2 spawning to the side of P1 can cause P2 to fall off the stairs and clip into the
 // house"): spot 2 as SpawnSecondSpot picks it, on her ground. The farther side first, then the nearer, then a spot behind
 // and ahead of the facing (coop-toanvis2: then ahead to each side, then farther ahead), each taken only where her walk has ground within a step of the spot's height (and put on it);
@@ -777,9 +1140,11 @@ struct TownCam {
     sceVu0FVECTOR  last = {0.0f, 0.0f, 0.0f, 0.0f}; // coop-xiaocam: her place on the last step, for her stride
     bool           indoor = false; // coop-herexit2: made in a room (IndoorCamInit, or her merge's room camera)
     float          swing = 0.0f;   // coop-housecam: what is left of her turn round from a wall (radians)
+    int            behind = 0;     // coop-herswing: her Circle's swing round behind her, steps left (EdMoveChara's rot_count, hers)
 };
 
 TownCam g_town_cam;
+bool    g_herswing_began = false; // coop-herswing: her Circle's swing began this town tick (CoopTownView's watch)
 
 bool Linked() {
     return NetplayHasPlayer();
@@ -830,48 +1195,17 @@ void TownCamInit() {
     g_town_cam.map = MapNo;
     g_town_cam.indoor = false;
     g_town_cam.swing = 0.0f;
+    g_town_cam.behind = 0; // coop-herswing
 }
 
-void TownCamStep(const InputPadState &pad) {
-    if (!g_town_cam.ready || g_town_cam.map != MapNo) {
-        TownCamInit();
-    }
-
+// Her camera's turn, EdMoveChara's camera block on her camera (walls, right stick, R1/L1, distances, drift, height, the swing
+// behind): from her walk (TownCamStep) and, coop-fishcam, from her fishing (CoopTownFishWalk), where retail runs the same block
+// for its player with the fishing flag (EdCameraWalls then picks only the fishing area's camera walls). shallow: the ground she
+// stands on lifts the camera (AREA_KIND_HIGH_CAMERA). The caller sets the follow and steps the camera.
+void TownCamTurn(const InputPadState &pad, int shallow, int fishing) {
     CCameraFollow *camera = g_town_cam.camera;
     sceVu0FVECTOR  look = {g_town.pos[0], g_town.pos[1] + 14.0f, g_town.pos[2], 1.0f};
 
-    // coop-pt1109b (Jep's 2026-11-09 playtest: "both outside: P2's camera doesn't move in when she talks to a villager, his does"): her
-    // talk's camera (EdTalkMode, given hers) has her follow off and sits at the talk's offsets; it only steps (retail's TalkCamera Step(1)).
-    if (CoopTownHerTalkCamera() != nullptr) { // (stepped by her talk's own step: CoopTownHerTalkStepOut)
-        return;
-    }
-
-    // coop-housecam test hook (DC_COOP_TEST_HER_CAM_SPIN=T:D, set on both copies): from link tick T her camera turns D degrees
-    // each step, as R1 held would, round every wall by where she stands (t-p2-house-cam).
-    static int   spin_from = -2;
-    static float spin = 0.0f;
-
-    if (spin_from == -2) {
-        const char *value = TestEnv("DC_COOP_TEST_HER_CAM_SPIN");
-
-        spin_from = -1;
-        if (value != nullptr && std::sscanf(value, "%d:%f", &spin_from, &spin) != 2) {
-            spin_from = -1;
-        }
-    }
-    if (spin_from >= 0 && NetplayLinkTick() >= spin_from) {
-        camera->AddAngle(spin * DEG_TO_RAD);
-    }
-
-    // Her camera walls are EdMoveChara's, on her camera (coop-housecam; Jep, 2026-11-04: "I would prefer P2+ to operate as
-    // closely as possible to P1 does in the decompile"): EdCameraWalls slides the eye along a wall behind her, keeps it from
-    // turning into one beside it, holds it over the floor, and under half the near distance turns it round. Toan's turns at
-    // once; hers swings round kSwingStep a step (train 51: at once it moved her eye 105 in a frame as she walked by a wall
-    // before his house-exit merge; the merge rows hold her eye under 15 and her view under 3 degrees a frame). The swing is
-    // simulation state (TownSync::cam_swing). Before this her camera had its own wall ray only (coop-campulse, coop-housecam's
-    // first turn): the eye sat at the back of her head by a house, then turned at once, then spun where both sides were close.
-    // DC_COOP_MUTATE=towncam_turn_snap (twin): her turn at once, as Toan's.
-    // DC_COOP_MUTATE=towncam_wall_from_eye (t-p2-wall-cam~twin): her old wall ray to the stepped eye (coop-campulse's twin).
     constexpr float  kSwingStep = 2.0f * DEG_TO_RAD;
     EdCameraWallInfo walls = {1, 1, 1, 0};
 
@@ -901,7 +1235,7 @@ void TownCamStep(const InputPadState &pad) {
         } else {
             const bool snap = Mutated("towncam_turn_snap");
 
-            EdCameraWalls(camera, ground, g_town.high_camera ? 1 : 0, 0, snap ? 1 : 0, &walls);
+            EdCameraWalls(camera, ground, shallow, fishing, snap ? 1 : 0, &walls);
 
             // coop-housecam test hook (DC_COOP_TEST_HER_TURN_ON_PEER=1): her camera turns round on link tick 2 of every link after
             // the first (his house-exit merge's catch-up, where train 51's at-once turn jumped her eye; tick 2, so her
@@ -1047,13 +1381,34 @@ void TownCamStep(const InputPadState &pad) {
             camera->AddHeight(-Stick(pad.right_y));
         }
 
-        const float lowest = g_town.high_camera ? 35.0f : 5.0f;
+        const float lowest = shallow != 0 ? 35.0f : 5.0f;
 
         camera->SetHeight(std::clamp(camera->GetHeight(), lowest, 60.0f));
 
         if (camera->GetHeight() > 5.0f) {
             camera->AddHeight(-std::clamp(0.05f * (camera->GetHeight() - lowest), 0.15f, 0.5f));
         }
+    }
+
+    // coop-herswing (Jep 11-13, P2-like-P1): her Circle held swings her camera round behind her, as Toan's walk swings his: retail's
+    // EdMoveChara block, split out by recipe (EdCameraSwingBehind) and run here on her camera and her own count (TownCam::behind,
+    // simulation state: TownSync::cam_behind), never the game camera's (EdMoveCharaRotCount, the walker's). Her pad is already
+    // empty under her menus, pause, Georama and talks (above), as keylock empties his. DC_COOP_MUTATE=herswing_off (twin): none.
+    if (!g_indoor.on && g_town.body != nullptr && g_town.body->frame != nullptr && !Mutated("herswing_off")) { // (retail's: outdoors only)
+        sceVu0FVECTOR facing;
+
+        g_town.body->frame->GetRotation(facing);
+        const int before = g_town_cam.behind;
+
+        EdCameraSwingBehind(camera, facing[1], (pad.buttons & kInputCircle) != 0 ? 1 : 0, walls.left_clear, walls.right_clear, &g_town_cam.behind);
+        if (before == 0 && g_town_cam.behind > 0) {
+            g_herswing_began = true;
+            std::fprintf(stderr, "coop-town: p%d's camera swings round behind her (her Circle), link tick %lld\n", NetplayRole(), (long long) NetplayLinkTick());
+        }
+    } else if (static bool said = false; !said && (pad.buttons & kInputCircle) != 0 && Mutated("herswing_off")) {
+        said = true;
+        g_herswing_began = true; // (the watch runs all the same: the twin is read on its view, not on a missing line)
+        std::fprintf(stderr, "coop-town: test: herswing_off: her Circle swings nothing, link tick %lld\n", (long long) NetplayLinkTick());
     }
 
     if (g_town_cam.swing > 0.0f) {
@@ -1063,6 +1418,57 @@ void TownCamStep(const InputPadState &pad) {
         g_town_cam.swing -= step;
     }
 
+}
+
+// coop-wave3 part 2: her camera's pad: her own controller as read now on her copy (the right stick, R1, L1, L2; NetplayCameraPad),
+// the agreed pad elsewhere and while her pad is held.
+InputPadState CameraPadOf(const InputPadState &pad, bool held) {
+    InputPadState own;
+
+    return !held && NetplayCameraPad(1, own) ? own : pad;
+}
+
+void TownCamStep(const InputPadState &pad) {
+    if (!g_town_cam.ready || g_town_cam.map != MapNo) {
+        TownCamInit();
+    }
+
+    CCameraFollow *camera = g_town_cam.camera;
+    sceVu0FVECTOR  look = {g_town.pos[0], g_town.pos[1] + 14.0f, g_town.pos[2], 1.0f};
+
+    // coop-pt1109b (Jep's 2026-11-09 playtest: "both outside: P2's camera doesn't move in when she talks to a villager, his does"): her
+    // talk's camera (EdTalkMode, given hers) has her follow off and sits at the talk's offsets; it only steps (retail's TalkCamera Step(1)).
+    if (CoopTownHerTalkCamera() != nullptr) { // (stepped by her talk's own step: CoopTownHerTalkStepOut)
+        return;
+    }
+
+    // coop-housecam test hook (DC_COOP_TEST_HER_CAM_SPIN=T:D, set on both copies): from link tick T her camera turns D degrees
+    // each step, as R1 held would, round every wall by where she stands (t-p2-house-cam).
+    static int   spin_from = -2;
+    static float spin = 0.0f;
+
+    if (spin_from == -2) {
+        const char *value = TestEnv("DC_COOP_TEST_HER_CAM_SPIN");
+
+        spin_from = -1;
+        if (value != nullptr && std::sscanf(value, "%d:%f", &spin_from, &spin) != 2) {
+            spin_from = -1;
+        }
+    }
+    if (spin_from >= 0 && NetplayLinkTick() >= spin_from) {
+        camera->AddAngle(spin * DEG_TO_RAD);
+    }
+
+    // Her camera walls are EdMoveChara's, on her camera (coop-housecam; Jep, 2026-11-04: "I would prefer P2+ to operate as
+    // closely as possible to P1 does in the decompile"): EdCameraWalls slides the eye along a wall behind her, keeps it from
+    // turning into one beside it, holds it over the floor, and under half the near distance turns it round. Toan's turns at
+    // once; hers swings round kSwingStep a step (train 51: at once it moved her eye 105 in a frame as she walked by a wall
+    // before his house-exit merge; the merge rows hold her eye under 15 and her view under 3 degrees a frame). The swing is
+    // simulation state (TownSync::cam_swing). Before this her camera had its own wall ray only (coop-campulse, coop-housecam's
+    // first turn): the eye sat at the back of her head by a house, then turned at once, then spun where both sides were close.
+    // DC_COOP_MUTATE=towncam_turn_snap (twin): her turn at once, as Toan's.
+    // DC_COOP_MUTATE=towncam_wall_from_eye (t-p2-wall-cam~twin): her old wall ray to the stepped eye (coop-campulse's twin).
+    TownCamTurn(pad, g_town.high_camera ? 1 : 0, 0);
     TownCamFollow();
     camera->Step(1);
 
@@ -1133,6 +1539,7 @@ void IndoorCamInit() {
     camera->SetHeight(room->GetHeight());
     g_town_cam.distance = room->GetDistance();
     g_town_cam.swing = 0.0f;
+    g_town_cam.behind = 0; // coop-herswing
     g_indoor.marker = -1;
     g_indoor.marker_hold = 0;
     TownCamFollow();
@@ -1306,6 +1713,57 @@ void IndoorDebugLog() {
 // reloads the town on both copies, so a late joiner counts from the same tick as the host), Toan to (x, z) and the partner beside
 // him (or to (x2, z2)), both a little above the ground, as a long run there would leave them. Both linked copies read
 // the same value, so it is the same move on both.
+// coop-drawwrite (tests): DC_COOP_TEST_VILLAGERS_OUT=T:x:z:x2:z2: on press-clock tick T (DC_COOP_MENUPRESS's, alike on both
+// copies) the town's villagers come out, as a built Norune's residents stand (a fixture's Norune places none): every one set up is
+// placed, standing (initial_motion 0, no house asked) and drawn; the first at (x z), the second at (x2 z2) (at Toan's height), the
+// rest where they were set up. Both copies do it on the same tick from the same state. "coop: test: villager N out at (x z), ..." each.
+// coop-herscreen: a sixth field 1 (T:x:z:x2:z2:1): the first two walk instead (retail's wandering villager, initial_motion 1).
+static void VillagersOutForTest() {
+    COOP_TEST_SWITCH(const char *, spec, TestEnv("DC_COOP_TEST_VILLAGERS_OUT"));
+    static bool done = false;
+    int         at = -1;
+    int         walk = 0;
+    float       spot[2][2] = {};
+
+    if (spec == nullptr || done || Chara == nullptr ||
+        std::sscanf(spec, "%d:%f:%f:%f:%f:%d", &at, &spot[0][0], &spot[0][1], &spot[1][0], &spot[1][1], &walk) < 5 || (int) NetplayTestPressClock() != at) {
+        return;
+    }
+    done = true;
+    int           n = 0;
+    sceVu0FVECTOR toan;
+
+    Chara->GetPosition(toan);
+    for (int i = 0; i < 10; i++) {
+        CNPCharacter  &v = EdVillager[i];
+        VILLAGER_INFO &info = EdVillagerInfo[i];
+
+        if (v.initialized == 0 || v.frame == nullptr || v.villager_id < 0) {
+            continue;
+        }
+        sceVu0FVECTOR at_pos;
+
+        v.GetPosition(at_pos);
+        if (n <= 1) {
+            at_pos[0] = spot[n][0];
+            at_pos[1] = toan[1];
+            at_pos[2] = spot[n][1];
+        }
+        at_pos[3] = 1.0f;
+        info.placed = 1;
+        info.initial_motion = n <= 1 && walk != 0 ? 1 : 0;
+        v.event_status = info.initial_motion;
+        info.character_no = -1;
+        sceVu0CopyVector(info.position, at_pos);
+        v.draw_enabled = true;
+        v.ClearSeq();
+        v.SetMotion(0, 0);
+        v.SetPosition(at_pos);
+        std::fprintf(stderr, "coop: test: villager %d out at (%.0f %.0f), link tick %lld\n", i, at_pos[0], at_pos[2], (long long) NetplayLinkTick());
+        n++;
+    }
+}
+
 void TownWarpForTest() {
     // DC_COOP_TOWN_CLOCK=tick:time: on that tick (the same count), the town clock to time (0 to 12; a period changes at
     // 2.5, 5.5, 8.5 and 11.5), so a test reaches a change of the time of day in seconds.
@@ -1553,6 +2011,54 @@ void TownPlacePartner(const float *at) {
 bool g_town_skin = false;
 bool g_town_skin_said = false; // its log line, once per time apart
 
+// coop-p1body: a body drawn in the game's player's place follows him for a tick (one routine for every such body: player 2's copy
+// apart, where her member is drawn over Toan, and player 1's own member in town): his place and facing, its walk from how far he
+// moved this tick, whatever moved him (a pad, the keyboard, a script): full tilt at the partner's full speed, none for a jump (a
+// warp, its first tick) or a drift. The first pad's stick alone missed the keyboard, so she slid about standing (Jep, 2026-10-24).
+// DC_COOP_MUTATE=skin_pad (twin): the first pad's stick, as before. Its own steps make no sound (coop-footsteps: the steps heard
+// are Chara's, by the ground EdMoveChara stands him on; DC_COOP_MUTATE=skin_steps, twin: the skin's sound too). Returns its motion.
+int SkinFollow(CCharacter *body, float *pos, int &motion_now, float *moved) {
+    sceVu0FVECTOR rotation;
+    sceVu0FVECTOR was;
+
+    sceVu0CopyVector(was, pos);
+    Chara->GetPosition(pos);
+    Chara->frame->GetRotation(rotation);
+    body->motion_type.motion_info->speed = 0.05f;
+
+    const float step = std::hypot(pos[0] - was[0], pos[2] - was[2]);
+    const float full = EdMoveCharaInfo.interior != 0 ? 1.0f : 1.6f;
+    float       tilt = step < 0.1f || step > 8.0f ? 0.0f : std::min(1.0f, step / full);
+    float       lx = 0.0f;
+
+    if (Mutated("skin_pad")) {
+        InputPadState pad = InputGetPad(0);
+
+        lx = Stick(pad.left_x);
+        tilt = Stick(pad.left_y);
+    }
+
+    const int motion = keyCtrl(lx, tilt, body->motion_type.motion_info);
+
+    if (motion != motion_now) {
+        body->motion_no = motion;
+        body->motion_flags = 0;
+        body->motion_speed = -1.0f;
+        motion_now = motion;
+    }
+
+    body->frame->SetPosition(pos);
+    body->frame->SetRotation(0.0f, rotation[1], 0.0f);
+    body->SetPosition(pos);
+    body->SetRotation(0.0f, rotation[1], 0.0f);
+    body->FootSoundEnable(Mutated("skin_steps") ? 1 : 0);
+    body->Step();
+    if (moved != nullptr) {
+        *moved = step;
+    }
+    return motion;
+}
+
 void TownSkinStep() {
     int chara = TownMember();
 
@@ -1568,57 +2074,73 @@ void TownSkinStep() {
         std::printf("coop: player 2 apart in town %d: %s drawn in Toan's place\n", MapNo, charaNameTbl[chara]);
     }
 
-    CCharacter   *body = g_town.body;
-    sceVu0FVECTOR rotation;
-    sceVu0FVECTOR was;
-
-    sceVu0CopyVector(was, g_town.pos);
-    Chara->GetPosition(g_town.pos);
-    Chara->frame->GetRotation(rotation);
-    body->motion_type.motion_info->speed = 0.05f;
-
-    // Her walk from how far Toan moved this tick, whatever moved him (a pad, the keyboard, a script): full tilt at the
-    // partner's full speed, none for a jump (a warp, her first tick) or a drift. The first pad's stick alone missed the keyboard,
-    // so she slid about standing (Jep, 2026-10-24). DC_COOP_MUTATE=skin_pad (twin): the first pad's stick, as before.
-    const float   step = std::hypot(g_town.pos[0] - was[0], g_town.pos[2] - was[2]);
-    const float   full = EdMoveCharaInfo.interior != 0 ? 1.0f : 1.6f;
-    float         tilt = step < 0.1f || step > 8.0f ? 0.0f : std::min(1.0f, step / full);
-    float         lx = 0.0f;
-
-    if (Mutated("skin_pad")) {
-        InputPadState pad = InputGetPad(0);
-
-        lx = Stick(pad.left_x);
-        tilt = Stick(pad.left_y);
-    }
-
-    int motion = keyCtrl(lx, tilt, body->motion_type.motion_info);
+    CCharacter *body = g_town.body;
+    float       step = 0.0f;
+    const int   motion = SkinFollow(body, g_town.pos, g_town.motion, &step);
 
     if (static int ticks = 0; CoopDebug() && ++ticks % 60 == 0) {
         std::fprintf(stderr, "coop-debug: her skin at (%.0f %.0f): step %.2f, motion %d\n", g_town.pos[0], g_town.pos[2], step, motion);
     }
-
-    if (motion != g_town.motion) {
-        body->motion_no = motion;
-        body->motion_flags = 0;
-        body->motion_speed = -1.0f;
-        g_town.motion = motion;
-    }
-
-    body->frame->SetPosition(g_town.pos);
-    body->frame->SetRotation(0.0f, rotation[1], 0.0f);
-    body->SetPosition(g_town.pos);
-    body->SetRotation(0.0f, rotation[1], 0.0f);
-    // coop-footsteps (Jep's 2026-10-28 online run: P1 in the mayor's house, P2 outside heard her steps "plus constant wood
-    // footsteps"): her steps are Chara's, by the ground EdMoveChara stands him on; the skin over him is only drawn. Its own
-    // steps (on since coop-doorfade) sounded too, with the foot sound id of its last landing as the partner (the room's wood)
-    // or its load. PartnerStep turns them on again. DC_COOP_MUTATE=skin_steps (twin): the skin's steps sound, as before.
-    body->FootSoundEnable(Mutated("skin_steps") ? 1 : 0);
-    body->Step();
     FootstepNote(body, "skin");
     FootstepNote(Chara, "own");
     body->ShadowStep();
     body->ClothStep(0);
+    g_town_skin = true;
+    g_town.visible = true;
+}
+
+// coop-cavewalk: a body standing for the game's player through a town event follows him for a tick: his place and facing, and his
+// motion where the body has it (0-2: stand, walk, run, coop-xiaopose's shared list), else it stands (a member is never drawn as Toan).
+// One routine for her skin and player 1's own body (GameBodyEventStep).
+static void EventFollow(CCharacter *body, float *pos, int &motion_now) {
+    sceVu0FVECTOR rotation;
+
+    Chara->GetPosition(pos);
+    pos[3] = 1.0f;
+    Chara->frame->GetRotation(rotation);
+
+    const int motion = Chara->motion_no >= 0 && Chara->motion_no <= 2 ? Chara->motion_no : 0;
+    const int flags = motion == Chara->motion_no ? Chara->motion_flags : 0;
+    const float speed = motion == Chara->motion_no ? Chara->motion_speed : -1.0f;
+
+    if (motion != motion_now || body->motion_no != motion || body->motion_speed != speed) {
+        body->motion_no = motion;
+        body->motion_flags = flags;
+        body->motion_speed = speed;
+        motion_now = motion;
+    }
+    body->frame->SetPosition(pos);
+    body->frame->SetRotation(0.0f, rotation[1], 0.0f);
+    body->SetPosition(pos);
+    body->SetRotation(0.0f, rotation[1], 0.0f);
+    body->FootSoundEnable(0);
+    body->Step();
+    body->ShadowStep();
+    body->ClothStep(0);
+}
+
+// coop-cavewalk (Jep's 2026-11-16 playtest, 0.1.6: "When P2 enters the cave from Norune as Xiao, Xiao just stands still instead of
+// walking in"). Apart, her copy's Cross at the opened cave door runs retail's event 130 there (CoopTownCaveEntry walks a user in
+// beside the game only together): the script puts the game's player at the door, plays motion 0, then motion 2 at 0.4 while it
+// walks him 0.6 a tick to the cave (event.stb gedit/e01, program 130 at code byte 71604; _SET_NPC_MOTION(-1, ...) and the
+// main character's moves, editloop3.cpp). The town's event mode steps no walk (editloop's ED_MODE_EVENT runs EventMode, not
+// CoopTownStep), so her skin was never stepped through it: g_town_skin and g_town.visible stayed as her last walking tick left them
+// and her body was drawn standing where she pressed Cross, while Toan, left out of the draw, walked in. The fix: each tick of a town
+// event on her copy apart, her body is the game's player's (P2 like P1: the walk the game's player runs is hers): his place and
+// facing, and his motion where her body has it (0-2: stand, walk, run, coop-xiaopose's shared list), else she stands (she is never
+// Toan). Any town event that moves the game's player, not the cave door's alone. From editloop's event mode (CoopTownEventStep).
+// DC_COOP_MUTATE=event_skin_stands (twin): not stepped, as before.
+static void TownSkinEventStep() {
+    int chara = TownMember();
+
+    if (g_town.loaded != chara || g_town.map != MapNo || BlockEmptyNow()) {
+        if (!TownLoad(chara)) {
+            g_town.loaded = -1;
+            return;
+        }
+    }
+
+    EventFollow(g_town.body, g_town.pos, g_town.motion);
     g_town_skin = true;
     g_town.visible = true;
 }
@@ -1722,6 +2244,7 @@ void TownMergePlaceDrop() {
     if (!Mutated("merge_place_kept")) {
         g_merge_place.set = false;
     }
+    g_own_camera.kept = false; // coop-housecam2: kept for one merge's swap alone
 }
 
 void TownMergedIndoors() {
@@ -1736,6 +2259,8 @@ void TownMergedIndoors() {
     g_room_stand.set = false;
     SpawnTakeStand(MapNo | kIndoorStand, &g_room_stand);
 }
+
+static void CaveActsResetForSession(); // coop-escapecave (below, with the acts)
 
 void TownResetForSession() {
     g_town_cam.ready = false;
@@ -1781,11 +2306,73 @@ void TownResetForSession() {
         std::memset(static_cast<void *>(g_talks), 0, sizeof g_talks);
     }
     CoopEventSlotsSessionReset(); // coop-eventslots
+    CaveActsResetForSession();    // coop-escapecave
+}
+
+// towncrash (Jep's rc3 multi-screen run, 2026-11-13 11:20: both copies crashed back in Norune from Divine Beast Cave B4 after a
+// Toan/Xiao trade; his copy in HerItemHeldUp's SearchFrame, hers in CoopTownDraw's DrawShadow): the town body (g_town.body) and
+// a floor's partner (g_partner.chara) load into one model arena, g_partner.model (TownLoadModel, coop_party.cpp's Load). The
+// floor's load wrote its model over the town body's frames, and nothing let the town body go: back in town it still had its
+// frame pointers (and, on the copy that had not reset, loaded and visible), so the town's step and draw walked frames that now
+// lay inside the floor partner's model. With the same member in town and on the floor the two loads laid the model out alike
+// and those frames still read as frames; after a trade the floor partner was another member, and they read as garbage. When a
+// floor's load takes the arena the town body is unloaded as retail unloads a character (Initialize: no frame, no motions)
+// and is marked not loaded, so the next town tick loads it afresh (TownLoad's "first"). Each copy its own (no state set field).
+// DC_COOP_MUTATE=town_body_kept (twin): left as it was.
+void TownModelArenaTaken(const unsigned char *model) {
+    if (g_town.body == nullptr || g_town.body->frame == nullptr || model == nullptr || g_partner.arena.base != model) {
+        return; // (no town model there: never loaded, already let go, or the town's model lives in another set's arena)
+    }
+    g_town_body_under = true;
+    if (Mutated("town_body_kept")) {
+        std::fprintf(stderr, "towncrash: a floor's partner load writes over the town body's model; the town body kept (town_body_kept)\n");
+        return;
+    }
+    std::fprintf(stderr, "towncrash: a floor's partner load writes over the town body's model (member %d, %s): the town body let go\n", g_town.loaded,
+                 g_town.visible ? "shown" : "hidden");
+    g_town.body->Initialize();
+    g_town.loaded = -1;
+    g_town.visible = false;
+    g_town.stood = false;
+}
+
+// towncrash: after a floor's partner load (coop_party.cpp's Load, its last line), whether the town body still has frames in the
+// model that load wrote over: what the town's step, draw and her held item walk on the next town tick (the rc3 crash's
+// SearchFrame and DrawShadow). The row's check and the twin's stop line.
+void TownBodyAfterFloorLoad() {
+    if (g_town_body_under && g_town.body != nullptr && g_town.body->frame != nullptr) {
+        std::fprintf(stderr, "towncrash: after the floor's partner load the town body still has frames in the model it wrote over (member %d)\n",
+                     g_town.loaded);
+    }
+}
+
+// towncrash (t-zonechara -Case town-crash, DC_COOP_TEST_ZONE_PICKS op townbody): on a floor, the town body as a Norune visit leaves
+// it: the floor partner's member loaded into the town body (TownLoadModel, as the town's first tick loads her), member and town
+// kept, not shown. TownLoadModel marks the floor partner not loaded, so the floor's next tick loads it again into that arena (Load),
+// as the floor's first tick does after the town: the order Jep's run had (Norune, then Divine Beast Cave), in a few ticks.
+bool TownBodyOnFloorForTest(int chara) {
+    if (chara < 0 || !TownLoadModel(chara)) {
+        return false;
+    }
+    g_town.loaded = chara;
+    g_town.map = 0;
+    g_town.visible = false;
+    std::fprintf(stderr, "towncrash: test: the town body loaded as %d on the floor (as Norune leaves it), the floor's partner to load again\n", chara);
+    return true;
 }
 
 } // namespace coop
 
 using namespace coop;
+
+void GameBodyStep(); // coop-p1body (below, by CoopTownDraw)
+bool GameBodyEventStep(float *pos, int *member, int *motion); // coop-cavewalk (below)
+bool GameBodyLoad();
+void GameBodyEventTick();
+namespace dc::game {
+unsigned int PortRandState(); // coop-p1body: its resync test hook (app/runtime.cpp)
+void         PortRandSetState(unsigned int state);
+} // namespace dc::game
 
 // coop-worlds: the ground kind under player 2's partner as it last landed, and the event it stepped onto (taken once).
 int g_partner_ground_kind = 0;
@@ -1804,6 +2391,115 @@ int CoopTownPartnerWall(float *pos, const float *velocity, CCPoly *out) {
     }
 
     return g_town.body->PickUpPoly(pos, out);
+}
+
+// coop-xiaofish (follow-up: player 2 walks with the rod, as retail's player does). Retail's walk (EdMoveChara) runs on its player
+// while he fishes too: before the cast (chara_fishing at ED_FISHING_STAND) his stick walks him, never runs (its motion 2, at
+// 0.8 * (0.2 + stick) up to 0.85 of its pace), the fishing area's own walls (FishingPickUpPoly) keep him by the water, and his
+// camera follows. Together that is player 1's fishing as ever (CoopFishingWalkIn/Out wrap his walk). Cause: another player's
+// fishing step (coop_eventslots.cpp FishStep) ran only the fishing half split out of that walk (EdFishingStepIn, the line), never
+// the walk itself, so she stood rooted to her spot with the rod in hand. EdMoveChara itself cannot run on her body (it is a
+// CCharacter, not the CMainChara with move_info that EdMoveChara casts to), so this is its fishing walk, line for line, on her
+// body, her pad (FishStep has swapped it in: EdGetLXf reads it), her camera and her fishing set (fishing_rect is hers), with her
+// own walk's walls (GatherTownPolys, PartnerBodyPolys: the ground, the event points, the villagers, Toan). Called by FishStep
+// before EdFishingStepIn, as EdMoveChara runs it. DC_COOP_MUTATE=fishwalk_off (twin): she stands rooted, as before.
+void CoopTownFishWalk(int index, CCharacter *body, CCameraFollow *camera) {
+    static MoveCheckInfo info[coop::kMaxPlayers] = {}; // (each walker's last move check: retail keeps his in CMainChara::move_info)
+    static float         fall[coop::kMaxPlayers] = {}; // (and their fall: retail's is CObject's velocity, which her walk never sets)
+
+    if (index <= 0 || index >= coop::kMaxPlayers || body == nullptr || camera == nullptr || Mutated("fishwalk_off")) {
+        return;
+    }
+    MoveCheckInfo &last = info[index];
+    sceVu0FVECTOR  pos;
+    sceVu0FVECTOR  rot;
+    sceVu0FVECTOR  velocity = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    body->GetPosition(pos);
+    body->GetRotation(rot);
+    float lx = EdGetLXf(1);
+    float ly = EdGetLYf(1);
+
+    if (chara_fishing > ED_FISHING_STAND) {
+        lx = ly = 0.0f;
+    }
+    // coop-fishing3 (with coop-wave3: each player's camera is their own copy's, out of the checksum): her stick turns by the steer
+    // row her pad carries (her own camera's yaw as her pad was read), as her town walk does, never by a camera read here (the
+    // copies' cameras differ: a desync). DC_NETPLAY_MUTATE=steer_off (twin): the camera of each copy, as before.
+    const float angle = coop::SteerAngle(index, camera->GetAngleH());
+    const float move_x = lx * cosf(angle) + ly * sinf(angle);
+    const float move_z = ly * cosf(angle) - lx * sinf(angle);
+
+    velocity[0] = 1.6f * move_x;
+    velocity[2] = 1.6f * move_z;
+    if (last.landed != 0) { // (a slope slows the step by how far its floor leans)
+        sceVu0FVECTOR normal;
+
+        sceVu0Normalize(normal, last.ground_poly.normal);
+        velocity[0] *= std::fabs(normal[1]);
+        velocity[2] *= std::fabs(normal[1]);
+    }
+    int   motion = 0;
+    float motion_speed = -1.0f;
+
+    if (lx != 0.0f || ly != 0.0f) {
+        motion = 2; // (fishing: the walk, never the run)
+        motion_speed = std::min(0.8f * (0.2f + sqrtf(lx * lx + ly * ly)), 0.85f);
+    }
+    if (move_x != 0.0f || move_z != 0.0f) {
+        body->SetRotation(0.0f, AngleInterpolate(rot[1], atan2f(move_x, move_z), 0.2f, INTERPOLATE_STEP), 0.0f);
+    }
+    if (chara_fishing < ED_FISHING_CAST_START) {
+        body->SetMotion(motion, 0);
+        body->SetMotionSpeed(motion_speed);
+    }
+    CCPoly   *polys;
+    int       count = GatherTownPolys(pos, &polys);
+    const int ground_count = count;
+
+    count += FishingPickUpPoly(&polys[count]);
+    const int fishing_count = count - ground_count;
+
+    count += PartnerBodyPolys(pos, velocity[0] != 0.0f || velocity[2] != 0.0f, &polys[count]);
+    const float asked[2] = {velocity[0], velocity[2]};
+
+    sceVu0FVECTOR next;
+    sceVu0FVECTOR move;
+
+    velocity[1] = fall[index];
+    MoveCheck(pos, velocity, next, &last, polys, count, 0);
+    sceVu0SubVector(move, next, pos);
+    body->SetPosition(next);
+    if (body->frame != nullptr) {
+        body->frame->SetPosition(next);
+    }
+    fall[index] = last.landed != 0 ? 0.0f : std::max(fall[index] - 0.1f, -4.0f);
+    camera->FollowOn();
+    camera->SetFollow(next[0] + 7.0f * move[0], next[1] + 14.0f + 2.0f * move[1], next[2] + 7.0f * move[2]);
+
+    // coop-fishcam (follow-up: her right stick turned nothing while she fished; retail's player turns his). EdMoveChara runs its
+    // camera block (EdCameraWalls with the fishing flag, the right stick, R1/L1, the distances, the drift, the height, the swing
+    // behind) for its player while he fishes too. Cause: hers is TownCamStep's, run only by her walk (PartnerStep), which her
+    // fishing replaces. Now the same block (TownCamTurn) runs here with fishing 1, after the follow as in EdMoveChara; FishStep
+    // steps the camera after the fishing step. DC_COOP_MUTATE=fishcam_off (twin): her camera turns nothing while she fishes.
+    if (camera == g_town_cam.camera && g_town_cam.ready && !Mutated("fishcam_off")) {
+        InputPadState pad{};
+
+        if (!NetplayPad(index, pad)) {
+            pad = InputGetPad(index);
+        }
+        TownCamTurn(pad, last.ground_found != 0 && last.poly.attr.area_kind == AREA_KIND_HIGH_CAMERA ? 1 : 0, 1);
+    }
+
+    // DC_COOP_TEST_FISH_WALK=1: one line per step (stderr), her place, motion and fishing state, her facing and her camera's yaw on this copy.
+    if (static const bool trace = TestEnvOn("DC_COOP_TEST_FISH_WALK"); trace) {
+        const float held_x = EdGetLXf(1);
+        const float held_y = EdGetLYf(1);
+
+        std::fprintf(stderr, "coop-fishwalk: test: player %d at (%.2f %.2f %.2f) motion %d state %d stick %.2f step asked (%.2f %.2f) walls %d ground %d fishing %d facing %.3f angle %.3f at link tick %lld\n",
+                     index + 1, next[0], next[1], next[2], body->motion_no, chara_fishing, sqrtf(held_x * held_x + held_y * held_y), asked[0], asked[1], count,
+                     ground_count, fishing_count, rot[1], camera->GetAngleH(), (long long) NetplayLinkTick());
+    }
 }
 
 // coop-nopush test hook (DC_COOP_TOAN_WALK_INTO=K): indoors, once K of her steps out of the room's events have passed since she
@@ -1957,6 +2653,11 @@ int CoopTownGroundEventAt(const float *at) {
     return TownGroundAt(at[0], at[1], at[2], &ground, &kind) ? kind : -1;
 }
 
+// coop-joinwarp (tests): the ground under at (her walk's, TownGroundAt), for the story yes's line (coop_worlds' doorgate::DoorYes).
+bool CoopTownGroundUnder(const float *at, float *ground) {
+    return TownGroundAt(at[0], at[1], at[2], ground, nullptr);
+}
+
 // coop-p2skin: Jep's rule (2026-10-24): Xiao is always unlocked for player 2. A linked game's save (game.netplay set, host
 // alone included) has her in the party from the start, as her joining does: the party of two and her wooden slingshot,
 // equipped. Saved state, so both copies set it on the same town tick (a catch-up replay too) and it is in every save after.
@@ -1967,6 +2668,25 @@ void XiaoAlwaysJoined() {
     }
 
     CDngStatusData *status = SaveData->GetDngStatus();
+
+    // coop-townally test hook (DC_COOP_TEST_TOWN_PARTY=N, the town-party3 fixture's maker): the town's party grown to N members, each
+    // with its starting weapon equipped, as joining gives it (saved state: every copy on the same town tick, in the fixture after).
+    static const int test_party = TestEnvInt("DC_COOP_TEST_TOWN_PARTY", 0);
+
+    if (status != nullptr && test_party > status->party_size && test_party <= 6) {
+        static const int starter[6] = {ITEM_WEAPON_DAGGER,    ITEM_WEAPON_WOODEN_SLINGSHOT, ITEM_WEAPON_MALLET,
+                                       ITEM_WEAPON_GOLD_RING, ITEM_WEAPON_FIGHTING_STICK,   ITEM_WEAPON_MACHINE_GUN};
+        const int        was = status->party_size;
+
+        status->SetPartySize(test_party);
+        for (int i = 1; i < test_party; i++) {
+            if (status->equipped_weapon_slot[i] < 0 && status->chara_weapons[i][0].item_no < 0) {
+                status->GetItem(starter[i], 0);
+                status->equipped_weapon_slot[i] = 0;
+            }
+        }
+        std::fprintf(stderr, "coop-test: the town's party grown %d -> %d (DC_COOP_TEST_TOWN_PARTY)\n", was, test_party);
+    }
 
     if (status == nullptr || status->party_size >= 2) {
         if (static bool said = false; status != nullptr && !said) {
@@ -2350,6 +3070,33 @@ static void CaveDoorSlide(int steps) {
     g_cave_door_open = steps;
 }
 
+// coop-escapecave (the developer's rc4 playtest, 2026-11-18: "Toan just escaped from the dungeon and after he escaped, it brought him to the
+// dungeon level selector instead of town"): an act belongs to the town load it began in, yet nothing ended one when that load did.
+// Both walked in at the cave door together, hers first: the split at the end of her walk took her copy out of town with his walk
+// still under way there (step 120 of 160), and it stayed in her copy's state set (snapshot-allow.txt). He later joined her on a
+// floor she was on first, so his copy took her state, his stale walk with it. Back in Norune (the Escape; any way to town alike),
+// the town's walk stepped it on from step 120: about 45 ticks after the arrival it "walked in", and the split and the cave jump
+// took him straight back to the cave's floor menu. On this copy his own walk had ended (and was used) long before. Every session
+// reset (each mode end's state take, a resync's, a quit: the zone loads again) ends the acts and the door's slide with the town
+// they played in; a merge's snapshot sets them again afterwards where the stayer's town still has them. Every copy alike.
+// DC_COOP_MUTATE=cave_act_kept_over_reset (twin): kept, as before.
+namespace coop {
+static void CaveActsResetForSession() {
+    if (Mutated("cave_act_kept_over_reset")) {
+        return;
+    }
+    for (int player = 1; player <= 2; player++) {
+        if (const CaveAct &act = g_cave_act[player - 1]; act.kind != 0) {
+            std::fprintf(stderr, "coop-town: cave act: player %d's %s (step %d%s) ends with the town's load (the session reset)\n", player,
+                         act.kind == kCaveRefusal ? "refusal" : "entry", act.ticks, act.done ? ", walked in" : "");
+        }
+        g_cave_act[player - 1] = CaveAct{};
+    }
+    g_cave_door_open = 0;
+    std::fflush(stderr);
+}
+} // namespace coop
+
 static void CaveActTrace(int player, const CaveAct &act, const char *what) {
     sceVu0FVECTOR at;
 
@@ -2624,6 +3371,59 @@ static void StandAfterEvent() {
     std::fflush(stdout);
 }
 
+// Each tick of the town's event mode (editloop, after EventMode): whatever stands for the game's player on an apart copy follows
+// what the event did to him. DC_COOP_DEBUG: one line a tick, the drawn player's model, place and motion beside the game's player's
+// (x-cave-walk reads them).
+void CoopTownEventStep() {
+    if (!Enabled() || !CoopWorldsApart() || EdInteriorFlag != 0 || Chara == nullptr || Chara->frame == nullptr) {
+        return;
+    }
+
+    const bool hers = NetplayRole() == 2 && !NetplayLinkUp() && !NetplayStayerMerge() && !CoopTownSwapDeferred() && !g_indoor.on && pEditGround != nullptr &&
+                      SaveData != nullptr && SaveData->GetDngStatus() != nullptr && !Mutated("toan_skin");
+
+    if (hers && Mutated("event_skin_stands")) {
+        static bool said = false;
+
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "coop-town: test: event_skin_stands: her skin not stepped in the town's event %d\n", (int) EdEventInfo.event_no);
+        }
+    } else if (hers) {
+        TownSkinEventStep();
+    }
+
+    // coop-cavewalk: player 1's own body (he plays another member) on his copy apart, the same way.
+    float     body_pos[4] = {};
+    int       body_member = -1;
+    int       body_motion = -1;
+    const bool body = !hers && GameBodyEventStep(body_pos, &body_member, &body_motion);
+
+    if (!hers && Mutated("event_body_toan") && body_member < 0) {
+        static bool said = false;
+
+        if (!said && coop::Member(0) > CHARA_TOAN) {
+            said = true;
+            std::fprintf(stderr, "coop-town: test: event_body_toan: Toan stands in for player 1's body in the town's event %d\n", (int) EdEventInfo.event_no);
+        }
+    }
+
+    if (!CoopDebug()) {
+        return;
+    }
+    sceVu0FVECTOR game;
+    const bool    skin = hers && g_town_skin && g_town.visible && g_town.body != nullptr;
+    const float  *drawn = skin ? g_town.pos : body ? body_pos : game;
+    const int     member = skin ? g_town.loaded : body ? body_member : CHARA_TOAN;
+    const int     motion = skin ? (int) g_town.body->motion_no : body ? body_motion : (int) Chara->motion_no;
+    static const char *const kMemberNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
+
+    Chara->GetPosition(game);
+    std::fprintf(stderr, "coop-town: p%d apart in town event %d: player %d drawn as %s at (%.1f %.1f) motion %d; the game's player at (%.1f %.1f) motion %d\n",
+                 CoopWorldsSelf(), (int) EdEventInfo.event_no, CoopWorldsSelf(), member >= 0 && member < 6 ? kMemberNames[member] : "?", drawn[0], drawn[2],
+                 motion, game[0], game[2], (int) Chara->motion_no);
+}
+
 static void PartnerStep() {
     StandAfterEvent();
     PresenceTrace("town", g_town.visible); // coop-p2absent
@@ -2772,6 +3572,7 @@ static void PartnerStep() {
     bool rejoined = false;
 
     TownWarpForTest(); // test hooks (the clock one runs without a player 2 too)
+    VillagersOutForTest(); // coop-drawwrite
 
     if (!StepPresence(&rejoined)) {
         return;
@@ -2807,6 +3608,7 @@ static void PartnerStep() {
     }
 
     InputPadState pad = Pad2();
+    bool          held = false; // coop-wave3: her pad held here (her camera then holds still too)
 
     // coop-gatepopup test hook (DC_WORLDS_TEST_QUESTION_STICK=1, both copies): her stick held right while a door's call is open.
     static const bool question_stick = TestEnvOn("DC_WORLDS_TEST_QUESTION_STICK");
@@ -2825,6 +3627,7 @@ static void PartnerStep() {
         CoopWorldsQuestionHolds(1)) {   // coop-gatepopup: and in a gate's question, asking or asked
         pad = InputPadState{};
         pad.connected = true;
+        held = true;
     }
 
     StepTownWheel(pad, g_town.loaded); // pad 2's character wheel (R3), as in the dungeons
@@ -2835,9 +3638,9 @@ static void PartnerStep() {
             IndoorCamInit();
         }
 
-        IndoorCamStep(pad); // coop-inbuild
+        IndoorCamStep(CameraPadOf(pad, held)); // coop-inbuild
     } else if (Linked()) {
-        TownCamStep(pad);
+        TownCamStep(CameraPadOf(pad, held));
     }
 
     // coop-doorfix: the cave door's act moves her (her refusal, her walk in); she is stepped and shown where it has her.
@@ -2854,9 +3657,8 @@ static void PartnerStep() {
     g_indoor.stick[0] = lx; // coop-inbuild: the debug line's
     g_indoor.stick[1] = ly;
 
-    float angle = Linked() && g_town_cam.ready ? g_town_cam.camera->GetAngleH()
-                  : EdMoveCharaInfo.camera != nullptr ? EdMoveCharaInfo.camera->GetAngleH()
-                                                      : MainCamera.GetAngleH();
+    // coop-wave3: the steer row, the yaw her own copy's camera had as her pad was read (her camera as this tick has it, unlinked)
+    float angle = coop::SteerAngle(1, CoopTownPartnerCameraAngle());
 
     WalkToDoorForTest(lx, ly, angle); // coop-p2doors
     WalkToSpotForTest(lx, ly, angle); // coop-p2ground
@@ -3236,6 +4038,8 @@ static bool PointWorld(const ED_EVENT_POINT &point, float *pos) {
 // Kth walk step there each time it comes in, every item box of the room is logged (its flag's value, opened 1, and this
 // copy's first-visit mark for it), and its player is put where the game's own search (EdGetEvent) finds a box still shut,
 // so its Cross opens it as the game's walk does (ebattle.cpp); 60 steps on, the boxes are logged again.
+static long long g_edit_passes = 0; // every pass of the town's and its rooms' edit loop (CoopTownWorldAsideTrace counts it): a test's own clock, never wall time
+
 static void ApartBoxForTest(int mode) {
     static const char *const spec = TestEnv("DC_COOP_TEST_ROOM_BOX");
     static char              room[16] = "";
@@ -3253,11 +4057,11 @@ static void ApartBoxForTest(int mode) {
     }
 
     // A new entry: another room, or this one again after a gap in the room's frames (this runs on every one of them, any
-    // mode, so a gap is the town between: its load alone is longer).
-    static std::chrono::steady_clock::time_point last{};
-    const auto                                   now = std::chrono::steady_clock::now();
+    // mode, so a gap is the town between). Counted in edit-loop passes, never in time: a loaded PC's slow frames are not a gap.
+    static long long last = -1000;
+    const long long  now = g_edit_passes;
 
-    if (std::strncmp(room, EdInteriorName, sizeof room) != 0 || now - last > std::chrono::milliseconds(300)) {
+    if (std::strncmp(room, EdInteriorName, sizeof room) != 0 || now - last > 10) {
         std::snprintf(room, sizeof room, "%s", EdInteriorName);
         steps = 0;
         entry++;
@@ -3607,7 +4411,7 @@ static void IndoorTalkSpotForTest() {
     // (coop-pt1108c's DC_COOP_TEST_HISTALK_CURSOR: opt8, in his talk's own step, CoopTalkStep)
     // coop-pt1108d test hook (DC_COOP_TEST_TOAN_AT_EVENT=N): with the state file back and AWAY's warp done, Toan is put where the game's search
     // finds the room's event N (its prompt over his head), once. Both linked copies step it alike.
-    if (static const int toan_event = TestEnvInt("DC_COOP_TEST_TOAN_AT_EVENT", -1); toan_event > 0 && NetplayStateFileLoaded() && g_away_done && g_indoor.mode == 0 && EdInInfo != nullptr && Chara != nullptr) {
+    if (static const int toan_event = TestEnvInt("DC_COOP_TEST_TOAN_AT_EVENT", -1); toan_event > 0 && NetplayStateFileLoaded() && (g_away_done || TestEnv("DC_COOP_INDOOR_AWAY") == nullptr) && g_indoor.mode == 0 && EdInInfo != nullptr && Chara != nullptr) {
         static bool toan_done = false;
 
         if (!toan_done) {
@@ -3624,6 +4428,58 @@ static void IndoorTalkSpotForTest() {
                 Chara->Step();
             }
             std::fprintf(stderr, "coop: test: Toan to the room's event %d at (%.1f %.1f %.1f)\n", toan_event, spot[0], spot[1], spot[2]);
+            std::fflush(stderr);
+        }
+    }
+    // coop-xiaogap test hook (DC_COOP_TEST_HER_AT_EVENT=N, x-room-cat): as Toan's above, player 2 put where the game's search from her pose finds
+    // the room's event N (the cat in Toan's house, 11), once, both linked copies alike.
+    if (static const int placed_event = TestEnvInt("DC_COOP_TEST_HER_AT_EVENT", -1); placed_event > 0 && NetplayStateFileLoaded() && (g_away_done || TestEnv("DC_COOP_INDOOR_AWAY") == nullptr) && g_indoor.mode == 0 &&
+                                                                               EdInInfo != nullptr && g_town.body != nullptr && !CoopWorldsApart()) {
+        static bool placed_done = false;
+
+        if (!placed_done) {
+            placed_done = true;
+
+            sceVu0FVECTOR spot = {};
+            float         yaw = 0.0f;
+            bool          found = false;
+
+            // (searched round the point itself: the cat's is upstairs, at y 37). The fixture's save is past the cat (Xiao joined: its
+            // point's map flag 2 set, the point off), so the point's map flag is cleared first, every copy alike: the cat as before
+            // the fish.
+            for (int i = 0; i < 32 && !found; i++) {
+                const ED_EVENT_POINT &one = EdInInfo->event_points[i];
+
+                if (one.event_type == ED_EVENT_POINT_EVENT && one.side == placed_event) {
+                    if (one.completion_flag > 0 && EdGetMapFlag(one.completion_flag) != 0) {
+                        EdSetMapFlag(one.completion_flag, 0);
+                        std::fprintf(stderr, "coop: test: the room's event %d's map flag %d cleared (before its use)\n", placed_event, one.completion_flag);
+                    }
+                    const sceVu0FVECTOR at = {one.position[0], one.position[1], one.position[2], 1.0f};
+
+                    found = EventSpotNear(at, placed_event, spot, &yaw);
+                }
+            }
+
+            if (found) {
+                sceVu0CopyVector(g_town.pos, spot);
+                g_town.pos[3] = 1.0f;
+                g_town.velocity[0] = g_town.velocity[1] = g_town.velocity[2] = 0.0f;
+                g_town.body->frame->SetPosition(g_town.pos);
+                g_town.body->frame->SetRotation(0.0f, yaw, 0.0f);
+                g_town.body->SetRotation(0.0f, yaw, 0.0f);
+            }
+            std::fprintf(stderr, "coop: test: player 2 to the room's event %d: %s at (%.1f %.1f %.1f) facing %.2f\n", placed_event, found ? "put" : "no spot", spot[0], spot[1],
+                         spot[2], yaw);
+            for (int i = 0; i < 32 && !found; i++) { // (what the room's points are)
+                const ED_EVENT_POINT &q = EdInInfo->event_points[i];
+
+                if (q.event_type != 0) {
+                    std::fprintf(stderr, "coop: test: room point %d kind %d side %d flag %d (%s) enabled %d drawn %d time %.2f-%.2f (now %.2f) at (%.1f %.1f %.1f)\n", i,
+                                 q.event_type, q.side, q.completion_flag, q.completion_flag > 0 && EdGetMapFlag(q.completion_flag) != 0 ? "set" : "clear", (int) q.enabled,
+                                 q.frame == nullptr ? -1 : (int) (q.frame->attr.draw_on & 1), q.start_time, q.end_time, NowTime, q.position[0], q.position[1], q.position[2]);
+                }
+            }
             std::fflush(stderr);
         }
     }
@@ -4001,6 +4857,12 @@ void EdTalkWindowReset();            // editloop3.cpp
 void EdInMenuToWalk();               // edit_in.cpp (coop-stage4 4c)
 void EdInToTalk();                   // edit_in.cpp (coop-pt1109f)
 CNPCharacter *EdNowTalkChara();      // editloop3.cpp
+int  EdNowTalkCharaInfoID();         // editloop3.cpp (coop-wave2)
+void EdTalkWorldOnly(bool on);       // editloop3.cpp (coop-wave2: EdTalkMode's world half alone)
+bool EdTalkInRetailWindow();         // editloop3.cpp (coop-wave2)
+void EdTalkEnd(CCameraFollow *camera); // editloop3.cpp (coop-wave2: EdTalkMode's ending, on every copy at the end command)
+void EdTalkEndDefer(bool on);         // editloop3.cpp (coop-talkcam: EdTalkMode's endings leave the camera to EdTalkEnd)
+int  EdGetShopNo();                  // edit.cpp (coop-p1parts)
 } // namespace dc::game
 
 namespace {
@@ -4035,6 +4897,21 @@ void TalkSwap(int k) {
 
 void HerTalkStateFresh() {
     TalkFresh(1);
+}
+
+// coop-wave2 (Jep's 5.4, 11-17: own-talk message speed): a talk's window reveals its text at its talker's own Message Speed (retail's
+// EdInitMesParam rates: 0.6 fast, 0.3 normal), every copy alike (the window steps on every copy, from the talker's row of the own options,
+// CoopMessagesFastFor). The room's or town's window it was made from runs at the shared speed (player 1's). A window showing its text
+// whole for now (rate 0, a Cross or a choice prompt) keeps that till retail sets it back from the rate set here.
+void TalkWindowRate(ClsMes &window, int player) {
+    const float rate = CoopMessagesFastFor(player) ? 0.6f : 0.3f;
+
+    if (window.text_rate == window.text_rate_set) {
+        window.text_rate = rate;
+    }
+    window.text_rate_set = rate;
+    std::fprintf(stderr, "coop-talk: player %d's talk window at message speed %s (rate %.1f) on player %d's copy, link tick %lld\n", player,
+                 rate > 0.5f ? "fast" : "normal", rate, NetplayLocalPlayer(), (long long) NetplayLinkTick());
 }
 
 void HerTalkSwap() {
@@ -4126,6 +5003,10 @@ bool CoopTownTalkTarget(int villager) {
     return near == villager;
 }
 
+// coop-small2 (design for three): the town's other body (g_town.body) is player 2's today; code that reads its player by number reads
+// this (coop-joinload: daytrans2's owed CoopDayTransHolds(1) paths too).
+constexpr int kTownBodyPlayer = 2;
+
 // coop-p2collide: linked and together in a room, her Cross (the agreed pad, the same tick on both copies) where the game's
 // own search from her pose finds one of the room's events that is a scripted pickup, no story (CoopWorldsPickupEvent: the
 // closet, event 12). Story events and talks stay Toan's. DC_COOP_MUTATE=no_room_event (twin): her Cross starts nothing.
@@ -4137,10 +5018,25 @@ int CoopTownHerRoomEvent(const void *program, int room_mode) {
 
     // coop-small2 (design for three): the room event's player is a number it carries, read by its pad, its sounds and its
     // script's menus (CoopTownEventPadPlayer); the town's other body is player 2's today, so its Cross is player 2's pad.
-    constexpr int kTownBodyPlayer = 2;
     const bool    linked = NetplayPad(kTownBodyPlayer - 1, pad);
+
+    // Test hook (DC_COOP_TEST_BUSY_CROSS=1, coop-owed1112: x-eventslots-bothfish~busycross was flaky, its window one tick wide): the
+    // first time this reads her Cross while her own parked event or her fishing runs (the tick the live one ended), she pressed it,
+    // so the busy rule below is tried on that very tick every run. Every copy alike.
+    // candfix1112 (Jep): the Cross goes into her pad itself, not only into "pressed": a board's script reads the press again on its
+    // first run (_GET_PADDOWN, ext 1, from her event pad, made from this pad below; no Cross down: it draws its "!" (ext 10) and
+    // ends, EdEventInit 0). Before, only her scripted press (anchored on her own copy's log, a tick either way) decided whether
+    // it was still held on that tick, so the twin's live board started on some runs and not on others.
+    if (static bool busy_given = false; !busy_given && linked && TestEnvOn("DC_COOP_TEST_BUSY_CROSS") &&
+                                        (CoopEventSlotParked(kTownBodyPlayer - 1) || CoopFishingOn(kTownBodyPlayer - 1))) {
+        busy_given = true;
+        pad.buttons |= kInputCross;
+        cross_was = false;
+        std::fprintf(stderr, "coop-town: test: player %d's Cross put on the first tick it is read while they are busy (link tick %lld)\n", kTownBodyPlayer,
+                     (long long) NetplayLinkTick());
+    }
     const bool cross = linked && (pad.buttons & kInputCross) != 0;
-    const bool pressed = cross && !cross_was;
+    bool       pressed = cross && !cross_was;
 
     cross_was = cross;
 
@@ -4472,8 +5368,9 @@ bool CoopTownHerRoomEventOn() {
 // and whose it is are the same on both). DC_COOP_MUTATE=mes_locks_walk (twin): any message stands him, as before.
 int CoopTownRoomKeyMode(bool message, bool overflow) {
     const bool hers = message && coop::SystemMesFor() == 2 && !Mutated("mes_locks_walk");
+    const bool notice = message && coop::SystemMesNotice(); // coop-notices: another player's find, timed, holds nobody
 
-    return overflow || (message && !hers) ? 0 : 0xFFFF;
+    return overflow || (message && !hers && !notice) ? 0 : 0xFFFF;
 }
 
 // coop-pt1111d (Jep's 11-11 playtest, item 9: "Town: P2 opens a red chest -> P2 can keep walking, P1 is frozen until the confirmation"):
@@ -4486,6 +5383,9 @@ int CoopTownRoomKeyMode(bool message, bool overflow) {
 bool CoopTownMesLocksWalker(bool message) {
     if (!message || Mutated("townbox_mes_shared")) {
         return message;
+    }
+    if (coop::SystemMesNotice()) {
+        return false; // coop-notices: another player's find shown here apart, timed: the walk goes on (merge-no-wait)
     }
     const int whose = coop::SystemMesFor();
 
@@ -4611,11 +5511,24 @@ static int g_villagers_held = 0;
 static int g_villagers_let = 0;
 
 // opt8 (Jep 11-09: the world pauses only when every player is in a pause state): the villagers' walk holds while every
-// present player talks or is in a menu (CoopTalkWorldHeld), not for one talker; retail's own rule keeps each talker's villager
+// present player talks (coop-daycrash, the developer 11-18: or watches the time of day's scene; a menu or a question no longer: VillagersStand), not for one talker; retail's own rule keeps each talker's villager
 // still (it stops within 20 of a player: CoopTownNearestPlayer). Replaces coop-pt1109b's hold of every villager through her talk.
+static bool VillagersStand(); // (coop-daycrash, below)
+
+static long long g_walk_asks = 0; // (coop-daycrash's test trace: every ask, and those let run)
+static long long g_walk_let = 0;
+
+void CoopTownVillagerWalkCounts(long long *asks, long long *let) {
+    *asks = g_walk_asks;
+    *let = g_walk_let;
+}
+
 bool CoopTownVillagersHeld() {
     const bool talk = EdInteriorFlag == 0 && CoopTalkAny();
-    const bool holds = CoopTalkWorldHeld();
+    const bool holds = VillagersStand(); // (coop-daycrash: talks and the scene, not menus or questions)
+
+    g_walk_asks++;
+    g_walk_let += holds ? 0 : 1;
 
     if (talk) {
         (holds ? g_villagers_held : g_villagers_let)++;
@@ -4623,18 +5536,574 @@ bool CoopTownVillagersHeld() {
     return holds;
 }
 
+// coop-georamavillagers (the developer 11-18: a player in the Georama is not standing where they went in): player `player`'s body standing in the town's
+// world (players by number, 1 up), and where. Not while that player builds: their body stands hidden at the spot they went in from, and
+// they come back out at their cursor, not there. The game's player is Toan (Chara): player 1 linked, this copy's own player apart; it builds
+// while the town's mode is a Georama one. The town's one partner body (g_town) is player 2's, linked; she builds in her own Georama
+// (CoopP2Building). Players 3 to 6 have no body in the town yet: none here till they do. Every copy alike (the modes, her Georama and her
+// body are the step's). DC_COOP_MUTATE=villagers_stop_for_builder (twin): a builder's hidden body counts, as before.
+bool CoopTownBodyStands(int player, float *pos) {
+    const bool together = Linked() && !CoopWorldsApart();
+    const int  game_player = !together && NetplayLocalPlayer() > 0 ? NetplayLocalPlayer() : 1;
+    const bool builder_counts = Mutated("villagers_stop_for_builder");
+    constexpr int kPartnerBodyPlayer = 2; // (g_town: the partner body's player, linked)
+
+    if (player == game_player) {
+        const bool builds = ::GameMode == ED_MODE_GEORAMA || ::GameMode == ED_MODE_GEORAMA_MENU_INIT || ::GameMode == ED_MODE_GEORAMA_MENU ||
+                            ::GameMode == ED_MODE_RETURN_MENU_GEORAMA;
+
+        if (Chara == nullptr || (builds && !builder_counts)) {
+            return false;
+        }
+        if (pos != nullptr) {
+            Chara->GetPosition(pos);
+        }
+        return true;
+    }
+    if (player == kPartnerBodyPlayer && together && g_town.visible && g_town.body != nullptr && (!CoopP2Building() || builder_counts)) {
+        if (pos != nullptr) {
+            g_town.body->GetPosition(pos);
+        }
+        return true;
+    }
+    return false;
+}
+
 // opt8: retail's villager stops within 20 of the game's player (EdMoveVillager, from EdExchangeInfo.player): so a villager talking
 // to another player walked on through the talk. Each villager stops for the nearest player (her body, shown in the town with him).
 // DC_COOP_MUTATE=villagers_stop_for_one (twin): the game's player alone, as before.
+// coop-georamavillagers: the nearest of every player's body standing in the town (CoopTownBodyStands: a player in a Georama is not there),
+// every present player, not Toan and one partner; none standing: no stop.
 float CoopTownNearestPlayer(const float *villager, float from_game_player) {
-    if (!Linked() || CoopWorldsApart() || !g_town.visible || g_town.body == nullptr || Mutated("villagers_stop_for_one")) {
+    if (Mutated("villagers_stop_for_one")) {
         return from_game_player;
     }
-    sceVu0FVECTOR at;
+    const bool together = Linked() && !CoopWorldsApart();
+    const int  game_player = !together && NetplayLocalPlayer() > 0 ? NetplayLocalPlayer() : 1;
+    float      nearest = std::numeric_limits<float>::infinity();
 
-    g_town.body->GetPosition(at);
-    return std::min(from_game_player, std::sqrt((at[0] - villager[0]) * (at[0] - villager[0]) + (at[1] - villager[1]) * (at[1] - villager[1]) +
-                                                (at[2] - villager[2]) * (at[2] - villager[2])));
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        sceVu0FVECTOR at;
+
+        if (!CoopTownBodyStands(player, at)) {
+            continue;
+        }
+        // (the game's player: retail's own measure, as passed)
+        const float far = player == game_player ? from_game_player
+                                                : std::sqrt((at[0] - villager[0]) * (at[0] - villager[0]) + (at[1] - villager[1]) * (at[1] - villager[1]) +
+                                                            (at[2] - villager[2]) * (at[2] - villager[2]));
+        nearest = std::min(nearest, far);
+    }
+    return nearest;
+}
+
+// coop-drawwrite (localaudit 3.8; Jep's 5.3: detail distance is each player's own): linked, the town's step keeps every villager
+// (KeepNearVillagers, editloop3.cpp): each steps its motion and stands on the ground whatever anyone's setting, so the copies
+// never part over it and a villager by player 2 moves however far player 1 is. DC_COOP_MUTATE=detail_step_own (twin): this copy's
+// setting decides, from the game's player, as before.
+bool CoopTownVillagersKeptAll() {
+    return Linked() && !Mutated("detail_step_own");
+}
+
+namespace {
+struct VillagerFade {
+    float alpha[10] = {};   // this copy's own: how far each villager shows on this screen (0..128)
+    bool  seen[10] = {};
+    float shared[10] = {};  // the step's alpha, put back after the draw
+    bool  swapped = false;
+    long long stepped = -1; // the link tick the fades last stepped on
+};
+VillagerFade g_villager_fade; // (this copy's own, never the step's: not in the state set, never read by the step)
+
+void OwnTownAt(float *at) {
+    if (NetplayLocalPlayer() == 2 && g_town.visible && g_town.body != nullptr) {
+        g_town.body->GetPosition(at);
+    } else {
+        Chara->GetPosition(at);
+    }
+}
+} // namespace
+
+// coop-herscreen: this copy's own player in the town (her body on her copy), for what this screen draws and hears by "near".
+// Unlinked, the game's player. DC_COOP_MUTATE=herscreen_p1 (twin): the game's player (player 1) on every copy, as before.
+void CoopTownOwnAt(float *at) {
+    if (Linked() && !Mutated("herscreen_p1")) {
+        OwnTownAt(at);
+    } else {
+        Chara->GetPosition(at);
+    }
+    at[3] = 1.0f;
+}
+
+// coop-herscreen: DC_COOP_TEST_FARPASS_TRACE=1, once a tick, each villager's pass in this copy's town draw (EdDrawBeyondRetailReach):
+// "coop-farpass: villager N in the far pass|in the near pass on this copy, D from this copy's player, link tick T".
+void CoopTownFarPassTrace(int i, bool far, float from) {
+    static const bool on = TestEnvOn("DC_COOP_TEST_FARPASS_TRACE");
+    static long long  said[10] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    const long long   tick = NetplayLinkTick();
+
+    if (on && i >= 0 && i < 10 && said[i] != tick) {
+        said[i] = tick;
+        std::fprintf(stderr, "coop-farpass: villager %d in the %s pass on this copy, %.0f from this copy's player, link tick %lld\n", i, far ? "far" : "near", from, tick);
+    }
+}
+
+// coop-herscreen: a villager's footsteps are heard on a screen as retail hears them by its player: only the two villagers nearest
+// that screen's own player, within retail's 150, in front of that screen's own camera (the sound listener). Retail chose them by
+// player 1 (KeepNearVillagers' two nearest), so on her screen a villager walking beside her far from him was silent, and one by him
+// was heard. Linked, the step lets every kept villager's foot clock run alike (FootSoundEnable 1, editloop3.cpp); each copy plays
+// only its own two (CoopFootSoundHeard, snd.cpp's SndPlayFootSound). DC_COOP_TEST_FOOT_TRACE=1: "coop-foot: villager N's footstep
+// heard|silent on this copy, D from this copy's player, link tick T". DC_COOP_MUTATE=herscreen_p1 (twin): by player 1, as before.
+namespace {
+struct FootHeard {
+    int       villager = -1; // the villager stepping now (CoopTownFootHeardBegin), -1 outside one
+    long long tick = -1;
+    bool      heard[10] = {};
+    float     from[10] = {};
+};
+FootHeard g_foot; // (this copy's own: what its speakers play, never the step's)
+} // namespace
+
+void CoopTownFootHeardBegin(int villager) {
+    g_foot.villager = -1;
+    if (!CoopTownVillagersKeptAll() || villager < 0 || villager >= 10) {
+        return;
+    }
+    const long long tick = NetplayLinkTick();
+
+    if (tick != g_foot.tick) {
+        g_foot.tick = tick;
+        sceVu0FVECTOR own;
+        int           nearest[2] = {-1, -1};
+        float         best[2] = {150.0f, 150.0f};
+
+        CoopTownOwnAt(own);
+        for (int i = 0; i < 10; i++) {
+            CNPCharacter &v = EdVillager[i];
+            sceVu0FVECTOR at;
+
+            g_foot.heard[i] = false;
+            g_foot.from[i] = -1.0f;
+            if (v.initialized == 0 || v.frame == nullptr || !v.near_camera) {
+                continue;
+            }
+            v.GetPosition(at);
+            at[3] = 1.0f;
+            const float d = DistVector(own, at);
+            const float ahead = (at[0] - dc::game::camera_pos[0]) * dc::game::camera_dir[0] + (at[1] - dc::game::camera_pos[1]) * dc::game::camera_dir[1] +
+                                (at[2] - dc::game::camera_pos[2]) * dc::game::camera_dir[2];
+
+            g_foot.from[i] = d;
+            if (!(ahead > 0.0f)) {
+                continue;
+            }
+            if (d < best[0]) {
+                nearest[1] = nearest[0];
+                best[1] = best[0];
+                nearest[0] = i;
+                best[0] = d;
+            } else if (d < best[1]) {
+                nearest[1] = i;
+                best[1] = d;
+            }
+        }
+        for (const int i : nearest) {
+            if (i >= 0) {
+                g_foot.heard[i] = true;
+            }
+        }
+    }
+    g_foot.villager = villager;
+}
+
+void CoopTownFootHeardEnd() {
+    g_foot.villager = -1;
+}
+
+bool CoopFootSoundHeard(const float *position) {
+    (void) position;
+    if (g_foot.villager < 0) {
+        return true;
+    }
+    static const bool trace = TestEnvOn("DC_COOP_TEST_FOOT_TRACE");
+    const bool        heard = g_foot.heard[g_foot.villager];
+
+    if (trace) {
+        std::fprintf(stderr, "coop-foot: villager %d's footstep %s on this copy, %.0f from this copy's player, link tick %lld\n", g_foot.villager,
+                     heard ? "heard" : "silent", g_foot.from[g_foot.villager], (long long) NetplayLinkTick());
+    }
+    return heard;
+}
+
+// coop-drawwrite: around the drawing of the town's villagers (EdDrawCharacter), each villager past this copy's own detail distance
+// of this copy's own player (but never nearer than retail's own 150) fades out on this screen alone: its alpha for the draw is the
+// lesser of the step's and this copy's own fade, put back after. Nothing the step reads is left changed.
+// DC_COOP_DETAIL_TRACE=1: once a tick, "coop-detail: villager ..." (what a test compares frame by frame).
+// coop-wave2 (Jep 11-18 on talks local: the others "should still see the villager talk", cinematic-world-only: in the world): a villager in
+// a talk stands (motion 0) in the world on every copy alike (CoopTalkStep), and its talking (retail's motion 3, which the talk's window
+// set while a message showed) is posed for the draw alone: on a watcher's copy while the talk is open, on the talker's while its own
+// window shows a message. The pose is set on a draw-only clock just before the villagers draw and their frames and motion state put back
+// after (TalkPoseEnd), so nothing of it is world state or summed. DC_COOP_MUTATE=talk_pose_off (twin): no talking drawn on the
+// watchers' copies.
+static bool TalkLocalFor(int k);
+int         CoopTalkVillager(int k);
+namespace {
+constexpr int kTalkMotion = 3; // retail's talking motion (EdTalkMode's SetMotion(3, 0) while a message shows)
+struct FrameSaved {
+    CFrame       *frame;
+    unsigned char bytes[sizeof(sceVu0FMATRIX) * 3 + sizeof(sceVu0FVECTOR) * 3 + sizeof(int) * 4];
+};
+struct TalkPose {
+    bool                    on = false;
+    CNPCharacter           *villager = nullptr;
+    tagMOTION_TYPE         *motion = nullptr;
+    MOTION_STATE            state{};
+    std::vector<FrameSaved> frames;
+    float                   clock[coop::kMaxPlayers] = {};
+    long long               talk[coop::kMaxPlayers] = {-1, -1, -1, -1, -1, -1};
+    long long               said[coop::kMaxPlayers] = {-1, -1, -1, -1, -1, -1};
+};
+TalkPose g_talk_pose;
+
+unsigned char *FramePoseBytes(CFrame *frame) {
+    return reinterpret_cast<unsigned char *>(&frame->world);
+}
+constexpr std::size_t kFramePoseBytes = sizeof(FrameSaved::bytes);
+static_assert(offsetof(CFrame, srt) + sizeof(int) - offsetof(CFrame, world) == kFramePoseBytes, "a frame's pose: world to srt");
+
+void SaveFrames(CFrame *frame, std::vector<FrameSaved> &out) {
+    for (; frame != nullptr; frame = frame->brother) {
+        FrameSaved saved;
+
+        saved.frame = frame;
+        std::memcpy(saved.bytes, FramePoseBytes(frame), kFramePoseBytes);
+        out.push_back(saved);
+        SaveFrames(frame->child, out);
+    }
+}
+
+// The talking villager of player k's talk, posed for this draw, when this screen shows it talking.
+void TalkPoseBegin(int k) {
+    const bool own = k == coop::ActorLocalIndex();
+
+    if (!CoopTalkOn(k) || !TalkLocalFor(k) || (own ? g_talk_own[k].villager_motion != kTalkMotion : Mutated("talk_pose_off"))) {
+        return;
+    }
+    const int index = CoopTalkVillager(k);
+
+    if (index < 0) {
+        return;
+    }
+    CNPCharacter &v = EdVillager[index];
+    int           at = -1, start = 0, end = 0, set = 0;
+
+    if (v.initialized == 0 || v.frame == nullptr) {
+        return;
+    }
+    tagMOTION_TYPE *motion = v.GetMotionParam(kTalkMotion, &at, &start, &end, &set);
+
+    if (motion == nullptr || motion->motion_info == nullptr || at < 0) {
+        return;
+    }
+    const MOTION_INFO &info = motion->motion_info[at];
+    const float        span = (float) (info.end - info.start);
+    TalkPose          &pose = g_talk_pose;
+
+    if (pose.talk[k] != g_talks[k].tick) {
+        pose.talk[k] = g_talks[k].tick;
+        pose.clock[k] = 0.0f;
+    }
+    pose.clock[k] += info.speed > 0.0f ? info.speed : 1.0f;
+    if (span > 1.0f) {
+        pose.clock[k] = std::fmod(pose.clock[k], span - 1.0f);
+    }
+    pose.on = true;
+    pose.villager = &v;
+    pose.motion = motion;
+    pose.state = motion->state;
+    pose.frames.clear();
+    SaveFrames(v.frame, pose.frames);
+
+    MOTION_STATE &state = motion->state;
+
+    state.motion_no = at;
+    state.playing_no = at;
+    state.blending = 0;
+    state.time = (float) info.start + pose.clock[k];
+    SetMotionEX(v.frame, motion, motion->motion_info, &state, motion->frame_info);
+    if (pose.said[k] != g_talks[k].tick) {
+        pose.said[k] = g_talks[k].tick;
+        std::fprintf(stderr, "coop-talk: villager %d drawn talking for player %d's talk on player %d's copy (%s; its world motion %d), link tick %lld\n", index,
+                     k + 1, NetplayLocalPlayer(), own ? "its own window's message" : "a watcher's draw", v.motion_no, (long long) NetplayLinkTick());
+    }
+    // Test hook (DC_COOP_TALK_POSE_TRACE=1): each posed draw, the pose's motion frame, how far its frames' local matrices moved from the
+    // world's pose (the largest element), and the world's own motion and frame.
+    if (static const bool trace = TestEnvOn("DC_COOP_TALK_POSE_TRACE"); trace) {
+        float moved = 0.0f;
+
+        for (const FrameSaved &saved : pose.frames) {
+            const float *was = reinterpret_cast<const float *>(saved.bytes + sizeof(sceVu0FMATRIX) * 2); // (local: after world and inverse)
+            const float *now = &saved.frame->local[0][0];
+
+            for (int e = 0; e < 16; e++) {
+                moved = std::max(moved, std::fabs(now[e] - was[e]));
+            }
+        }
+        std::fprintf(stderr, "coop-talk: pose: villager %d posed at motion frame %.2f, its frames moved %.4f from the world's pose (world motion %d at %.2f) on player %d's copy, link tick %lld\n",
+                     index, state.time, moved, v.motion_no, pose.state.time, NetplayLocalPlayer(), (long long) NetplayLinkTick());
+    }
+}
+
+void TalkPoseEnd() {
+    TalkPose &pose = g_talk_pose;
+
+    if (!pose.on) {
+        return;
+    }
+    for (const FrameSaved &saved : pose.frames) {
+        std::memcpy(FramePoseBytes(saved.frame), saved.bytes, kFramePoseBytes);
+    }
+    pose.motion->state = pose.state;
+    pose.on = false;
+}
+} // namespace
+
+void CoopTownVillagerDrawBegin(CNPCharacter *npcs, int count) {
+    VillagerFade &f = g_villager_fade;
+
+    if (npcs == EdVillager) { // coop-wave2: one talk's villager posed a draw (the first talk with one; two talks with one villager share it)
+        for (int k = 0; k < coop::kMaxPlayers && !g_talk_pose.on; k++) {
+            TalkPoseBegin(k);
+        }
+    }
+    f.swapped = false;
+    if (npcs != EdVillager || count > 10 || EdInteriorFlag != 0 || !CoopTownVillagersKeptAll()) {
+        return;
+    }
+    static const bool trace = TestEnvOn("DC_COOP_DETAIL_TRACE");
+    const float       detail = dc::platform::ConfigDetailDistance();
+    const float       keep = std::max(150.0f, detail);
+    const long long   tick = NetplayLinkTick();
+    const bool        step = tick != f.stepped;
+    sceVu0FVECTOR     own;
+
+    f.stepped = tick;
+    OwnTownAt(own);
+    for (int i = 0; i < count; i++) {
+        CNPCharacter &v = npcs[i];
+
+        if (v.initialized == 0 || v.frame == nullptr) {
+            f.seen[i] = false;
+            continue;
+        }
+        sceVu0FVECTOR at;
+
+        v.GetPosition(at);
+        const float dist = std::sqrt((at[0] - own[0]) * (at[0] - own[0]) + (at[1] - own[1]) * (at[1] - own[1]) + (at[2] - own[2]) * (at[2] - own[2]));
+        const float target = dist < keep ? 128.0f : 0.0f;
+
+        if (!f.seen[i]) {
+            f.alpha[i] = target;
+            f.seen[i] = true;
+        } else if (step) {
+            const float by = (float) std::max(v.alpha_step, 8);
+
+            f.alpha[i] = target > f.alpha[i] ? std::min(target, f.alpha[i] + by) : std::max(target, f.alpha[i] - by);
+        }
+        f.shared[i] = v.ambient_offset[3];
+        v.ambient_offset[3] = std::min(f.shared[i], f.alpha[i]);
+        if (trace && step) {
+            int             index = -1;
+            int             set = 0;
+            tagMOTION_TYPE *motion = v.motion_no >= 0 ? v.GetMotionParam(v.motion_no, &index, nullptr, nullptr, &set) : nullptr;
+
+            sceVu0FVECTOR p1;
+            sceVu0FVECTOR p2 = {0.0f, 0.0f, 0.0f, 1.0f};
+            const bool    her = g_town.visible && g_town.body != nullptr;
+
+            Chara->GetPosition(p1);
+            if (her) {
+                g_town.body->GetPosition(p2);
+            }
+            p1[3] = 1.0f;
+            p2[3] = 1.0f;
+            at[3] = 1.0f;
+            std::fprintf(stderr,
+                         "coop-detail: villager %d %s on this copy (alpha %.0f, the step's %.0f), %.0f from this copy's player (detail %s%.0f), %.0f from player 1 and "
+                         "%.0f from player 2, motion %d time %.3f, link tick %lld\n",
+                         i, v.ambient_offset[3] > 0.0f ? "drawn" : "hidden", v.ambient_offset[3], f.shared[i], dist, std::isinf(detail) ? "all, " : "",
+                         std::isinf(detail) ? 0.0f : detail, DistVector(p1, at), her ? DistVector(p2, at) : -1.0f, v.motion_no,
+                         motion != nullptr ? motion->state.time : -1.0f, tick);
+        }
+    }
+    f.swapped = true;
+}
+
+namespace dc::game {
+int Draw3DVisualMeshState(CVisualVu1 *visual, unsigned *why, bool ensure); // port/src/game/visualvu1.cpp (coop-villagerinvis)
+} // namespace dc::game
+
+namespace {
+// coop-villagerinvis test hook (DC_COOP_TEST_VILLAGER_MESH=1): once every 60 link ticks, after the villagers' draw, each villager's
+// models (its frames' blocks) and how many of them hold a mesh built from the model the block names, each first made ready as its
+// draw makes it (Draw3DEnsureVisual: the rebuild runs only in a draw, and a villager out of view is not drawn):
+// "coop-villagers: villager N 'name' meshes B of M on player P's copy (a missing one's state S; alpha A, near N, drawn D), link tick T".
+// B < M is a villager drawn without (part of) a body; S is the first such model's Draw3DVisualMeshState bits (visualvu1.cpp).
+void CountMeshes(CFrame *frame, int &models, int &built, unsigned &why) {
+    for (; frame != nullptr; frame = frame->brother) {
+        if (auto *vu1 = dynamic_cast<CFrameVu1 *>(frame); vu1 != nullptr) {
+            unsigned  bits = 0;
+            const int state = dc::game::Draw3DVisualMeshState(vu1->visual, &bits, true);
+
+            models += state >= 0 ? 1 : 0;
+            built += state > 0 ? 1 : 0;
+            if (state == 0 && why == ~0u) {
+                why = bits;
+            }
+        }
+        CountMeshes(frame->child, models, built, why);
+    }
+}
+
+void VillagerMeshTrace() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_VILLAGER_MESH");
+    static long long  said = -1;
+    const long long   tick = NetplayLinkTick();
+
+    if (!on || EdInteriorFlag != 0 || tick == said || tick % 60 != 0) {
+        return;
+    }
+    said = tick;
+    for (int i = 0; i < 10; i++) {
+        CNPCharacter &v = EdVillager[i];
+
+        if (v.initialized == 0 || v.frame == nullptr) {
+            continue;
+        }
+        int  models = 0, built = 0;
+        char name[sizeof EdVillagerInfo[i].name + 1] = {};
+
+        std::memcpy(name, EdVillagerInfo[i].name, sizeof EdVillagerInfo[i].name);
+        unsigned why = ~0u;
+
+        CountMeshes(v.frame, models, built, why);
+        std::fprintf(stderr,
+                     "coop-villagers: villager %d '%s' meshes %d of %d on player %d's copy (a missing one's state %#x; alpha %.0f, near %d, drawn %d), "
+                     "link tick %lld\n",
+                     i, name, built, models, NetplayLocalPlayer(), why == ~0u ? 0u : why, v.ambient_offset[3], (int) v.near_camera, v.CheckDraw(),
+                     tick);
+    }
+}
+} // namespace
+
+void CoopTownVillagerDrawEnd(CNPCharacter *npcs, int count) {
+    VillagerFade &f = g_villager_fade;
+
+    TalkPoseEnd(); // coop-wave2
+    if (npcs == EdVillager) {
+        VillagerMeshTrace(); // coop-villagerinvis
+    }
+    if (!f.swapped || npcs != EdVillager) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        if (npcs[i].initialized != 0 && npcs[i].frame != nullptr) {
+            npcs[i].ambient_offset[3] = f.shared[i];
+        }
+    }
+    f.swapped = false;
+}
+
+// coop-villagerinvis (the developer's rc4 playtest 11-18: after a load, player 2 saw Macho invisible, his shadow drawn): a villager's model is read
+// from its pack into the town's read buffer (EdLoadVillager: LoadFile2(read_buffer), the next villager's read over it), which the state
+// set leaves out; its mesh records are built at the load, and a state set's villager block names its model by print. A copy that joins
+// by the host's state set rebuilds a block whose model it has not built itself only from a model it keeps (the ones its own load built,
+// visualvu1.cpp's KeptModel). Its own load had drawn other villagers than the host's town: EditInit's EdCreateVillagerTable shuffles the
+// town's people with rand(), and her join-as-load ran it with her own random state. A villager only the host had stayed without a mesh:
+// body never drawn, shadow (EdDrawCharacters' shadow pass) drawn. Here every villager the town holds now is read from this copy's own
+// game data (its pack by the name the state set carries, EdVillagerInfo[i].name: EdVillager[i].resource_name is empty after a load),
+// once a pack, and its models found by print (Draw3DEnsureVisual, after KeptModel and the scene's packs).
+// DC_COOP_MUTATE=villager_models_off (twin): none read, as before.
+namespace {
+struct VillagerPack {
+    std::string                                   path;
+    std::vector<u_long128>                        data;
+    std::vector<std::pair<std::uint32_t, unsigned *>> models; // (print, start) of every place a model could start
+};
+std::vector<VillagerPack> g_villager_packs;
+int                       g_villager_model_finds = 0;
+} // namespace
+
+namespace dc::game {
+std::uint32_t Draw3DModelPrint(const unsigned int *data); // port/src/game/visualvu1.cpp (coop-joinatla)
+} // namespace dc::game
+
+unsigned int *CoopTownVillagerModel(std::uint32_t print) {
+    if (print == 0 || Mutated("villager_models_off")) {
+        return nullptr;
+    }
+    char directory[64] = {};
+
+    GetEditDataDir(directory);
+    for (int i = 0; i < 10; i++) {
+        const CNPCharacter &v = EdVillager[i];
+        char                name[sizeof EdVillagerInfo[i].name + 1] = {};
+
+        std::memcpy(name, EdVillagerInfo[i].name, sizeof EdVillagerInfo[i].name);
+        if (v.initialized == 0 || name[0] == 0) {
+            continue;
+        }
+        const std::string path = std::string(directory) + "chara/" + name + ".chr";
+
+        if (std::any_of(g_villager_packs.begin(), g_villager_packs.end(), [&](const VillagerPack &p) { return p.path == path; })) {
+            continue;
+        }
+        if (g_villager_packs.size() >= 32) { // (a town has ten at most; the oldest reads go)
+            g_villager_packs.erase(g_villager_packs.begin());
+        }
+        VillagerPack        &pack = g_villager_packs.emplace_back();
+        const std::uintmax_t size = dc::data::DataFileSize(path);
+
+        pack.path = path;
+        if (size == 0 || size > (32u << 20)) {
+            std::fprintf(stderr, "coop-villagers: villager %d's pack %s is not in this copy's game data\n", i, path.c_str());
+            continue;
+        }
+        // (LoadFile2 reads whole sectors: room past the file's end.)
+        pack.data.resize((std::size_t) (size / sizeof(u_long128)) + 4096 / sizeof(u_long128) + 1);
+
+        char at_path[96];
+        int  read = 0;
+
+        std::snprintf(at_path, sizeof at_path, "%s", path.c_str());
+        if (LoadFile2(at_path, pack.data.data(), &read, 0) == 0 || read <= 0) {
+            pack.data.clear();
+            continue;
+        }
+        unsigned *const   words = reinterpret_cast<unsigned *>(pack.data.data());
+        const std::size_t count = (std::size_t) read / 4;
+
+        for (std::size_t at = 0; at + sizeof(MDT_HEADER) / 4 <= count; at += 4) {
+            const MDT_HEADER *header = reinterpret_cast<const MDT_HEADER *>(words + at);
+
+            if (header->size >= sizeof(MDT_HEADER) && header->size / 4 <= count - at) {
+                pack.models.emplace_back(dc::game::Draw3DModelPrint(words + at), words + at);
+            }
+        }
+        std::fprintf(stderr, "coop-villagers: villager %d's pack %s read from this copy's game data (%d bytes, %zu places a model could start)\n", i,
+                     path.c_str(), read, pack.models.size());
+    }
+    for (const VillagerPack &pack : g_villager_packs) {
+        for (const auto &[at_print, model] : pack.models) {
+            if (at_print == print && dc::game::Draw3DModelPrint(model) == print) {
+                if (g_villager_model_finds++ < 12) {
+                    std::fprintf(stderr, "coop-villagers: model %08x found in %s (this copy's own read)\n", (unsigned) print, pack.path.c_str());
+                }
+                return model;
+            }
+        }
+    }
+    return nullptr;
 }
 
 CCameraFollow *CoopTownHerTalkCamera() {
@@ -4730,6 +6199,7 @@ void CoopTownHerTalkStartIn() {
     HerTalkStateFresh();
     HerTalkSwap();
     EdTalkWindowReset();
+    TalkWindowRate(EditMes1, 2); // coop-wave2: her own Message Speed (the live window is hers till StartOut)
 
     if (EdTalkModeInit(&EdVillager[g_room_event.villager], -1) == 0) {
         std::fprintf(stderr, "worlds: player 2's talk with villager %d: the game would not set it up\n", g_room_event.villager);
@@ -4858,14 +6328,98 @@ bool CoopTalkLocal() {
 // where its stick turns its town camera, so the camera holds through its talk as in retail's talk mode (x-town-talk-saved's check).
 // DC_COOP_MUTATE=talk_walker_free (twin): the walk runs through the talk.
 bool CoopTalkHoldsWalker() {
-    return g_talks[0].on && !Mutated("talk_walker_free");
+    // (coop-daytrans: and while it watches the time of day's scene, as retail's event mode holds it: CoopDayTransHolds)
+    return (g_talks[0].on && !Mutated("talk_walker_free")) || CoopDayTransHolds(0);
 }
+
+// coop-daytrans: the villager player k's talk is with (its index in EdVillager), or -1: read from the talk's own slot.
+int CoopTalkVillager(int k) {
+    if (!CoopTalkOn(k) || EdTalkStateBytes() > (int) sizeof g_talks[k].state) {
+        return -1;
+    }
+    TalkSwap(k);
+    const CNPCharacter *talker = EdNowTalkChara();
+    TalkSwap(k);
+    return talker != nullptr && talker >= EdVillager && talker < EdVillager + 10 ? static_cast<int>(talker - EdVillager) : -1;
+}
+
 
 // Jep 11-09: talking (or a menu) is a pause state for its player; the world (the clock, the villagers' walk) holds only when
 // every present player is in one. DC_COOP_MUTATE=world_held_by_one (twin): one talker holds it, as retail's one player.
 // DC_COOP_MUTATE=world_never_held (twin): never held, as the town before (her talk aside of his).
+// coop-daytrans2 (Jep 11-11): watching the time of day's scene is a pause state too: retail's event mode, which plays it for its one player,
+// stands the clock and the villagers. Together the scene runs in a world slot with the town in its walk, so the clock and the villagers ran
+// on under it. Now with every present player watching it (or in a talk or a menu beside it) the world holds, as retail's; with anyone free
+// of a pause (fishing, an event of their own) it runs on. (The world slot is together's alone:
+// apart a copy is one player and plays it as retail's event mode). DC_COOP_MUTATE=daytrans_world_runs (twin): never held for it, as before.
+// coop-daycrash (the developer's rc4 playtest 11-18: "both players having that prompt open should have paused time"): a player in a question
+// or a waiting box is in a pause state as in a menu: the story start's ready box (its initiator) and its question (each asked player
+// while it is up on their screen), a door or gate call's question (asker and asked), the swap question, and a chest/gate/door prompt of
+// their own. By player (k: index, player k + 1), every present player alike (design for six). DC_COOP_MUTATE=question_clock_runs (twin):
+// none counts, as before (the town's clock and villagers ran on under a call both players had up).
+// (who plays this town: the game's player, the second walker while she is shown in it; the floor's actor table for more)
+static bool TownPlayerPresent(int k) {
+    return k == 0 || (k == 1 ? g_town.visible && g_town.body != nullptr : coop::ActorPresent(k));
+}
+
+static bool InQuestion(int k) {
+    if (Mutated("question_clock_runs")) {
+        return false;
+    }
+    return CoopWorldsQuestionHolds(k) || (k < 2 && coop::UsePromptOpen(k + 1)); // (the use prompts are kept for two players: coop_useprompt)
+}
+
 bool CoopTalkWorldHeld() {
-    if (!Linked() || CoopWorldsApart() || Mutated("world_never_held")) {
+    const bool watch = !Mutated("daytrans_world_runs");
+
+    // coop-joinload: not together (apart, or alone after every other copy's Leave) under a world slot's scene begun together, this copy's
+    // own watcher holds it, as retail's event mode holds the world for one (before, the clock ran under it once alone: x-town-daytrans-drop,
+    // 11-12, "held 31 of 351 ticks; the clock 2.5000 -> 2.6776"). Talks apart are retail's own talk mode, as before.
+    if (!Linked() || CoopWorldsApart()) {
+        return watch && !Mutated("world_never_held") && CoopDayTransHolds(0);
+    }
+    if (Mutated("world_never_held")) {
+        return false;
+    }
+
+    if (Mutated("world_held_by_one") && CoopTalkAny()) {
+        return true;
+    }
+    // coop-daycrash (the developer 11-18: in town, every player in a menu, a prompt, a question, a ready box or a call stops the time of day, so its change
+    // and scene never come under them; the villagers and the water go on): the clock holds with every present player in any pause state, menus
+    // and questions alone too (before, every player in a menu alone left this false: coop-pt1108c put the clock back after the step instead
+    // (EveryoneInMenus, two players), after the step had already crossed a period and asked for its change). DC_COOP_MUTATE=menus_alone_clock_runs
+    // (twin): every player in a menu or a question alone is not held, as before.
+    bool any = false;
+
+    for (int k = 0; k < coop::kMaxPlayers; k++) {
+        if (!TownPlayerPresent(k)) {
+            continue;
+        }
+        const bool watching = watch && CoopDayTransHolds(k);
+        const bool asked = InQuestion(k);
+
+        if (!g_talks[k].on && !coop::PlayerInMenu(k + 1) && !watching && !asked) {
+            return false;
+        }
+        any = any || g_talks[k].on || watching || (Mutated("menus_alone_clock_runs") ? false : coop::PlayerInMenu(k + 1) || asked);
+    }
+    return any;
+}
+
+// coop-daycrash (the developer 11-18): the town's villagers stand only while every present player talks or watches the time of day's scene (retail's
+// talk and event modes stand them for their one player); a player in a menu, a prompt or a question leaves them walking, as the water. Before,
+// the clock's rule held them (every player in a talk or a menu, opt8). DC_COOP_MUTATE=menus_hold_villagers (twin): the clock's rule, as before.
+static bool VillagersStand() {
+    if (Mutated("menus_hold_villagers")) {
+        return CoopTalkWorldHeld();
+    }
+    const bool watch = !Mutated("daytrans_world_runs");
+
+    if (!Linked() || CoopWorldsApart()) {
+        return watch && !Mutated("world_never_held") && CoopDayTransHolds(0);
+    }
+    if (Mutated("world_never_held")) {
         return false;
     }
     if (Mutated("world_held_by_one") && CoopTalkAny()) {
@@ -4874,18 +6428,17 @@ bool CoopTalkWorldHeld() {
     bool any = false;
 
     for (int k = 0; k < coop::kMaxPlayers; k++) {
-        // (who plays this town: the game's player, the second walker while she is shown in it; the floor's actor table for more)
-        const bool present = k == 0 || (k == 1 ? g_town.visible && g_town.body != nullptr : coop::ActorPresent(k));
-
-        if (!present) {
+        if (!TownPlayerPresent(k)) {
             continue;
         }
-        if (!g_talks[k].on && !coop::PlayerInMenu(k + 1)) {
+        const bool still = g_talks[k].on || (watch && CoopDayTransHolds(k));
+
+        if (!still) {
             return false;
         }
-        any = any || g_talks[k].on;
+        any = true;
     }
-    return any; // (every player in a menu alone: the menus' own rules, as before)
+    return any;
 }
 
 // Retail's live talk into slot k: its state and window to the slot, the live window closed for the next talk.
@@ -4893,6 +6446,9 @@ static void TalkTake(int k) {
     TalkFresh(k);
     TalkSwap(k);
     EdTalkWindowReset();
+    TalkSwap(k); // coop-wave2: the talk's window (now the slot's) at its talker's own Message Speed
+    TalkWindowRate(EditMes1, k + 1);
+    TalkSwap(k);
     g_talks[k].on = true;
     g_talks[k].tick = NetplayLinkTick();
 }
@@ -4928,6 +6484,8 @@ static void SplitTalkCircleTick() {
 }
 
 void CoopTalkIntoSlots() {
+    GameBodyLoad(); // coop-p1body: the game's player's own member's body, loaded whatever the town's mode
+    GameBodyEventTick();
     SplitTalkCircleTick(); // coop-pt1111i (apart too)
     DialogHooksOnce(); // coop-pt1111e
     CoopTownMenuQuestShopTick();
@@ -4980,7 +6538,7 @@ static void TalkDialogSaid(int k, bool was) {
 // bag and sounds, its camera. The game's player (k 0) is the resident: retail's TalkMode stand, its sounds on its copy. Player 2
 // (the town's second walker today) through her step's pad, bag, sound owner and view (CoopTownHerTalkStepIn). Returns
 // EdTalkMode's result, which the caller hands to CoopTalkOver.
-int CoopTalkStep(int k, CCharacter *resident, CCamera *room, CCameraFollow *camera, int view_mode, int *choice) {
+static int TalkStepRun(int k, CCharacter *resident, CCamera *room, CCameraFollow *camera, int view_mode, int *choice) {
     // opt8: retail's TalkMode keeps every villager drawn whole through a talk outdoors (alpha_step_override 128, near_camera off: the talk
     // camera comes in close and would fade them), for whoever talks; on every copy alike, as TalkMode ran. DC_COOP_MUTATE=talk_look_off (twin).
     if (EdInteriorFlag == 0 && !Mutated("talk_look_off")) {
@@ -5032,6 +6590,189 @@ int CoopTalkStep(int k, CCharacter *resident, CCamera *room, CCameraFollow *came
     sound.reset();
     TalkSwap(0);
     return result;
+}
+
+// coop-wave2 (localaudit 3.5, Jep-approved Wave 2: talks, questions and prompts each player's own): a talk in retail's own window runs
+// its window, its pages and its answers on its talker's copy alone, from the talker's agreed pad as before; every other copy runs only
+// the talk's world half (EdTalkWorldOnly: the two turning to each other, the talk camera and its view, the talker standing). When the
+// window ends on the talker's copy, what it ended with goes out as one command (kCmdTalkEnd: retail's result, its choice, the shop it
+// named, the villager's talk flags it set) and every copy ends the talk on that command's tick (EdTalkEnd, then the caller's result rule,
+// as before). Nothing of the window is shared state any more: its text speed is the talker's own, its cursor and pages never part the
+// copies, and the villager's talk flags (the save) and the shop reach the world only by the command, every copy on one tick. A talk in
+// the dialog framework's window (a quest's choices, whose providers write the world as they are chosen) stays in the lockstep as
+// before, till it hands back to retail's window ("Talk"). Apart, unlinked or in a catch-up's replay, as before.
+// DC_COOP_MUTATE=talk_lockstep (twin): every copy steps every talk's window from the agreed pads, as before.
+static bool TalkLocalFor(int k) {
+    if (!Linked() || CoopWorldsApart() || NetplayReplaying() || Mutated("talk_lockstep") || EdTalkStateBytes() > (int) sizeof g_talks[k].state) {
+        return false;
+    }
+    TalkSwap(k);
+    const bool retail = EdTalkInRetailWindow();
+    TalkSwap(k);
+    return retail;
+}
+
+// The villager's talk flags in the save (SV_GRD_NPC's flags, retail's "asked" bit a choice sets) of slot k's talk.
+static SV_GRD_NPC *TalkNpcRecord(int k) {
+    if (SaveData == nullptr) {
+        return nullptr;
+    }
+    TalkSwap(k);
+    const int id = EdNowTalkCharaInfoID();
+    TalkSwap(k);
+    return id >= 0 ? SaveData->GetGrdNPCData(MapNo, id) : nullptr;
+}
+
+static void ApplyTalkEnd(int player, const NetCommand &command, std::int64_t tick) {
+    const int slot = player - 1;
+
+    if (slot < 0 || slot >= coop::kMaxPlayers || !g_talks[slot].on) {
+        std::fprintf(stderr, "coop-talk: player %d's talk end at link tick %lld finds no talk of theirs: ignored\n", player, (long long) tick);
+        return;
+    }
+    TalkSlot &talk = g_talks[slot];
+
+    talk.end_due = true;
+    talk.end_result = command.a & 0x0F;
+    talk.end_npc_flags = command.a >> 4;
+    talk.end_shop = (int) (std::int16_t) command.b;
+    talk.end_choice = (int) (std::int32_t) command.c;
+    std::fprintf(stderr, "coop-talk: player %d's talk end (result %d, choice %d, shop %d, talk flags %d) applies on player %d's copy at link tick %lld\n", player,
+                 talk.end_result, talk.end_choice, talk.end_shop, talk.end_npc_flags, NetplayLocalPlayer(), (long long) tick);
+}
+
+// Every copy, the end command's tick: what EdTalkMode's ending did on the talker's copy, on every copy, then its result to the caller.
+static int TalkEndApplied(int k, CCamera *room, CCameraFollow *camera, int *choice) {
+    TalkSlot &talk = g_talks[k];
+
+    talk.end_due = false;
+    g_talk_own[k] = TalkOwn{};
+    if (SV_GRD_NPC *npc = TalkNpcRecord(k); npc != nullptr && talk.end_npc_flags != 0) {
+        npc->flags |= talk.end_npc_flags;
+    }
+    if (k != 0) {
+        CoopTownHerTalkStepIn(room);
+        EdTalkEnd(CoopTownHerTalkCamera());
+        CoopTownHerTalkStepOut();
+    } else {
+        TalkSwap(0);
+        EdTalkEnd(camera);
+        TalkSwap(0);
+    }
+    if (talk.end_result == 2 || talk.end_result == 3) {
+        EdSetShopNo(talk.end_shop);
+    }
+    *choice = talk.end_choice;
+    std::fprintf(stderr, "coop-talk: player %d's talk ends on every copy at link tick %lld (result %d, %lld ticks), its window run on its own copy\n", k + 1,
+                 (long long) NetplayLinkTick(), talk.end_result, (long long) (NetplayLinkTick() - talk.tick));
+    return talk.end_result;
+}
+
+// coop-wave2 (Jep 11-18: the quest-choice talks local too): a talk in the dialog framework's window (a quest's choices, whose providers
+// write the world as they are chosen) steps on every copy as before, but takes no pad of any copy's own: its talker's copy sends each
+// press (Up, Down, Cross, Circle, as DialogNpcStep reads them) as one command (kCmdDialogPick, choice -1, as a pointer's wheel or right
+// button goes), which presses it on every copy on its tick (ApplyDialogPick). So the session's selection, pages and choices change only
+// by commands. DC_COOP_MUTATE=dialog_pad_lockstep (twin): the agreed pad pressed on every copy, as before.
+static int g_dialog_pad_slot = -1; // the slot whose framework talk steps now, linked together; -1 none (this copy's own, never state)
+
+static bool DialogPick(int choice, int pad_down);
+static bool DialogPad(int pad_down) {
+    const int k = g_dialog_pad_slot;
+
+    if (k < 0) {
+        return false;
+    }
+    if (pad_down != 0 && k == coop::ActorLocalIndex()) {
+        DialogPick(-1, pad_down);
+        std::fprintf(stderr, "coop-talk: player %d's dialog press %04x on its own copy at link tick %lld: sent\n", k + 1, (unsigned) pad_down,
+                     (long long) NetplayLinkTick());
+    }
+    return true;
+}
+
+int CoopTalkStep(int k, CCharacter *resident, CCamera *room, CCameraFollow *camera, int view_mode, int *choice) {
+    if (!TalkLocalFor(k)) {
+        if (g_talks[k].end_due) { // (an end command that came as the talk left retail's window: cannot be, said)
+            g_talks[k].end_due = false;
+            std::fprintf(stderr, "coop-talk: player %d's talk end came with the talk back in the lockstep: dropped\n", k + 1);
+        }
+        g_dialog_pad_slot = Linked() && !CoopWorldsApart() && !NetplayReplaying() && !Mutated("dialog_pad_lockstep") ? k : -1;
+        const int result = TalkStepRun(k, resident, room, camera, view_mode, choice);
+
+        g_dialog_pad_slot = -1;
+        return result;
+    }
+    if (g_talks[k].end_due) {
+        return TalkEndApplied(k, room, camera, choice);
+    }
+    TalkOwn &own = g_talk_own[k];
+
+    if (own.talk != g_talks[k].tick) {
+        own = TalkOwn{};
+        own.talk = g_talks[k].tick;
+    }
+    // coop-wave2: the villager stands in the world on every copy alike through a local talk; its talking is drawn only (TalkPoseBegin).
+    TalkSwap(k);
+    CNPCharacter *const villager = EdNowTalkChara();
+    TalkSwap(k);
+    const auto stand = [&] {
+        if (villager != nullptr && !Mutated("talk_pose_off")) {
+            villager->SetMotion(0, 0);
+        }
+    };
+
+    if (k != coop::ActorLocalIndex() || own.sent) {
+        // Another player's talk, or this copy's own sent and waiting for its command's tick: the world half.
+        EdTalkWorldOnly(true);
+        TalkStepRun(k, resident, room, camera, view_mode, choice);
+        EdTalkWorldOnly(false);
+        stand();
+        *choice = 0;
+        if (static long long said[coop::kMaxPlayers] = {-1, -1, -1, -1, -1, -1}; said[k] != g_talks[k].tick && !own.sent) {
+            said[k] = g_talks[k].tick;
+            std::fprintf(stderr, "coop-talk: player %d's talk window runs on its own copy; player %d's copy steps its world half (link tick %lld)\n", k + 1,
+                         NetplayLocalPlayer(), (long long) NetplayLinkTick());
+        }
+        return 0;
+    }
+    // This copy's own talk: its window, from its player's agreed pad. What the window writes to the world is held back for the command.
+    SV_GRD_NPC *const npc = TalkNpcRecord(k);
+    const int         flags_before = npc != nullptr ? npc->flags : 0;
+    const int         shop_before = EdGetShopNo();
+    // coop-talkcam (the developer's rc4 playtest: "when you end a dialogue with an npc, the camera jumps for a single frame"): the window's end here
+    // is not yet the talk's; its camera holds the talk's view till EdTalkEnd turns its follow on with the end command (TalkEndApplied).
+    // The close's follow stepped that one frame toward the camera's old follow point, the next tick's world half put it back.
+    // DC_COOP_MUTATE=talk_end_follow_early (twin): the window's close turns the follow on, as before.
+    EdTalkEndDefer(!Mutated("talk_end_follow_early"));
+    const int result = TalkStepRun(k, resident, room, camera, view_mode, choice);
+    EdTalkEndDefer(false);
+
+    if (villager != nullptr) { // coop-wave2: what the window asked of the villager is drawn only; the world's villager stands
+        own.villager_motion = villager->motion_no;
+        stand();
+    }
+    if (npc != nullptr && npc->flags != flags_before) {
+        own.npc_flags |= (npc->flags & ~flags_before) & 0x0F;
+        npc->flags = flags_before;
+    }
+    if (result == 0) {
+        return 0;
+    }
+    const int shop = EdGetShopNo();
+
+    EdSetShopNo(shop_before);
+    NetCommand command;
+
+    command.kind = kCmdTalkEnd;
+    command.a = (std::uint8_t) ((result & 0x0F) | own.npc_flags << 4);
+    command.b = (std::uint16_t) shop;
+    command.c = (std::uint32_t) *choice;
+    NetplayQueueCommand(command);
+    own.sent = true;
+    *choice = 0;
+    std::fprintf(stderr, "coop-talk: player %d's talk window ends on its own copy at link tick %lld (result %d): its end sent\n", k + 1,
+                 (long long) NetplayLinkTick(), result);
+    return 0;
 }
 
 // Slot k's talk ended with result (EdTalkMode's). For the game's player retail's result rule is the caller's (2 its shop, 3 the
@@ -5114,12 +6855,14 @@ static void ApplyDialogPick(int player, const NetCommand &command, std::int64_t 
         TalkSwap(slot);
     }
     const bool taken = choice < 0 || dc::dialog::SelectChoice(choice);
+    const bool session_was = dc::dialog::IsSessionActive(); // coop-wave2: a press may end the session here, outside the talk's step
     {
         SoundOwner sound(player, true); // (its cursor and confirm sounds on its clicker's copy alone)
 
         dc::dialog::DialogNpcPress((int) command.c);
     }
     if (slotted) {
+        TalkDialogSaid(slot, session_was);
         TalkSwap(slot);
     }
     std::fprintf(stderr, "coop-talk: player %d's dialog pick %d (a pointer's click) at link tick %lld: %s, buttons %04x\n", player, choice, (long long) tick,
@@ -5134,6 +6877,8 @@ static void DialogHooksOnce() {
     }
     done = true;
     NetplaySetCommandHandler(kCmdDialogPick, ApplyDialogPick);
+    dc::dialog::DialogNpcSetPadHook(DialogPad); // coop-wave2
+    NetplaySetCommandHandler(kCmdTalkEnd, ApplyTalkEnd); // coop-wave2
     if (!Mutated("dialog_hover_shared")) {
         dc::dialog::DialogNpcSetCoopHooks(DialogPick, DialogWithOwn, DialogOwns);
     }
@@ -5272,6 +7017,40 @@ void CoopTalkHudHiddenEnd(bool hidden) {
 unsigned char *CoopTownTalksBytes(std::size_t *size) {
     *size = sizeof g_talks;
     return reinterpret_cast<unsigned char *>(&g_talks[0]);
+}
+
+// coop-wave2 (talks local): a talk's window, pages and answers in retail's window are its talker's copy's alone, so a state set taken
+// from another copy (a resync, a merge's set) carries that copy's stale window of it. The talker's copy keeps its own window and talk
+// state across the apply when the set carries the same talk (its slot's tick); its end, once sent, stays sent. DC_COOP_MUTATE=talk_set_own
+// (twin): the set's window taken, as before.
+namespace {
+std::optional<TalkSlot> g_talk_kept;
+}
+
+void CoopTownTalkKeepBefore() {
+    const int own = coop::ActorLocalIndex();
+
+    g_talk_kept.reset();
+    if (own >= 0 && own < coop::kMaxPlayers && g_talks[own].on && TalkLocalFor(own) && !Mutated("talk_set_own")) {
+        g_talk_kept = g_talks[own];
+    }
+}
+
+void CoopTownTalkKeepAfter() {
+    const int own = coop::ActorLocalIndex();
+
+    if (!g_talk_kept.has_value() || own < 0 || own >= coop::kMaxPlayers) {
+        return;
+    }
+    TalkSlot &slot = g_talks[own];
+
+    if (slot.on && slot.tick == g_talk_kept->tick) {
+        std::memcpy(slot.state, g_talk_kept->state, sizeof slot.state);
+        std::memcpy(slot.window, g_talk_kept->window, sizeof slot.window);
+        std::fprintf(stderr, "coop-talk: player %d's own talk window kept across the state set's apply (its talk of link tick %lld)\n", own + 1,
+                     (long long) slot.tick);
+    }
+    g_talk_kept.reset();
 }
 
 // coop-pt1109f (Jep 11-09: one player leaving by a door must not end the other's dialog, on either copy, either player): the reverse of CarriedTalkBecomesHers. Her talk beside the walk
@@ -5591,7 +7370,7 @@ static void CaveDoorSquares() {
     const bool  his_open = coop::TownDoorPickOpenFor(walker);
 
     if (his_open_was && !his_open) {
-        data[0].input.status.button &= ~(kInputCross | kInputCircle | kInputTriangle);
+        CoopWorldsPadTake(kInputCross | kInputCircle | kInputTriangle); // coop-padtake: held, it is no new press the tick after
     }
     his_open_was = his_open;
 
@@ -5620,7 +7399,7 @@ static void CaveDoorSquares() {
 
     if (his_press && EdMoveCharaInfo.event_ready != 0 && AtCaveDoor(EdMoveCharaInfo.param) && !coop::TownDoorPickOpenFor(walker) && !CoopTownCaveActs(walker) &&
         !(opened && apart)) {
-        data[0].input.status.button &= ~kInputSquare;
+        CoopWorldsPadTake(kInputSquare); // coop-padtake: held, it is no new press the tick after
         if (!CoopWorldsCaveDoorRefused(walker)) { // coop-doorgate: B1's story needs both players
             if (opened) {
                 CaveSquareWalksIn(walker);
@@ -5639,6 +7418,7 @@ static void CaveDoorSquares() {
     ED_EVENT_PARAM param;
 
     if (her_press && !coop::TownDoorPickOpenFor(2) && !CoopTownCaveActs(2) && !coop::PlayerInMenu(2, coop::kActorMenuTown) && !CoopP2TownPaused() && !CoopP2Building() && CoopTownHerPadFree() &&
+        (!CoopWorldsQuestionHolds(1) || CoopWorldsMutatedQuestionCross()) && // (coop-askhold: not while a question holds her)
         EditMapInfo != nullptr &&
         CoopTownPartnerPose(pos, rot) && EdGetEvent(EditMapInfo->work.events.points, EditMapInfo->event_count, &param, pos, rot, NowTime) != 0 &&
         AtCaveDoor(param) && !CoopWorldsCaveDoorRefused(2)) {
@@ -5684,6 +7464,17 @@ void CoopTownDrawPartnerMark(CFrame *mark) {
                                                   (AtCaveDoor(param) || HerSignMark(param))
                                             : CoopTownIndoorWalks() && !g_room_event.on && !Mutated("roomevent_nomark") &&
                                                   HerRoomPickupAt(g_room_event.program) >= 0 && CoopTownPartnerPose(pos, rot));
+
+    // (coop-xiaogap: the room's "!" said once per event it is over: x-room-cat's line)
+    if (static int room_said = -1; drawn && EdInteriorFlag != 0) {
+        const int event = HerRoomPickupAt(g_room_event.program);
+
+        if (event != room_said) {
+            room_said = event;
+            std::fprintf(stderr, "coop-town: her \"!\" over her head at the room's event %d (link tick %lld)\n", event, (long long) NetplayLinkTick());
+            std::fflush(stderr);
+        }
+    }
 
     if (drawn) {
         pos[1] += 3.0f + g_town.body->body_height + 0.5f * sinf(bob);
@@ -5813,7 +7604,11 @@ static bool PartnerOpenBox(const ED_EVENT_PARAM &param) {
 
     const int     item = param.point->side;
     const int     item_no = TransWepNo(item);
-    const int     refused = coop::PartnerKeeps(item_no) ? coop::PartnerCheckItemGet(item_no) : EdCheckGetItem(item);
+    // coop-bagoverflow: retail's box refuses a full bag (EdCheckGetItem, DontGetItemMes: ebattle.cpp's walk); hers by her own bag's room.
+    // DC_COOP_MUTATE=townbox_no_room_check (twin): no check for her bag, and a bag item that does not fit went on into the party's
+    // pack (player 1's bag), as the fallback below did before.
+    const bool    keeps = coop::PartnerKeeps(item_no);
+    const int     refused = keeps ? (Mutated("townbox_no_room_check") ? 0 : coop::PartnerCheckItemGet(item_no)) : EdCheckGetItem(item);
     sceVu0FVECTOR at = {param.position[0], param.position[1], param.position[2], 1.0f};
 
     {
@@ -5836,9 +7631,11 @@ static bool PartnerOpenBox(const ED_EVENT_PARAM &param) {
         attach = rand() % 3 + 1; // (both copies, the same tick: the agreed generator)
     }
 
+    // (coop-bagoverflow: a bag item of hers goes into her bag only, never on into player 1's; story items, weapons and
+    // attachments are the party's, by retail's own give)
     const bool bag = attach <= 0 && coop::PartnerGetItem(item_no, -1, false);
 
-    if (!bag) {
+    if (!bag && (!keeps || attach > 0 || Mutated("townbox_no_room_check"))) {
         EdGetItem(item, param.point->linked_value, attach);
     }
 
@@ -6018,6 +7815,16 @@ static void TownBoxWarpForTest() {
     std::fprintf(stderr, "coop: test: town box warp at step %d: player %d to (%.1f %.1f %.1f) by the box at (%.1f %.1f %.1f) (point %d of %d boxes, flag %d), %s\n",
                  steps, who, spot[0], spot[1], spot[2], best_at[0], best_at[1], best_at[2], best_no, boxes, points[best_no].completion_flag,
                  finds ? "the game finds it from there" : "NOT found from there");
+    // coop-bagoverflow (w-town-chest -Full): DC_COOP_TOWN_BOX_FULL=1 fills player 2's own bag with bread at the warp, both copies
+    if (TestEnvInt("DC_COOP_TOWN_BOX_FULL", 0) != 0 && who == 2) {
+        int put = 0;
+
+        while (put < 300 && coop::PartnerGetItem(ITEM_BREAD, -1, false)) {
+            put++;
+        }
+        std::fprintf(stderr, "coop: test: player 2's bag filled with item %d (%d put): %s\n", (int) ITEM_BREAD, put,
+                     coop::PartnerCheckItemGet(ITEM_BREAD) != 0 ? "full" : "FAIL not full");
+    }
     std::fflush(stderr);
 }
 
@@ -6133,10 +7940,27 @@ static void AtMapEventForTest() {
     ED_EVENT_POINT *points = EditMapInfo->work.events.points;
     int             at = -1;
 
+    // (coop-owed1112: DC_COOP_TEST_MAP_EVENT_NO=N, the point of the town's event N instead of the first: a chosen board, x-eventslots
+    // -Board, as Matataki's two fishing boards 13 and 14 and Muska Lacka's 12)
+    static const int event_no = TestEnvInt("DC_COOP_TEST_MAP_EVENT_NO", -1);
+
+    // (and DC_COOP_TEST_MAP_EVENT_FLAGS=F1/F2/...: game flags the chosen board's script asks for set first, both copies alike: Matataki's
+    // board 13, e02 program 13, runs only once game flag 20 is set, a story's progress the debug start's town lacks)
+    if (static const char *const flags = TestEnv("DC_COOP_TEST_MAP_EVENT_FLAGS"); flags != nullptr && SaveData != nullptr && tries == 0) {
+        for (const char *f = flags; *f != 0; f = std::strchr(f, '/') != nullptr ? std::strchr(f, '/') + 1 : f + std::strlen(f)) {
+            SaveData->SetGameFlag(std::atoi(f), 1);
+            std::fprintf(stderr, "coop: test: at the map event: game flag %d set (link tick %lld)\n", std::atoi(f), (long long) NetplayLinkTick());
+        }
+    }
+
     for (int i = 0; points != nullptr && i < EditMapInfo->event_count && at < 0; i++) {
-        at = points[i].event_type == ED_EVENT_POINT_EVENT && points[i].side > 0 ? i : -1;
+        at = points[i].event_type == ED_EVENT_POINT_EVENT && points[i].side > 0 && (event_no < 0 || points[i].side == event_no) ? i : -1;
     }
     if (at < 0) {
+        // (coop-windmill: the chosen event's part may come down a tick after the load, PlacePartTestTick: both copies look alike each tick)
+        if (event_no > 0 && ++tries < 120) {
+            return;
+        }
         done = true;
         std::fprintf(stderr, "coop: test: at the map event: none in this town\n");
         return;
@@ -6228,9 +8052,11 @@ static void AtMapEventForTest() {
             g_town.body->frame->SetRotation(0.0f, face[1], 0.0f);
             g_town.body->SetRotation(0.0f, face[1], 0.0f);
         }
-        std::fprintf(stderr, "coop: test: at the map event: %s to (%.1f %.1f %.1f) by point %d (event %d) at (%.1f %.1f %.1f), link tick %lld, %s\n",
+        std::fprintf(stderr, "coop: test: at the map event: %s to (%.1f %.1f %.1f) by point %d (event %d) at (%.1f %.1f %.1f), link tick %lld, %s (found event %d; point: part %d, progress %d/%d, hours %.2f-%.2f, now %.2f, flag %d)\n",
                      p == 1 ? "Toan" : "player 2", spot[0], spot[1], spot[2], at, points[at].side, param.position[0], param.position[1], param.position[2],
-                     (long long) NetplayLinkTick(), off != 0.0f && !both_reach ? (finds ? "IN its reach" : "out of its reach") : finds ? "the game finds it from there" : "NOT found from there");
+                     (long long) NetplayLinkTick(), off != 0.0f && !both_reach ? (finds ? "IN its reach" : "out of its reach") : finds ? "the game finds it from there" : "NOT found from there",
+                     finds && check.point != nullptr ? check.point->side : -1, points[at].parts_no, points[at].minimum_progress, points[at].secondary_progress, points[at].start_time,
+                     points[at].end_time, NowTime, points[at].completion_flag);
     }
     coop::InventoryTestSeed(); // coop-scriptmenus: DC_COOP_BAGSEED (x-town-sign: the fishing rod the board's script asks for), both copies alike
     if (static const int points = TestEnvInt("DC_COOP_TEST_FISHING_POINTS", -1); points >= 0 && SaveData != nullptr) {
@@ -6238,7 +8064,8 @@ static void AtMapEventForTest() {
         std::fprintf(stderr, "coop: test: fishing points %d\n", points);
     }
     coop::FishTestSeed(); // coop-eventslots: player 2's own points (DC_COOP_TEST_FISHING_POINTS_P2)
-    coop::FishSwitchSelfTest(TestEnv("DC_COOP_TEST_FISH_SWITCH")); // coop-eventslots: the setting's switch, both ways (x-eventslots fpswitch)
+    coop::ProfileBagsFileSelfTest(TestEnv("DC_COOP_TEST_BAGS_FILE")); // candreds2: the bags' file by player (x-eventslots bagsfile)
+    coop::Save6SelfTest(TestEnv("DC_COOP_TEST_SAVE6")); // save6: the slot's co-op files for 6 players (x-eventslots save6)
     std::fflush(stderr);
 }
 
@@ -6347,8 +8174,20 @@ static void EventPointsForTest() {
     }
 }
 
+// coop-fishing3: retail's fishing mode had no co-op step, so a catch there (a copy fishing apart: hers in town while he is in a
+// house) reached the fisher's own record only when they stopped fishing or the pair merged, and apart the other copy heard of
+// none of it till then (Jep 11-18's end-to-end catch check). Together the mode never stays (CoopFishingWalkIn). Cause: FishPoolsStep
+// ran from CoopTownStep alone (the walk's and events' steps). DC_COOP_MUTATE=fishpools_not_while_fishing (twin): not here, as before.
+void CoopTownFishingModeStep() {
+    CoopPondTick(); // coop-pondfish: retail's own fishing mode (apart or alone): the town's ponds step as in its walk
+    if (!Mutated("fishpools_not_while_fishing")) {
+        coop::FishPoolsStep();
+    }
+}
+
 void CoopTownStep() {
     coop::BagSizeStep(); // coop-bags
+    coop::FishPoolsStep(); // coop-fishpools: the save's fishing record as the setting and the players in the game are now
     EventPointsForTest(); // coop-pt1106-batch
     CoopEventSlotsStep(); // coop-eventslots
     AtMapEventForTest();  // coop-pt1106-batch
@@ -6369,6 +8208,8 @@ void CoopTownStep() {
                      (int) key_lock, EdCheckViewMode(), (int) CoopP2TownMenuOn());
     }
     XiaoAlwaysJoined(); // coop-p2skin
+    BodyBudgetForTest(); // coop-p1body
+    GameBodyStep();      // coop-p1body
 
     // coop-camjump: after the game's walk step that follows the split (this copy's own walk runs the split, then this), how far
     // that step took the eye her screen was handed, and the circle it left (w-town-apart -SplitCam decides on this line).
@@ -6393,7 +8234,10 @@ void CoopTownStep() {
 
     // coop-machotalk: her own talk outdoors stands her (EdTalkMode turns her to the villager and steps her, CoopTownHerTalkStepIn),
     // shown where it has her, as in a room (CoopTownInteriorStep). coop-eventslots: her own event in her parked slot too (its main character).
-    if ((g_room_event.on || CoopEventSlotParked(1) || CoopFishingOn(1)) && !CoopWorldsApart() && g_town.body != nullptr) {
+    // coop-daytrans: or held while she watches the time of day's scene (her body stood by its tick, CoopDayTransTick).
+    // (coop-joinload, daytrans2's owed item, design for three: by the body's player, kTownBodyPlayer, not a literal index)
+    if ((g_room_event.on || CoopEventSlotParked(kTownBodyPlayer - 1) || CoopFishingOn(kTownBodyPlayer - 1) || CoopDayTransHoldsPlayer(kTownBodyPlayer)) && !CoopWorldsApart() &&
+        g_town.body != nullptr) {
         CoopFishingStepOthers(); // coop-eventslots: her own fishing, where her walk would run
         g_town.body->GetPosition(g_town.pos);
         g_town.pos[3] = 1.0f;
@@ -6573,9 +8417,30 @@ bool CoopTownSceneWatchedTogether() {
     return EdInteriorFlag != 0 ? g_indoor.mode == 4 /* ED_IN_MODE_EVENT */ : ::GameMode == ED_MODE_EVENT;
 }
 
+// coop-storywarp: a story scene every player watches together (its screens are everyone's): in a room the story scene (SceneRuns:
+// its arrival); in town the town's event that is no player's own.
+bool CoopTownStorySceneTogether() {
+    if (!NetplayHasPlayer() || CoopWorldsApart() || mode != GAME_MODE_EDIT) {
+        return false;
+    }
+    return EdInteriorFlag != 0 ? SceneRuns() : ::GameMode == ED_MODE_EVENT && CoopTownOwnTownEvent() == 0;
+}
+
 // Each room step: the scene's start and end on this copy, with how many steps she was held through it (the tests read it).
 // coop-mayorhide test hook (DC_COOP_TEST_ROOM_PEOPLE=1, w-indoor -Case mayorstays): together in a room, every 30 link ticks, the
 // room's people drawn (the mayor, i01h06) and whether her room event runs, on both copies.
+static void RoomPlacesTestLine() {
+    // coop-xiaogap test lines (DC_COOP_TEST_ROOM_PLACES=N, x-room-cat): together in a room, every N link ticks, both players' places, the
+    // room's mode and whether her event runs, on every copy.
+    if (static const int every = TestEnvInt("DC_COOP_TEST_ROOM_PLACES", -1); every > 0 && NetplayLinkTick() % every == 0 && Chara != nullptr && !CoopWorldsApart()) {
+        sceVu0FVECTOR him;
+
+        Chara->GetPosition(him);
+        std::fprintf(stderr, "coop-town: room places at link tick %lld: mode %d her event %d p1 (%.0f %.0f) p2 (%.0f %.0f)\n", (long long) NetplayLinkTick(), g_indoor.mode,
+                     g_room_event.on ? g_room_event.event : -1, him[0], him[2], g_town.pos[0], g_town.pos[2]);
+    }
+}
+
 static void RoomPeopleTestLine(int mode) {
     static const bool on = TestEnvOn("DC_COOP_TEST_ROOM_PEOPLE");
 
@@ -6611,6 +8476,54 @@ static void SceneHoldLog() {
     }
 }
 
+// coop-latejoinscene (the developer's 11-18 playtest, open: P2 walked late into P1's house story scene; P1's first Cross after her merge
+// missed on one copy, the screens showed different lines from then on, and one copy ended the scene a Cross early (OUT OF SYNC
+// at 7500, the saves alike but for the town clock). Not reproduced headless in 11 runs. Always on, so the next playtest says
+// which copy missed it): in a room's story scene (apart too: a catch-up's replay ticks), each of the event's message windows
+// whenever it changes (its message, its page, waiting on a page or shown whole, open or shut), and each Cross the scene's script
+// can read (the game pad's down edge), with the link tick and whether the tick is a catch-up's replay or apart.
+// One line a change: a few a page. DC_COOP_TEST_SCENE_MES=1 (tests): each character of a page's text too, the test's own lines.
+static void SceneMesLines() {
+    static const bool test = TestEnvOn("DC_COOP_TEST_SCENE_MES");
+    static std::uint32_t was[8] = {};
+
+    if (EdInteriorFlag == 0 || g_indoor.mode != 4 || EdInSceneEvent() <= 0) {
+        for (std::uint32_t &w : was) {
+            w = 0;
+        }
+        return;
+    }
+    if (GamePad.Down(PAD_CROSS) != 0) {
+        std::fprintf(stderr, "coop-town: scene %d: the game pad's Cross at link tick %lld on player %d's copy (replay %d, apart %d)\n", EdInSceneEvent(),
+                     (long long) NetplayLinkTick(), NetplayLocalPlayer(), NetplayReplaying() ? 1 : 0, CoopWorldsApart() ? 1 : 0);
+    }
+    for (int i = 0; i < 8; i++) {
+        ClsMes *mes = EdEventInfo.messages[i];
+
+        if (mes == nullptr) {
+            continue;
+        }
+        const int           state = mes->State();
+        const std::uint32_t now = 1u + ((std::uint32_t) mes->mes_made * 2654435761u ^ (std::uint32_t) mes->text_from * 40503u ^ (std::uint32_t) state * 977u ^
+                                        (test ? (std::uint32_t) mes->text_no * 31u : 0u));
+
+        if (now == was[i]) {
+            continue;
+        }
+        was[i] = now;
+        if (test) {
+            std::fprintf(stderr, "coop-town: test: scene window %d at link tick %lld on player %d's copy: message %d, page from %d, text %d of %d, waits %d, fade %.2f, blink %d, "
+                                 "cross %d, replay %d\n",
+                         i, (long long) NetplayLinkTick(), NetplayLocalPlayer(), mes->mes_made, mes->text_from, mes->text_no, mes->text_len, mes->waiting, mes->fade,
+                         mes->blink, GamePad.Down(PAD_CROSS) != 0 ? 1 : 0, NetplayReplaying() ? 1 : 0);
+        } else {
+            std::fprintf(stderr, "coop-town: scene %d window %d at link tick %lld on player %d's copy: message %d, page from %d, state %d, text %d of %d (replay %d, apart %d)\n",
+                         EdInSceneEvent(), i, (long long) NetplayLinkTick(), NetplayLocalPlayer(), mes->mes_made, mes->text_from, state, mes->text_no, mes->text_len,
+                         NetplayReplaying() ? 1 : 0, CoopWorldsApart() ? 1 : 0);
+        }
+    }
+}
+
 bool CoopTownInteriorStep(CMapParts *parts, int parts_count, CCameraFollow *room, bool markers, int mode, bool steps) {
     g_indoor.on = true;
     g_indoor.parts = parts;
@@ -6630,7 +8543,9 @@ bool CoopTownInteriorStep(CMapParts *parts, int parts_count, CCameraFollow *room
     HisTalkBesideHers(talk_mode); // coop-talks2
     TalkHiddenSaid(); // opt8
     SceneHoldLog(); // coop-scenejoin
+    SceneMesLines(); // coop-latejoinscene
     RoomPeopleTestLine(mode); // coop-mayorhide
+    RoomPlacesTestLine(); // coop-xiaogap
 
     // coop-padswap test hook (DC_COOP_TEST_PAD_PROBE): where Toan and she stand as each phase of the pad probe starts and ends.
     if (static int probe_was = 0; NetplayPadProbePhase() != probe_was && Chara != nullptr) {
@@ -6768,6 +8683,11 @@ bool CoopTownIndoorPose(float *pos) {
 
 bool CoopTownIndoorWalks() {
     return EdInteriorFlag != 0 && g_indoor.mode == 0; // ED_IN_MODE_WALK
+}
+
+// coop-townally: the town (or the room) walks and nobody talks: the trade question asked from a town's Allies page steps (coop_prompt).
+bool CoopTownQuestionFree() {
+    return (EdInteriorFlag == 0 ? ::GameMode == ED_MODE_WALK : CoopTownIndoorWalks()) && !CoopTalkAny();
 }
 
 // coop-stage4 4c: the room's menu went on as a local one: its walk from now on, not from the room's next step (the take may come this tick).
@@ -6957,6 +8877,17 @@ void CoopTownTownEventStarts(int event_no) {
     std::fflush(stderr);
 }
 
+// coop-fishing3 (Jep 11-18, the fishing clip: "P1's screen flashes black when P2 starts fishing"): a player's own town event can end
+// with its fade still running: Norune's board ends _GOTO_FISHING, _FADE_IN 60, so its player starts fishing under a fade from
+// black. Through the event its fade is drawn out of sight on the other's copy (CoopTownOwnEventHiddenBegin); once the event is
+// over the fade was nobody's, and the other player's screen went black and faded in with it (his frame brightness 118 -> 3 on her
+// fishing's first tick, back over 60 ticks). Cause: the hiding asked only whether the town was in an event. Now the fade a
+// player's own event leaves running stays theirs until it ends: it steps on every copy as before (CoopTownFadeStepped) and is
+// drawn out of sight on the others'. DC_COOP_MUTATE=event_fade_left_shown (twin): drawn on every copy, as before.
+static int g_fade_left_owner = 0;  // the player whose own event's closing fade still runs (0 none)
+static int g_fade_left_shown = 0;  // frames this copy drew it in sight, and out of sight
+static int g_fade_left_hidden = 0;
+
 int CoopTownOwnTownEvent() {
     return ::GameMode == ED_MODE_EVENT && EdInteriorFlag == 0 ? g_own_event_reader : 0;
 }
@@ -6989,6 +8920,12 @@ static void OwnTownEventTick() {
     g_beside_moved = 0;
     g_own_event_end_reader = g_own_event_reader;
     g_own_event_end_tick = NetplayLinkTick();
+    // coop-fishing3: its closing fade, still running, stays its reader's (CoopTownEventFadeLeftHiddenBegin)
+    float fade[4];
+
+    ::EdGetFadeColor(fade);
+    g_fade_left_owner = fade[3] > 0.0f ? g_own_event_reader : 0;
+    g_fade_left_shown = g_fade_left_hidden = 0;
     g_own_event_reader = 0;
 }
 
@@ -7089,6 +9026,35 @@ bool CoopTownOwnEventHiddenBegin(bool windows) {
     return true;
 }
 
+// coop-fishing3: around the fade's draw outside event mode (editloop.cpp's EditMainDraw): the fade an own event left running is
+// its reader's (CoopTownOwnTownEvent's notes above it); drawn out of sight on the other's copy. Said when that fade ends.
+bool CoopTownEventFadeLeftHiddenBegin() {
+    float fade[4];
+
+    ::EdGetFadeColor(fade);
+    if (g_fade_left_owner != 0 && fade[3] <= 0.0f) {
+        std::fprintf(stderr, "coop-town: player %d's own event's closing fade over at link tick %lld: drawn %d frames in sight, %d out of sight on player %d's copy\n",
+                     g_fade_left_owner, (long long) NetplayLinkTick(), g_fade_left_shown, g_fade_left_hidden, NetplayLocalPlayer());
+        g_fade_left_owner = 0;
+    }
+    const int local = NetplayLocalPlayer();
+
+    if (g_fade_left_owner == 0) {
+        return false;
+    }
+    if (local == 0 || local == g_fade_left_owner || Mutated("event_fade_left_shown")) {
+        g_fade_left_shown++;
+        return false;
+    }
+    g_fade_left_hidden++;
+    if (g_talk_hidden == gfx::kNullTexture) {
+        g_talk_hidden = gfx::CreateRenderTarget(640, 480, true);
+    }
+    g_talk_previous = gfx::CurrentRenderTarget();
+    gfx::SetRenderTarget(g_talk_hidden);
+    return true;
+}
+
 // coop-pt1108f (Jep's 11-09 playtest: the clock gone from his screen through her sign): the running own town event is another player's, so this copy's
 // player walks on through it and sees the town's clock (retail hides it in event mode: one player). (coop-scriptmenus: its script's menus no longer
 // run on this copy at all, coop_scriptmenu.cpp; the old 'out of sight' twin scriptmenu_shown went with them.)
@@ -7176,12 +9142,67 @@ static void TownTalkApartForTest() {
     phase = toward ? 1 : 3;
 }
 
+// coop-storywarp test line (DC_COOP_DEBUG; x-door-finished -Case door): the first 30 link ticks the town walks after a scene or a room
+// (a story scene's end: Jep's rc1 playtest had P2 floating there, then dropping), each player's height against the ground under them,
+// on every copy: the row reads that both stand on it and do not fall.
+static void GroundAfterSceneTick() {
+    static bool         was_scene = false;
+    static std::int64_t from = -1;
+
+    static std::int64_t last = -1;
+
+    if (!CoopDebug() || mode != GAME_MODE_EDIT || !Linked() || CoopWorldsApart()) {
+        return;
+    }
+    // (the town's step is not called in a room: link ticks it missed are a room or its scene, now behind)
+    if (last >= 0 && NetplayLinkTick() - last > 1) {
+        was_scene = true;
+    }
+    last = NetplayLinkTick();
+    if (EdInteriorFlag != 0 || ::GameMode == ED_MODE_EVENT) {
+        was_scene = true;
+        from = -1;
+        return;
+    }
+    if (::GameMode != ED_MODE_WALK || Chara == nullptr) {
+        return;
+    }
+    if (was_scene) {
+        was_scene = false;
+        from = NetplayLinkTick();
+    }
+    if (from < 0 || NetplayLinkTick() - from >= 30) {
+        return;
+    }
+
+    float toan[4];
+    float partner[4];
+    float rot[4];
+    float ground = 0.0f;
+
+    Chara->GetPosition(toan);
+    const bool his = TownGroundAt(toan[0], toan[1], toan[2], &ground, nullptr);
+    std::fprintf(stderr, "coop-town: test: after the scene, tick %lld: the game's player y %.2f ground %s%.2f", (long long) (NetplayLinkTick() - from), toan[1],
+                 his ? "" : "none ", ground);
+    if (CoopTownPartnerPose(partner, rot)) {
+        float partner_ground = 0.0f;
+        const bool hers = TownGroundAt(partner[0], partner[1], partner[2], &partner_ground, nullptr);
+
+        std::fprintf(stderr, "; the partner y %.2f ground %s%.2f", partner[1], hers ? "" : "none ", partner_ground);
+    }
+    std::fprintf(stderr, " (link tick %lld)\n", (long long) NetplayLinkTick());
+    std::fflush(stderr);
+}
+
 void CoopTownTownTalkTick() {
+    GroundAfterSceneTick(); // coop-storywarp (the test line)
     TalkHiddenSaid(); // opt8
     // opt8: the world held (every player in a talk or a menu) or running again, said as it changes (x-town-talk's line).
     if (static bool held_was = false; CoopTalkWorldHeld() != held_was) {
         held_was = !held_was;
-        std::fprintf(stderr, "coop-talk: the world %s at link tick %lld\n", held_was ? "holds (every player in a talk or a menu)" : "runs", (long long) NetplayLinkTick());
+        std::fprintf(stderr, "coop-talk: the world %s at link tick %lld\n",
+                     !held_was ? "runs" : CoopDayTransOn() ? "holds (every player in a talk, a menu, a question or the time of day's scene)" : "holds (every player in a talk, a menu or a question)",
+                     (long long) NetplayLinkTick());
         std::fflush(stderr);
     }
     OwnTownEventTick(); // coop-pt1106-batch
@@ -7477,23 +9498,1131 @@ static void CoopTownDoorFadeSaid() {
     }
 }
 
+// coop-p1body (Jep's rc3 playtest, 11-13: "P1 went to town and P1 turned back into Toan, so two Toans stand in town"; his rule: each
+// player looks like their own character in town). Retail makes the game's player Toan at a town's init and the town has only Toan's
+// town model, so a player 1 who plays another member (a trade, his own pick: g_member_of) walked the town as Toan. As player 2's
+// member is drawn (her walker's body, her skin apart), the game's player's member is drawn in his place: its dungeon model in a body
+// of its own (LoadBodyInto: one loader for every player's body), following him (SkinFollow), Toan's own model not drawn. Drawing
+// only: Toan stays the town's simulated player (his walk, doors, talks, events, the town's item page), and the body is each copy's
+// own (not in the state set or the checksum; its step rolls the draw stream), made from what every copy has alike: the member kept
+// for the game's player (g_member_of), the town and the game's mode. Where the town needs Toan himself on screen (his talk, a town
+// event or story scene of his, his fishing, the Georama) Toan is drawn for it and the body again after (the stand-in rule).
+// Bodies are per player (kMaxPlayers, design for six): a body's two texture blocks are its player's (texture.hpp: 128 to 139).
+// Measured 11-14 (BodyBudgetForTest): a body takes 4 to 8 of the table's slots and no staging; six more fit in every town (texslots:
+// the table holds 196 + 16 a player, texture.hpp kTextureCount).
+// DC_COOP_MUTATE=p1body_off (twin): no body, Toan as before. =p1body_wrong (twin): the other copies load another member's model.
+struct TownBody {
+    ModelSet      set;
+    int           loaded = -1;
+    int           map = -1;
+    int           motion = -1;
+    sceVu0FVECTOR pos = {0.0f, 0.0f, 0.0f, 1.0f};
+    int           said_member = -2; // the last line's member, whether it was shown and why not
+    int           said_shown = -1;
+    const char   *said_why = nullptr;
+    int           draws = 0; // frames it was drawn in / Toan was / nobody was, since the last debug line
+    int           toan_draws = 0;
+    int           none_draws = 0;
+    const char   *refused = nullptr; // why its model was not loaded for refused_member in refused_map (Toan is drawn then)
+    int           refused_member = -1;
+    int           refused_map = -1;
+    int           event_ticks = 0; // town ticks the town's event mode has run (GameBodyLoad counts them)
+    int           walk_ticks = 0;  // steps in a row it has walked (the resync test hook's)
+    int           ticks = 0;
+};
+TownBody g_town_body[kMaxPlayers];
+
+constexpr int kTownBodyBlocks = 128; // player k's body 128 + 2k, its weapon 129 + 2k
+constexpr int kTownBodyEventGrace = 8; // town ticks into an event before Toan stands in for it
+constexpr int kTownBodySlotsKept = 24; // texture slots left free for the town's own loads (menus, events) after a body's 8 at most
+
+static int TownBodyBlock(int k) {
+    return kTownBodyBlocks + 2 * k;
+}
+
+static int TableSlotsOf(int block) { // (block -1: every slot in use)
+    int used = 0;
+
+    for (const CTexture &texture : TexManager.textures) {
+        used += texture.name[0] != 0 && (block < 0 || texture.block == block) ? 1 : 0;
+    }
+    return used;
+}
+
+// coop-fishing3 (Jep 11-18: "apart, her own screen fishes as Toan"; measured: her copy apart drew her skin standing, her weapon in
+// hand, no rod, through all her fishing). Her copy apart plays her as its game's player (Chara), drawn by her skin (TownSkinStep),
+// which only her walk (PartnerStep) and her events (TownSkinEventStep) step: the town's fishing mode steps neither, so the skin stood
+// as her board's event left it and hid the fishing model's rod, float and hook with the game's player. The own fishing body
+// (coop-xiaofish) is the game's player's own member's, GameBodyMember's, which said none on her copy ("her copy's own player"). Now,
+// P2 like P1: while the game's player on her copy apart holds the fishing model, his body is her own member's, as player 1's is on
+// his copy (loaded, posed in the fishing model's pose, Toan's rod, float and hook in its right hand, no weapon), and her skin is
+// not drawn beside it. Her member: TownMember (the members' word for her). DC_COOP_MUTATE=apart_fish_skin (twin): as before.
+static bool HerCopyApart() {
+    return CoopWorldsApart() && CoopWorldsSelf() == 2;
+}
+
+static int HerApartFisher() {
+    if (!HerCopyApart() || Chara == nullptr || !coop::fishbody::HoldsFishingModel(Chara) || Mutated("apart_fish_skin")) {
+        return -1;
+    }
+    const int member = TownMember();
+
+    return member > CHARA_TOAN && member < 6 ? member : -1;
+}
+
+// The player number fisher k is on this copy's lines (k 0: the game's player, hers on her copy apart).
+static int FisherNumber(int k) {
+    return k == 0 && HerCopyApart() ? 2 : k + 1;
+}
+
+// The member the game's player's body shows on this copy now, or -1 with why not.
+static int GameBodyMember(const char **why) {
+    if (!Enabled() || Mutated("p1body_off")) {
+        *why = "off";
+        return -1;
+    }
+    if (const int her = HerApartFisher(); her >= 0) { // coop-fishing3: her fishing apart, in her own member's body
+        return her;
+    }
+    // (player 2's copy apart, or waiting to join: its game's player is hers, drawn by her skin, TownSkinStep)
+    if ((CoopWorldsApart() && CoopWorldsSelf() == 2) || g_town_skin || (NetplayRole() == 2 && !NetplayLinkUp())) {
+        *why = "her copy's own player";
+        return -1;
+    }
+    int member = coop::Member(0); // (coop-memberstage4 item 4: the members' word for player 1)
+
+    if (member <= CHARA_TOAN || member >= 6) {
+        *why = "he plays Toan";
+        return -1;
+    }
+    if (g_town.visible && g_town.loaded == member) {
+        *why = "another player's walker is that member";
+        return -1;
+    }
+    if (Mutated("p1body_wrong") && coop::ActorLocalIndex() != 0) {
+        member = member % 5 + 1;
+    }
+    return member;
+}
+
+// Why the town needs Toan himself on screen now (the stand-in rule), or nullptr: the body is drawn.
+static bool FishBodyShown(int k); // coop-xiaofish (below)
+extern int  g_town_owner;       // (the walker's player, below)
+
+static const char *GameBodyToanNeeded() {
+    if (SceneHolds()) {
+        return "a story scene";
+    }
+    // coop-xiaofish: his fishing in his own member's body (the fishing model's rod, float and hook beside it), Toan's not drawn
+    if (FishBodyShown(0)) {
+        return nullptr;
+    }
+    if (CoopTalkOn(0) || CoopFishingOn(0)) {
+        return CoopTalkOn(0) ? "his talk" : "his fishing";
+    }
+    if (EdInteriorFlag != 0) {
+        // (the room's own modes: 3 its talk, 4 its event; her own room event is hers, he walks beside it)
+        return g_room_event.on ? nullptr : g_indoor.mode == 3 ? "his talk" : g_indoor.mode == 4 ? "a room event" : nullptr;
+    }
+    switch (::GameMode) {
+        case ED_MODE_TALK:
+            return "his talk";
+        case ED_MODE_EVENT:
+            // (another player's own event: he walks beside it. An event's first ticks: what stood before stays. A town's arrival runs
+            // its arrival event, 128, which ends in four ticks where it has no scene to show: Toan stood there for those ticks at
+            // every arrival and after every resync's town load. DC_COOP_MUTATE=p1body_event_at_once (twin): Toan from its first tick.)
+            // coop-cavewalk (Jep 11-16, the member rules: a player who plays another member and walks into the cave apart is seen as that
+            // member, not Toan): on a copy apart the event is its own player's alone, and his body follows what it does to the game's player
+            // (GameBodyEventStep: his walk, else he stands), so Toan stands in for none of it. DC_COOP_MUTATE=event_body_toan (twin): Toan,
+            // as before.
+            if (CoopWorldsApart() && !Mutated("event_body_toan")) {
+                return nullptr;
+            }
+            return CoopTownOwnTownEvent() >= 2 || (g_town_body[0].event_ticks < kTownBodyEventGrace && !Mutated("p1body_event_at_once")) ? nullptr : "a town event";
+        case ED_MODE_FISHING:
+            return "his fishing";
+        case ED_MODE_GEORAMA:
+        case ED_MODE_GEORAMA_MENU_INIT:
+        case ED_MODE_GEORAMA_MENU:
+        case ED_MODE_RETURN_MENU_GEORAMA:
+            return "the Georama";
+        default:
+            return CoopTownHidesToan() ? "the Georama" : nullptr;
+    }
+}
+
+static bool GameBodyLoadedNow(const TownBody &body) {
+    return body.loaded >= 0 && body.map == MapNo && body.set.body != nullptr && body.set.body->frame != nullptr && TableSlotsOf(TownBodyBlock(0)) > 0;
+}
+
+// One line each time what stands for the game's player changes on this copy (the rows read it: the member, its model, shown or
+// Toan and why).
+static void GameBodySay(TownBody &body, int member, int state, const char *why) {
+    if (member == body.said_member && state == body.said_shown && why == body.said_why) {
+        return;
+    }
+    body.said_member = member;
+    body.said_shown = state;
+    body.said_why = why;
+    std::fprintf(stderr, "coop-body: p%d player 1 in town %d%s: member %d, %s (%s) at link tick %lld, town mode %d event %d\n", NetplayLocalPlayer(), MapNo,
+                 EdInteriorFlag != 0 ? " indoors" : "", member, state == 1 ? "his body drawn, Toan not" : state == 2 ? "nobody drawn" : "Toan drawn",
+                 state == 1 ? charaNameTbl[body.loaded] : why != nullptr ? why : "", (long long) NetplayLinkTick(), (int) ::GameMode,
+                 ::GameMode == ED_MODE_EVENT ? (int) EdEventInfo.event_no : -1);
+}
+
+// What stands for the game's player on this copy now (draw and step ask alike): 0 Toan, 1 his body, 2 nobody: his member's body
+// is not loaded yet (a town's first frames, before his first step loads it; the frames after a resync's town load), where Toan
+// would flash (Jep, 2026-10-26, of player 2's: "should not turn into toan at any point"). A body that could not load: Toan.
+static int GameBodyState() {
+    TownBody   &body = g_town_body[0];
+    const char *why = nullptr;
+    const int   member = GameBodyMember(&why);
+    int         state = 0;
+
+    if (member >= 0) {
+        const bool loaded = GameBodyLoadedNow(body) && body.loaded == member;
+
+        why = GameBodyToanNeeded();
+        if (why == nullptr && !loaded) {
+            const bool refused = body.refused != nullptr && body.refused_member == member && body.refused_map == MapNo;
+
+            why = refused ? body.refused : "his body loads on his next step";
+            state = refused ? 0 : 2;
+        } else if (why == nullptr) {
+            state = 1;
+        }
+    }
+    GameBodySay(body, member, state, why);
+    return state;
+}
+
+// Each town tick, whatever the town's mode (its walk, a talk, an event: CoopTalkIntoSlots, before the mode's own step), and right
+// after a state set (CoopTownSnapshotApplied): the body loaded for his member (in this town, again after a town's load or a state
+// set emptied its blocks), let go when he plays Toan. Left to his next walking step, a town's arrival event or a resync's town load
+// drew Toan (or nobody) for the ticks between. Returns whether his body is loaded.
+static bool GameBodyLoadFor(TownBody &body, int member);
+static void FishBodyTick(); // coop-xiaofish (below)
+
+bool GameBodyLoad() {
+    TownBody   &body = g_town_body[0];
+    const char *why = nullptr;
+    const int   member = GameBodyMember(&why);
+
+    if (mode != GAME_MODE_EDIT || Chara == nullptr || Chara->frame == nullptr || SaveData == nullptr || SaveData->GetDngStatus() == nullptr || pEditGround == nullptr ||
+        EditMapInfo == nullptr) {
+        return false;
+    }
+    FishBodyTick(); // coop-xiaofish
+    return GameBodyLoadFor(body, member);
+}
+
+static bool GameBodyLoadFor(TownBody &body, int member) {
+    if (member < 0) {
+        if (body.loaded >= 0) {
+            TexManager.DeleteTextureBlock(TownBodyBlock(0));
+            TexManager.DeleteTextureBlock(TownBodyBlock(0) + 1);
+            TexManager.CleanUpTextureList();
+            body.loaded = -1;
+        }
+        GameBodyState();
+        return false;
+    }
+    if (body.loaded != member || !GameBodyLoadedNow(body)) {
+        // (a full table stops the game: texture.cpp TextureSlotTaken; never loaded into a table that full)
+        const int free_slots = PortTextureSlotsLimit() - TableSlotsOf(-1) + TableSlotsOf(TownBodyBlock(0)) + TableSlotsOf(TownBodyBlock(0) + 1);
+
+        body.loaded = -1;
+        if (body.refused != nullptr && body.refused_member == member && body.refused_map == MapNo) {
+            GameBodyState();
+            return false; // (not tried again each tick: in the next town, or as another member)
+        }
+        const int got = free_slots < 8 + kTownBodySlotsKept ? -1 : LoadBodyInto(body.set, member, TownBodyBlock(0), TownBodyBlock(0) + 1, "player 1's town body's");
+
+        if (got != 2) {
+            body.refused = got < 0 ? "the texture table is too full for his body" : "his body's model did not load";
+            body.refused_member = member;
+            body.refused_map = MapNo;
+            std::fprintf(stderr, "coop-body: p%d player 1's town body not loaded: member %d in town %d: %s (%d of %d texture slots free)\n", NetplayLocalPlayer(), member,
+                         MapNo, body.refused, free_slots, PortTextureSlotsLimit());
+            GameBodyState();
+            return false;
+        }
+        body.refused = nullptr;
+        body.loaded = member;
+        body.map = MapNo;
+        body.motion = -1;
+        Chara->GetPosition(body.pos);
+        std::fprintf(stderr, "coop-body: p%d player 1's town body loaded: member %d (%s) in town %d, blocks %d and %d, %d and %d texture slots, table %d of %d\n",
+                     NetplayLocalPlayer(), member, charaNameTbl[member], MapNo, TownBodyBlock(0), TownBodyBlock(0) + 1, TableSlotsOf(TownBodyBlock(0)),
+                     TableSlotsOf(TownBodyBlock(0) + 1), TableSlotsOf(-1), PortTextureSlotsLimit());
+    }
+    return true;
+}
+
+void GameBodyEventTick() {
+    TownBody &body = g_town_body[0];
+
+    body.event_ticks = EdInteriorFlag == 0 && ::GameMode == ED_MODE_EVENT ? body.event_ticks + 1 : 0;
+}
+
+// Each town tick the game's player walks (the town's and a room's walk, a door's opening): his body stepped where he stands.
+void GameBodyStep() {
+    TownBody &body = g_town_body[0];
+
+    if (!GameBodyLoad() || GameBodyState() != 1) {
+        return;
+    }
+    float step = 0.0f;
+
+    const int motion_was = body.motion;
+
+    DrawRngEnter(); // (drawing only: its step rolls the draw stream, never the lockstep's)
+    const int motion = SkinFollow(body.set.body, body.pos, body.motion, &step);
+
+    body.set.body->ShadowStep();
+    body.set.body->ClothStep(0);
+    DrawRngLeave();
+    // DC_COOP_DEBUG: each change of its walk (stand, walk, run: keyCtrl's motion from how far he moved), which the rows read.
+    if (CoopDebug() && motion != motion_was) {
+        std::fprintf(stderr, "coop-body: p%d player 1's body walk: motion %d -> %d, step %.2f, at link tick %lld\n", NetplayLocalPlayer(), motion_was, motion, step,
+                     (long long) NetplayLinkTick());
+    }
+    // Test hook (DC_COOP_TEST_BODY_RESYNC=1, t-p1body's resync): on every copy but player 1's, linked, once his body has walked (20 steps
+    // in a row) and stands again, the game's random is knocked once (as DC_NETPLAY_TEST_DESYNC_AT's): the next checksum parts the copies and the
+    // link resyncs, on the row's own event, no tick count.
+    body.walk_ticks = step >= 0.1f && step <= 8.0f ? body.walk_ticks + 1 : 0;
+    if (static int phase = 0; phase < 2 && TestEnvOn("DC_COOP_TEST_BODY_RESYNC") && NetplayLinkUp() && !CoopWorldsApart()) {
+        if (phase == 0 && body.walk_ticks >= 20) { // (a walk, not a test's warp of him)
+            phase = 1;
+        } else if (phase == 1 && step < 0.1f) {
+            phase = 2;
+            if (coop::ActorLocalIndex() != 0) {
+                PortRandSetState(PortRandState() ^ 0x5a5a5a5au);
+                std::fprintf(stderr, "coop-body: test: copy %d's game random knocked once his body stood again (a desync) at link tick %lld\n", NetplayLocalPlayer(),
+                             (long long) NetplayLinkTick());
+            }
+        }
+    }
+    // DC_COOP_DEBUG, every 30th tick: what the rows read by numbers (the model, where it stands against Toan, its walk, its
+    // sheets bound, the frames it and Toan were drawn in since the last line).
+    if (CoopDebug() && ++body.ticks % 30 == 0) {
+        sceVu0FVECTOR toan;
+        int           bound = 0;
+
+        Chara->GetPosition(toan);
+        for (const CTexture &texture : TexManager.textures) {
+            const unsigned tbp = (unsigned) (texture.tex0 & 0x3FFF), cbp = (unsigned) ((texture.tex0 >> 37) & 0x3FFF);
+
+            bound += texture.name[0] != 0 && texture.block == TownBodyBlock(0) && dc::render::PortKeyLive(tbp) && (cbp == 0 || dc::render::PortKeyLive(cbp)) ? 1 : 0;
+        }
+        std::fprintf(stderr,
+                     "coop-body: p%d player 1's body: member %d model %s at (%.1f %.1f %.1f), %.1f from Toan, step %.2f motion %d, %d of %d sheets bound, "
+                     "drawn %d frames, Toan %d, nobody %d, at link tick %lld\n",
+                     NetplayLocalPlayer(), body.loaded, charaNameTbl[body.loaded], body.pos[0], body.pos[1], body.pos[2], DistVector(body.pos, toan), step, motion, bound,
+                     TableSlotsOf(TownBodyBlock(0)), body.draws, body.toan_draws, body.none_draws, (long long) NetplayLinkTick());
+        body.draws = body.toan_draws = body.none_draws = 0;
+    }
+}
+
+// coop-cavewalk: each tick of a town event on a copy apart (CoopTownEventStep), his body follows what the event does to the game's
+// player (EventFollow), as her skin does on hers. Returns whether his body stands for him (its place, member and motion out).
+bool GameBodyEventStep(float *pos, int *member, int *motion) {
+    TownBody &body = g_town_body[0];
+
+    if (!GameBodyLoad() || GameBodyState() != 1) {
+        return false;
+    }
+    DrawRngEnter(); // (drawing only)
+    EventFollow(body.set.body, body.pos, body.motion);
+    DrawRngLeave();
+    std::copy(body.pos, body.pos + 4, pos);
+    *member = body.loaded;
+    *motion = body.set.body->motion_no;
+    return true;
+}
+
+// The town's and a room's draw of the game's player: whether Toan's own model is left out this frame (his body drawn in his
+// place, or nobody while it loads).
+static bool GameBodyDrawn() {
+    TownBody  &body = g_town_body[0];
+
+    // Test lines (DC_COOP_TEST_TOWN_TALK set: t-p1body's pad waits on them, whatever stands for him): his talk's start and end.
+    if (static const bool test = TestEnv("DC_COOP_TEST_TOWN_TALK") != nullptr; test) {
+        static bool was = false;
+        const bool  talks = EdInteriorFlag == 0 && (::GameMode == ED_MODE_TALK || CoopTalkOn(0));
+
+        if (talks != was) {
+            was = talks;
+            std::fprintf(stderr, "coop: test: his town talk %s at link tick %lld\n", talks ? "runs" : "is over", (long long) NetplayLinkTick());
+        }
+    }
+    const int state = GameBodyState();
+
+    (state == 1 ? body.draws : state == 2 ? body.none_draws : body.toan_draws)++;
+    return state != 0;
+}
+
+// coop-xiaofish (Jep 11-16: each player fishes as their own character; Xiao first; coop-fishing3 11-18: every member). Retail's fishing has one model, Toan's
+// (c01d_turi: his body with the rod, float and hook), loaded into the fisher's body by the board's event, so every fisher turned
+// into Toan. Now a fisher whose member has a bone map (coop_fishbody.cpp) keeps that model for everything the game's fishing
+// reads, and what is drawn is their own member's model in Toan's pose of that frame, with Toan's rod, float and hook carried in
+// its right hand and no weapon (Jep: nobody holds a weapon while fishing). The rod hangs on the drawn body's right hand (its
+// holding point, turning with the hand), not on Toan's hidden one: where its tip is goes into the fishing line's simulation on
+// every copy (CoopFishBodyLine, from EdFishingLineStep: the rod's tip, the float and the hook), worked out from the fishing model's frames and the two models' rest
+// poses alone, so every copy steps the same line whether or not it draws the body. The body is each copy's own, as the game's
+// player's (g_town_body: player k's set, blocks 128 + 2k). Player 2's copy apart, whose game's player is hers: her own body as
+// the game's player's (coop-fishing3, HerApartFisher). DC_COOP_MUTATE=fishbody_toan (twin): Toan, as before.
+static int FishMember(int k) {
+    if (!Enabled() || EdInteriorFlag != 0) {
+        return -1;
+    }
+    if (k == 0) {
+        if (const int her = HerApartFisher(); her >= 0) { // coop-fishing3: her copy apart (GameBodyMember's notes)
+            return her;
+        }
+        // (as GameBodyMember, without its draw-only twin: the line's step is every copy's alike)
+        if (Mutated("p1body_off") || (CoopWorldsApart() && CoopWorldsSelf() == 2) || g_town_skin || (NetplayRole() == 2 && !NetplayLinkUp())) {
+            return -1;
+        }
+        const int member = coop::Member(0);
+
+        return member > CHARA_TOAN && member < 6 && !(g_town.visible && g_town.loaded == member) ? member : -1;
+    }
+    return k == g_town_owner && g_town.visible && g_town.body != nullptr ? g_town.loaded : -1;
+}
+
+// The body player k fishes in (the game's player's own, a walker's), holding the fishing model, or null.
+static CCharacter *FishFisher(int k) {
+    CCharacter *fisher = k == 0 ? Chara : k == g_town_owner && g_town.visible ? g_town.body : nullptr;
+
+    return fisher != nullptr && coop::fishbody::Mapped(FishMember(k)) && coop::fishbody::HoldsFishingModel(fisher) ? fisher : nullptr;
+}
+
+static bool FishBodyLoadedNow(int k, int member) {
+    const TownBody &body = g_town_body[k];
+
+    return body.loaded == member && body.map == MapNo && body.set.body != nullptr && body.set.body->frame != nullptr && TableSlotsOf(TownBodyBlock(k)) > 0;
+}
+
+// Player k's own member's body is drawn for their fishing on this copy now.
+static bool FishBodyShown(int k) {
+    return k >= 0 && k < kMaxPlayers && FishFisher(k) != nullptr && FishBodyLoadedNow(k, FishMember(k));
+}
+
+struct FishBodySeen {
+    int  own = 0, toan = 0; // frames the fisher was drawn in their own body / as Toan while holding the fishing model
+    int  weapon = 0;        // times player k's weapon was drawn (ever), and the count at their last fishing draw
+    int  weapon_then = 0;
+    bool said = false;
+};
+static FishBodySeen g_fish_seen[kMaxPlayers];
+
+// Each town tick: a walker's fishing body loaded while they hold the fishing model (the game's player's is his town body, loaded
+// by GameBodyLoad), let go after. Test hook DC_COOP_TEST_FISHBODY_P1=<member>: the game's player plays that member (every copy,
+// the tick after it is not so: a state file's load puts the fixture's back).
+static void FishPropsEnd(int k);
+
+static void FishBodyTick() {
+    // (a draw's fishing model is itself again before anything steps: every frame's draw ends it, this is the belt)
+    FishPropsEnd(0);
+    FishPropsEnd(g_town_owner);
+    if (static const int p1 = TestEnvInt("DC_COOP_TEST_FISHBODY_P1", -1); p1 > 0 && p1 < 6 && coop::Member(0) != p1) {
+        // (the tick after it is seen not so: a state file's load is checked against its saved sum on the load's own tick)
+        static long long seen = -1;
+
+        if (seen >= 0 && NetplayLinkTick() > seen) {
+            coop::SetMember(0, p1, coop::MemberWhy::kTest);
+            seen = -1;
+        } else if (seen < 0) {
+            seen = NetplayLinkTick();
+        }
+    }
+    for (int k = 1; k < kMaxPlayers; k++) {
+        TownBody  &body = g_town_body[k];
+        const int  member = FishMember(k);
+        const bool wanted = FishFisher(k) != nullptr;
+
+        if (!wanted) {
+            if (body.loaded >= 0) {
+                TexManager.DeleteTextureBlock(TownBodyBlock(k));
+                TexManager.DeleteTextureBlock(TownBodyBlock(k) + 1);
+                TexManager.CleanUpTextureList();
+                std::fprintf(stderr, "coop-fishbody: p%d player %d's fishing body let go (member %d) at link tick %lld\n", NetplayLocalPlayer(), k + 1, body.loaded,
+                             (long long) NetplayLinkTick());
+                body.loaded = -1;
+            }
+            continue;
+        }
+        if (FishBodyLoadedNow(k, member) || (body.refused != nullptr && body.refused_member == member && body.refused_map == MapNo)) {
+            continue;
+        }
+        const int free_slots = PortTextureSlotsLimit() - TableSlotsOf(-1) + TableSlotsOf(TownBodyBlock(k)) + TableSlotsOf(TownBodyBlock(k) + 1);
+        const int got = free_slots < 8 + kTownBodySlotsKept ? -1 : LoadBodyInto(body.set, member, TownBodyBlock(k), TownBodyBlock(k) + 1, "a fisher's own body's");
+
+        if (got != 2) {
+            body.refused = got < 0 ? "the texture table is too full for the body" : "the body's model did not load";
+            body.refused_member = member;
+            body.refused_map = MapNo;
+            body.loaded = -1;
+            std::fprintf(stderr, "coop-fishbody: p%d player %d's fishing body not loaded: member %d: %s (%d of %d texture slots free): drawn as Toan\n",
+                         NetplayLocalPlayer(), k + 1, member, body.refused, free_slots, PortTextureSlotsLimit());
+            continue;
+        }
+        body.refused = nullptr;
+        body.loaded = member;
+        body.map = MapNo;
+        body.set.body->SetMotion(0, 0);
+        body.set.body->Step();
+        std::fprintf(stderr, "coop-fishbody: p%d player %d's fishing body loaded: member %d (%s), blocks %d and %d, %d texture slots, table %d of %d, at link tick %lld\n",
+                     NetplayLocalPlayer(), k + 1, member, charaNameTbl[member], TownBodyBlock(k), TownBodyBlock(k) + 1, TableSlotsOf(TownBodyBlock(k)), TableSlotsOf(-1),
+                     PortTextureSlotsLimit(), (long long) NetplayLinkTick());
+    }
+    // The twin's own line (DC_COOP_MUTATE=fishbody_toan): a player who would fish in their own body has held the fishing model
+    // 30 ticks as Toan (x-fishbody's twin stops on it, both copies' starts long said).
+    if (Mutated("fishbody_toan")) {
+        static int held[kMaxPlayers] = {};
+
+        for (int k = 0; k < kMaxPlayers; k++) {
+            CCharacter *fisher = k == 0 ? Chara : k == g_town_owner && g_town.visible ? g_town.body : nullptr;
+
+            held[k] = fisher != nullptr && FishMember(k) > CHARA_TOAN && coop::fishbody::HoldsFishingModel(fisher) ? held[k] + 1 : 0;
+            if (held[k] == 30) {
+                std::fprintf(stderr, "coop-fishbody: p%d player %d has fished 30 ticks as Toan (fishbody_toan) at link tick %lld\n", NetplayLocalPlayer(), FisherNumber(k),
+                             (long long) NetplayLinkTick());
+            }
+        }
+    }
+    // One line each time who is drawn for a fisher changes (the rows read it).
+    for (int k = 0; k < kMaxPlayers; k++) {
+        const bool shown = FishBodyShown(k);
+
+        if (shown != g_fish_seen[k].said) {
+            g_fish_seen[k].said = shown;
+            g_fish_seen[k].own = g_fish_seen[k].toan = 0;
+            std::fprintf(stderr, "coop-fishbody: p%d player %d fishes %s at link tick %lld\n", NetplayLocalPlayer(), FisherNumber(k),
+                         shown ? "in their own member's body, Toan's rod in its right hand" : "no more in their own member's body", (long long) NetplayLinkTick());
+        }
+    }
+}
+
+// The fishing line's step (EdFishingLineStep, every copy, each fishing tick of chara): the rod's tip where the member's hand holds
+// the rod, the float and the hook as far from where the motion keys them as that tip is from Toan's. Test lines
+// (DC_COOP_TEST_FISHBODY): each tick's numbers, which the rows hold to their limits and to debug\tools\anim\check.py's on the same
+// motion frame; and for every fisher, whoever they are drawn as, the box round the drawn body's joints (two fishers stand apart).
+void CoopFishBodyLine(CCharacter *chara, float *rod, float *float_pos, float *hook_pos) {
+    int k = chara == Chara ? 0 : -1;
+
+    for (int i = 1; k < 0 && i < kMaxPlayers; i++) {
+        k = i == g_town_owner && g_town.visible && g_town.body == chara ? i : -1;
+    }
+    if (k < 0) {
+        return;
+    }
+    static const bool test = TestEnvOn("DC_COOP_TEST_FISHBODY");
+    const int         member = FishMember(k);
+    const bool        own = FishFisher(k) == chara;
+
+    if (test) {
+        float low[3], high[3];
+
+        if (coop::fishbody::DrawnBox(chara, own ? member : -1, low, high)) {
+            std::fprintf(stderr, "coop-fishbody: test: fisher player %d drawn as member %d motion %d: joints from (%.2f %.2f %.2f) to (%.2f %.2f %.2f) at link tick %lld\n", k + 1,
+                         own ? member : 0, chara->motion_no, low[0], low[1], low[2], high[0], high[1], high[2], (long long) NetplayLinkTick());
+        }
+    }
+    coop::fishbody::Numbers n;
+    coop::fishbody::Rod     held;
+
+    if (!own || !coop::fishbody::Solve(chara, member, &held, test ? &n : nullptr)) {
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        rod[i] = held.tip[i];
+        float_pos[i] += held.tip_step[i];
+        hook_pos[i] += held.tip_step[i];
+    }
+    if (test) {
+        const MOTION_STATE &state = chara->motion_type.state;
+
+        std::fprintf(stderr,
+                     "coop-fishbody: test: player %d member %d motion %d frame %d>%d time %.3f hand (%.3f %.3f %.3f) left (%.3f %.3f %.3f) hold (%.3f %.3f %.3f) "
+                     "tip (%.3f %.3f %.3f) leftrod %.3f toan %.3f ankles %.3f %.3f drift %.3f %.3f floor %.3f bend %.1f %.1f %.1f %.1f toan %.1f %.1f %.1f %.1f "
+                     "at link tick %lld\n",
+                     k + 1, member, chara->motion_no, (int) state.frame, (int) state.next_frame, state.time, n.hand[0], n.hand[1], n.hand[2], n.left[0], n.left[1],
+                     n.left[2], n.hold[0], n.hold[1], n.hold[2], n.tip[0], n.tip[1], n.tip[2], n.left_rod, n.left_rod_toan, n.ankle_rise[0], n.ankle_rise[1],
+                     n.ankle_slide[0], n.ankle_slide[1], n.floor, n.bend[0], n.bend[1], n.bend[2], n.bend[3], n.bend_toan[0], n.bend_toan[1], n.bend_toan[2],
+                     n.bend_toan[3], (long long) NetplayLinkTick());
+    }
+}
+
+// What the fishing model's draw of a frame drew, read back from its frames while they stood as drawn (FishPropsEnd), for the
+// rows: where the rod's own holding point was (its origin and line as its frame had them), and every part of Toan's model in the
+// draw by name.
+struct FishDrawn {
+    bool  on = false;
+    float rod_hold[4] = {}, rod_axis[3] = {};
+    char  toan_parts[320] = "";
+    int   toan_count = 0;
+};
+static FishDrawn g_fish_drawn[kMaxPlayers];
+
+// A draw of fisher's fishing model with nothing of Toan in it: its rod in the member's hand, its float and hook (ended by FishPropsEnd).
+static void FishPropsBegin(int k, CCharacter *fisher) {
+    coop::fishbody::Rod held;
+
+    if (coop::fishbody::Solve(fisher, FishMember(k), &held, nullptr)) {
+        coop::fishbody::PropsOnlyBegin(fisher, held);
+    }
+}
+
+static void FishPropsEnd(int k) {
+    CCharacter *fisher = k == 0 ? Chara : k == g_town_owner ? g_town.body : nullptr;
+
+    if (fisher == nullptr) {
+        return;
+    }
+    if (static const bool test = TestEnvOn("DC_COOP_TEST_FISHBODY"); test && fisher->frame != nullptr && FishBodyShown(k)) {
+        FishDrawn &drawn = g_fish_drawn[k];
+
+        drawn.on = false;
+        if (CFrame *rod = fisher->frame->SearchFrame((char *) "turizao"); rod != nullptr) {
+            sceVu0FMATRIX m;
+            const char   *names = "";
+
+            rod->GetLWMatrix(m);
+            const float length = std::max(1.0e-6f, std::hypot(m[1][0], m[1][1], m[1][2]));
+
+            for (int i = 0; i < 3; i++) {
+                drawn.rod_axis[i] = m[1][i] / length;
+                drawn.rod_hold[i] = m[3][i] + drawn.rod_axis[i] * coop::fishbody::HoldAlong();
+            }
+            drawn.rod_hold[3] = 1.0f;
+            drawn.toan_count = coop::fishbody::DrawnParts(fisher, &names);
+            std::snprintf(drawn.toan_parts, sizeof drawn.toan_parts, "%s", names);
+            drawn.on = true;
+        }
+    }
+    coop::fishbody::PropsOnlyEnd(fisher);
+}
+
+// The member's body (model, placed where the fisher stands) takes the fisher's pose of this frame.
+static unsigned long g_fish_misses_before = 0;
+
+static void FishBodyPose(int k, CCharacter *fisher, CCharacter *model) {
+    g_fish_misses_before = dc::render::PortTextureMisses();
+    if (coop::fishbody::Solve(fisher, FishMember(k), nullptr, nullptr)) {
+        coop::fishbody::Pose(model, FishMember(k));
+    }
+}
+
+// After the body's draw: its frames get their own transforms back. Test lines (DC_COOP_TEST_FISHBODY): each drawn frame by numbers,
+// read from the frames the two draws used: the drawn body's right wrist against the pose's (the frames took the pose); the drawn
+// rod's holding point against the drawn body's right hand's holding point, in the world and on the screen (the rod is in the hand
+// the player sees, not Toan's hidden one); the rod's line in that hand's own frame (the same every frame: it moves with the hand);
+// every part in the fishing model's draw by name (the rod alone, the float and hook where retail shows them: nothing of Toan) and
+// how many parts of the member's own model.
+static void FishBodyDrawn(int k, CCharacter *fisher, CCharacter *model) {
+    static const bool test = TestEnvOn("DC_COOP_TEST_FISHBODY");
+    FishBodySeen     &seen = g_fish_seen[k];
+    const int         seen_toan = seen.toan; // (frames a fisher with a body was drawn as Toan since it loaded: none)
+    FishDrawn        &drawn = g_fish_drawn[k];
+
+    seen.own++;
+    if (test && drawn.on) {
+        coop::fishbody::Numbers n;
+        sceVu0FVECTOR           origin = {0.0f, 0.0f, 0.0f, 1.0f}, wrist = {}, hold = {};
+        const int               member = FishMember(k);
+        CFrame                 *wrist_frame = model->frame->SearchFrame(const_cast<char *>(coop::fishbody::RightWrist(member)));
+        // (a grip frame of the drawn model's own; a mirrored one ("~", Ruby's) has none: its place in the drawn wrist's own frame)
+        const char             *grip = coop::fishbody::Grip(member);
+        const bool              mirrored = grip != nullptr && grip[0] == '~';
+        CFrame                 *hold_frame = grip != nullptr && !mirrored ? model->frame->SearchFrame(const_cast<char *>(grip)) : nullptr;
+        float                   in_wrist[3] = {};
+
+        if (wrist_frame != nullptr && (hold_frame != nullptr || (mirrored && coop::fishbody::HoldInHand(member, in_wrist))) &&
+            coop::fishbody::Solve(fisher, member, nullptr, &n)) {
+            sceVu0FMATRIX hand;
+            const char   *own_names = "";
+            const int     own_count = coop::fishbody::DrawnParts(model, &own_names);
+
+            wrist_frame->GetWorldPosition(wrist, origin);
+            wrist_frame->GetLWMatrix(hand);
+            if (hold_frame != nullptr) {
+                hold_frame->GetWorldPosition(hold, origin);
+            } else {
+                for (int r = 0; r < 3; r++) {
+                    hold[r] = hand[3][r];
+                    for (int c = 0; c < 3; c++) {
+                        const float axis = std::max(1.0e-6f, std::hypot(hand[c][0], hand[c][1], hand[c][2]));
+
+                        hold[r] += hand[c][r] / axis * in_wrist[c];
+                    }
+                }
+            }
+            hold[3] = 1.0f;
+            const float pose_off = std::hypot(wrist[0] - n.hand_world[0], wrist[1] - n.hand_world[1], wrist[2] - n.hand_world[2]);
+            const float rod_off = std::hypot(drawn.rod_hold[0] - hold[0], drawn.rod_hold[1] - hold[1], drawn.rod_hold[2] - hold[2]);
+            float       in_hand[3];
+
+            for (int c = 0; c < 3; c++) {
+                const float length = std::max(1.0e-6f, std::hypot(hand[c][0], hand[c][1], hand[c][2]));
+
+                in_hand[c] = (hand[c][0] * drawn.rod_axis[0] + hand[c][1] * drawn.rod_axis[1] + hand[c][2] * drawn.rod_axis[2]) / length;
+            }
+            // (on the screen, in the game's own 1280 x 960 picture's pixels)
+            int         at_hand[4] = {}, at_rod[4] = {};
+            const bool  inside = MGRotTransPers(at_hand, hold, 0) != 0;
+            const bool  rod_inside = MGRotTransPers(at_rod, drawn.rod_hold, 0) != 0;
+            const auto  across = [](const int *screen) { return ((screen[0] - 0x6C00) >> 4) / 640.0f; };
+            const auto  down = [](const int *screen) { return (((screen[1] - GS_Y_OFFSET) >> 4) * 2) / 448.0f; };
+            const float pixels = inside && rod_inside ? std::hypot((across(at_hand) - across(at_rod)) * 1280.0f, (down(at_hand) - down(at_rod)) * 960.0f) : -1.0f;
+            const bool  seen_here = inside && across(at_hand) >= 0.0f && across(at_hand) <= 1.0f && down(at_hand) >= 0.0f && down(at_hand) <= 1.0f;
+
+            std::fprintf(stderr,
+                         "coop-fishbody: test: p%d draws player %d as member %d: body's wrist %.4f off the pose, rod's hold %.4f from the drawn hand's holding point "
+                         "(%.2f pixels), rod in the hand (%.3f %.3f %.3f), Toan's model's parts %d [%s], own parts %d, %lu texture misses, weapon drawn %d, "
+                         "Toan's body %d, hand on screen %d at (%.3f %.3f), motion %d time %.3f at link tick %lld\n",
+                         NetplayLocalPlayer(), FisherNumber(k), member, pose_off, rod_off, pixels, in_hand[0], in_hand[1], in_hand[2], drawn.toan_count, drawn.toan_parts, own_count,
+                         dc::render::PortTextureMisses() - g_fish_misses_before, seen.own > 1 ? seen.weapon - seen.weapon_then : 0, seen_toan, seen_here ? 1 : 0,
+                         across(at_hand), down(at_hand), fisher->motion_no, fisher->motion_type.state.time, (long long) NetplayLinkTick());
+        }
+    }
+    drawn.on = false;
+    seen.weapon_then = seen.weapon;
+    coop::fishbody::PoseEnd(model);
+}
+
+// coop-faces (tests): DC_COOP_TEST_FACES_THIRD=1: once the other player's town body is drawn, a third player's body of the same
+// member (design for six: a third Toan beside her Toan) loaded by the same loader into the last player's blocks, after hers, so its
+// pictures of the same names are the newest in the table; then every face kit is built again. Hers must still find her own (the
+// plan's trap: retail's lookup by name anywhere finds the newest, the third body's). The body stays loaded, never drawn. A player
+// never sets the variable.
+static void FacesThirdBodyForTest() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_FACES_THIRD");
+    static bool       done = false;
+    static ModelSet   third;
+
+    // (linked and together: an apart copy's table is replaced by the state set's at the merge)
+    if (!on || done || g_town.loaded < 0 || g_town.body == nullptr || !CoopWorldsLinkedTogether()) {
+        return;
+    }
+    done = true;
+    const int k = kMaxPlayers - 1;
+    const int got = LoadBodyInto(third, g_town.loaded, TownBodyBlock(k), TownBodyBlock(k) + 1, "a test's third body's");
+
+    std::fprintf(stderr, "coop-faces: test: a third body of member %d loaded in block %d (%d), %d of %d texture slots in use\n", g_town.loaded, TownBodyBlock(k), got,
+                 TableSlotsOf(-1), PortTextureSlotsLimit());
+    coop::FacesRebuildForTest();
+}
+
+// His body's draw, where Toan's own was left out (CoopTownSkinsToan): its shadow through the town's shadow buffer as Toan's
+// (CoopTownDraw's notes), the body and the weapon in its hand. Not on a screen his first-person look hides him on.
+static void GameBodyDraw() {
+    TownBody &body = g_town_body[0];
+
+    FishPropsEnd(0); // coop-xiaofish: Toan's fishing model's draw is over (CoopTownSkinsToan began it)
+    if (GameBodyState() != 1 || CoopTownEyeOnThisScreen()) {
+        return;
+    }
+    CCharacter   *model = body.set.body;
+    sceVu0FVECTOR rotation;
+    const bool    fishes = FishBodyShown(0); // coop-xiaofish: in Toan's fishing pose, no weapon in its hand
+
+    // (where he stands this frame: a mode that steps no walk still moves him, a door's opening or a warp)
+    Chara->GetPosition(body.pos);
+    Chara->frame->GetRotation(rotation);
+    model->frame->SetPosition(body.pos);
+    model->frame->SetRotation(0.0f, rotation[1], 0.0f);
+    model->SetPosition(body.pos);
+    model->SetRotation(0.0f, rotation[1], 0.0f);
+    if (fishes) {
+        FishBodyPose(0, Chara, model);
+    }
+
+    CTexture *shadow = TexManager.GetTexture((char *) "shadow_buff", -1);
+
+    if (shadow != nullptr && ::GameMode != ED_MODE_TALK && EdSystemMesCheck() == 0) {
+        float light[4][4];
+        float shadow_light[4][4];
+        float colour[4][4];
+
+        MGGetPLight(light, colour);
+        sceVu0CopyMatrix(shadow_light, light);
+        EdLimitShadowLight(shadow_light, 3.0f);
+        MGSetPLight(shadow_light, colour);
+        TexManager.ReloadTexture(Vif1Packet, 0x16);
+        MGBeginDrawShadow(*(sceGsTex0 *) &shadow->tex0);
+        model->DrawShadow();
+        MGEndDrawShadow(0x34);
+        MGSetPLight(light, colour);
+    }
+    TexManager.ReloadTexture(Vif1Packet, TownBodyBlock(0));
+    model->TextureAnime(TownBodyBlock(0));
+    coop::FacesDraw(model, TownBodyBlock(0), fishes ? 0 : -1, "player 1's town body"); // coop-faces
+    model->Draw();
+    if (fishes) {
+        FishBodyDrawn(0, Chara, model);
+        return;
+    }
+    if (body.set.weapon_loaded) {
+        body.set.weapon->Step();
+        TexManager.ReloadTexture(Vif1Packet, TownBodyBlock(0) + 1);
+        body.set.weapon->Draw();
+        g_fish_seen[0].weapon++;
+    }
+}
+
+// A state set put back on this copy names the host's body textures at the host's addresses: out before the registry is made
+// again (CoopTownSnapshotTexturesOut); the body loads its own on its next step.
+static void GameBodyTexturesOut() {
+    for (int k = 0; k < kMaxPlayers; k++) {
+        TexManager.DeleteTextureBlock(TownBodyBlock(k));
+        TexManager.DeleteTextureBlock(TownBodyBlock(k) + 1);
+        g_town_body[k].loaded = -1;
+    }
+}
+
+// coop-warplight (Jep's 11-16 playtest: "when P2 uses go to dungeon, the light particle effect plays behind the player instead of
+// around them"). Retail's way out by the town menu (editloop's TownMapJump) runs the town's system event 2 (gedit\system\event.stb
+// program 2): escape.chr loaded as its event character 6, put once at its main character (_GET_NPC_POS(-1), _SET_NPC_POS(6)),
+// 40 ticks, a 60-tick fade, _MAP_JUMP. Retail draws the player, then the event's characters (EdDrawCharacter), so the light is
+// drawn over him, round him.
+//
+// The light seen from a copy that stays (cinematic-world-only: the leaver's light in this copy's world, never its camera, fade or
+// screen): the same file, its pack loaded as retail's _LOAD_CHARA loads an event character, into the leaver's own event texture
+// block (CoopEventTexBlock's set: 80 + 8 a player, its "45"; the leaver runs no event on this copy), stood at the leaver's body for
+// as long as this copy shows that body leaving (coop-dunentry's kHerLeaveMs), stepped and drawn over it. Per player index; the
+// leaver's body here is player 2's (g_town) alone today: a player 1 who leaves is gone from the other copies at once, no body to
+// stand a light by (owed with that stand). DC_COOP_MUTATE=warplight_unseen (twin): no light on a copy that stays, as before.
+namespace {
+struct WarpLight {
+    CCharacter     *body = nullptr;
+    CTexAnimeData  *anime = nullptr;
+    u_int          *pack = nullptr;
+    u_char         *model = nullptr;
+    CDataAlloc2<1>  arena{};
+    int             block = -1;
+    bool            loaded = false;
+    bool            on = false;
+    int             map = -1;
+    int             ticks = 0;
+};
+WarpLight g_warp_lights[kMaxPlayers];
+int       g_warp_leaver = 0; // the player whose way out's light this copy shows (1 up), 0 none
+
+constexpr int kWarpPackBytes = 256 * 1024; // escape.chr: 168464 bytes
+constexpr int kWarpModelQuads = 0x10000;
+
+int WarpLightBlock(int leaver) {
+    return 80 + 8 * (leaver - 1) + 3; // (CoopEventTexBlock: player p's own "45")
+}
+
+bool WarpLightLoad(WarpLight &light, int leaver) {
+    if (light.pack == nullptr) {
+        light.pack = reinterpret_cast<u_int *>(new (std::align_val_t{64}) u_char[kWarpPackBytes]);
+        light.model = new (std::align_val_t{64}) u_char[static_cast<size_t>(kWarpModelQuads) * 16];
+        light.body = new CCharacter();
+        light.anime = new CTexAnimeData[64];
+    }
+    int size = 0;
+
+    if (LoadFile(const_cast<char *>("chara/escape.chr"), light.pack, &size) == 0 || size <= 0 || size > kWarpPackBytes) {
+        std::fprintf(stderr, "coop-warplight: cannot load chara/escape.chr (%d bytes)\n", size);
+        return false;
+    }
+    light.block = WarpLightBlock(leaver);
+    TexManager.DeleteTextureBlock(light.block);
+    TexManager.CleanUpBuffer();
+    TexManager.CleanUpTextureList();
+    light.arena.base = light.model;
+    light.arena.buffer = light.model;
+    light.arena.used = 0;
+    light.arena.limit = kWarpModelQuads;
+    light.body->Initialize();
+    for (int i = 0; i < 64; i++) {
+        light.anime[i].Initialize();
+    }
+    light.body->InitializeTexAnime(light.anime, 64);
+    light.body->LoadPackData2(light.pack, const_cast<char *>("info.cfg"), &light.arena, light.block, &light.arena, 0);
+    if (light.body->frame == nullptr) {
+        std::fprintf(stderr, "coop-warplight: escape.chr gave no model\n");
+        return false;
+    }
+    CFrameAttr attr; // (as _LOAD_CHARA sets an event character's)
+
+    attr.clip_enable = false;
+    attr.fog_enable = true;
+    light.body->frame->SetAttr(attr, 1, 4);
+    light.body->EventEnable(0);
+    light.body->FootSoundEnable(0);
+    light.loaded = true;
+    light.map = MapNo;
+    std::fprintf(stderr, "coop-warplight: escape.chr loaded for player %d's way out: %d bytes, model %d of %d quadwords, texture block %d\n", leaver, size,
+                 (int) light.arena.used, kWarpModelQuads, light.block);
+    return true;
+}
+
+// The leaver's body as this copy draws it, or null.
+CCharacter *WarpLeaverBody(int leaver) {
+    return leaver == 2 && g_town.visible && g_town.body != nullptr && g_town.body->frame != nullptr ? g_town.body : nullptr;
+}
+
+void WarpLightPlace(WarpLight &light, CCharacter *at) {
+    sceVu0FVECTOR pos;
+
+    at->GetPosition(pos);
+    pos[3] = 1.0f;
+    light.body->SetPosition(pos);
+    light.body->frame->SetPosition(pos);
+}
+} // namespace
+
+void coop::TownWarpLightStart(int leaver) {
+    if (leaver < 1 || leaver > kMaxPlayers) {
+        return;
+    }
+    if (Mutated("warplight_unseen")) {
+        std::fprintf(stderr, "coop-warplight: test: warplight_unseen: no light round player %d on this copy, as before\n", leaver);
+        std::fflush(stderr);
+        return;
+    }
+    g_warp_leaver = leaver;
+    WarpLight  &light = g_warp_lights[leaver - 1];
+    CCharacter *at = WarpLeaverBody(leaver);
+
+    if (at == nullptr) {
+        std::fprintf(stderr, "coop-warplight: player %d's way out: no body of theirs on this copy to stand a light by\n", leaver);
+        return;
+    }
+    if ((!light.loaded || light.map != MapNo) && !WarpLightLoad(light, leaver)) {
+        return;
+    }
+    light.on = true;
+    light.ticks = 0;
+    light.body->motion_no = 0;
+    light.body->motion_flags = 0;
+    light.body->motion_speed = -1.0f;
+    WarpLightPlace(light, at);
+    std::fprintf(stderr, "coop-warplight: player %d's way out: the light around their body on this copy from link tick %lld\n", leaver, (long long) NetplayLinkTick());
+    std::fflush(stderr);
+}
+
+// Each town tick: a light shown here stands at its leaver's body while this copy shows that body leaving, then goes.
+static void TownWarpLightStep() {
+    for (int k = 0; k < kMaxPlayers; k++) {
+        WarpLight &light = g_warp_lights[k];
+
+        if (!light.on) {
+            continue;
+        }
+        CCharacter     *at = WarpLeaverBody(k + 1);
+        const long long left_ms = k + 1 == 2 ? CoopWorldsHerLeaveMs() : -1;
+
+        if (at == nullptr || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || light.map != MapNo || left_ms < 0 || left_ms >= kHerLeaveMs) {
+            light.on = false;
+            TexManager.DeleteTextureBlock(light.block);
+            light.loaded = false;
+            std::fprintf(stderr, "coop-warplight: player %d's light here over after %d ticks\n", k + 1, light.ticks);
+            continue;
+        }
+        WarpLightPlace(light, at);
+        light.body->Step();
+        light.ticks++;
+    }
+}
+
+// After the leaver's body is drawn (CoopTownDraw): its light over it, as retail draws the event's characters after the player.
+static void TownWarpLightDraw() {
+    for (WarpLight &light : g_warp_lights) {
+        if (light.on && light.loaded) {
+            TexManager.ReloadTexture(Vif1Packet, light.block);
+            light.body->TextureAnime(light.block);
+            light.body->Draw();
+        }
+    }
+}
+
+// coop-warplight draw order (with the trace): which of the game's characters and player 2's body this frame drew first.
+static long long g_draw_frame = 0, g_chars_frame = -1, g_body_frame = -1;
+static int       g_order_said = 0;
+
+static bool OwnWarpRuns() {
+    return ::GameMode == ED_MODE_EVENT && EdEventInfo.event_no == 2 && NextMapNo >= 200 && EdEventInfo.npcs != nullptr && EdEventInfo.npc_count > 6;
+}
+
+static void WarpOrderNote(bool body) {
+    COOP_TEST_SWITCH(bool, on, TestEnv("DC_COOP_WARPLIGHT_TRACE") != nullptr);
+
+    if (!on || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || g_order_said >= 400 || !(OwnWarpRuns() || (g_warp_leaver > 0 && g_warp_lights[g_warp_leaver - 1].on))) {
+        return;
+    }
+    // the second of the two this frame says which came first
+    if (g_chars_frame == g_draw_frame && g_body_frame == g_draw_frame) {
+        g_order_said++;
+        std::fprintf(stderr, "coop-warplight: p%d draw order at link tick %lld: player 2's body drawn %s the game's characters\n", NetplayRole(),
+                     (long long) NetplayLinkTick(), body ? "after" : "before");
+    }
+}
+
+bool CoopTownSkinDrawsFirst() {
+    if (!CoopTownSkinsToan()) {
+        return false;
+    }
+    if (Mutated("warplight_order")) {
+        static bool said = false;
+
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "coop-warplight: test: warplight_order: player 2's member drawn after the game's characters, as before\n");
+        }
+        return false;
+    }
+    return true;
+}
+
+void CoopTownCharactersDrawn() {
+    g_chars_frame = g_draw_frame;
+    WarpOrderNote(false);
+}
+
+// coop-warplight trace (DC_COOP_WARPLIGHT_TRACE=1): each town tick while a way into a dungeon's light is up on this copy (its own
+// system event 2, or the light shown here round a leaver), or this copy shows player 2 leaving: where the light is, where the
+// leaver is drawn here (this copy's own player: Toan, or player 2's member in his place; another player's body), their distance.
+static void WarpLightTrace() {
+    COOP_TEST_SWITCH(bool, on, TestEnv("DC_COOP_WARPLIGHT_TRACE") != nullptr);
+    static int frames = 0;
+
+    if (!on || mode != GAME_MODE_EDIT || EdInteriorFlag != 0) {
+        return;
+    }
+    const bool      own = OwnWarpRuns();
+    const int       watched = g_warp_leaver > 0 && g_warp_lights[g_warp_leaver - 1].on ? g_warp_leaver : 0;
+    const long long left_ms = NetplayRole() == 1 ? CoopWorldsHerLeaveMs() : -1;
+
+    if (!own && watched == 0 && (left_ms < 0 || left_ms >= kHerLeaveMs)) {
+        return;
+    }
+    const int   leaver = own ? NetplayRole() : watched > 0 ? watched : 2;
+    char        light[96] = "light none";
+    float       l[3] = {};
+    bool        lit = false;
+    CCharacter *source = own ? static_cast<CCharacter *>(&EdEventInfo.npcs[6]) : watched > 0 ? g_warp_lights[watched - 1].body : nullptr;
+
+    if (source != nullptr && source->frame != nullptr) {
+        sceVu0FVECTOR at;
+
+        source->GetPosition(at);
+        l[0] = at[0], l[1] = at[1], l[2] = at[2];
+        lit = true;
+        std::snprintf(light, sizeof light, "light (%.1f %.1f %.1f) drawn %d", at[0], at[1], at[2], own ? EdEventInfo.npc_draw[6] : 1);
+    }
+    sceVu0FVECTOR toan = {};
+
+    if (Chara != nullptr) {
+        Chara->GetPosition(toan);
+    }
+    const char *as = "hidden";
+    float       body[3] = {toan[0], toan[1], toan[2]};
+
+    if (leaver == NetplayRole() && !(leaver == 2 && CoopTownSkinsToan())) {
+        as = "toan";
+    } else if (CCharacter *b = leaver == 2 ? WarpLeaverBody(2) : nullptr; b != nullptr) {
+        sceVu0FVECTOR at;
+
+        b->GetPosition(at);
+        body[0] = at[0], body[1] = at[1], body[2] = at[2];
+        as = leaver == NetplayRole() ? "skin" : "partner";
+    }
+    const float off = lit && std::strcmp(as, "hidden") != 0 ? std::hypot(l[0] - body[0], l[2] - body[2]) : -1.0f;
+
+    if (frames++ < 400) {
+        std::fprintf(stderr, "coop-warplight: p%d frame %d at link tick %lld: %s; player %d drawn as %s at (%.1f %.1f %.1f); Toan at (%.1f %.1f %.1f); off %.1f\n",
+                     NetplayRole(), frames, (long long) NetplayLinkTick(), light, leaver, as, body[0], body[1], body[2], toan[0], toan[1], toan[2], off);
+    }
+}
+
+// coop-cavewalk (DC_COOP_DEBUG): each drawn frame of a town event outdoors on a copy apart, who is drawn as this copy's player (the
+// draw's own choice: his body, her skin, nobody, else Toan), where, in which motion, beside the game's player (tests/test_town.py's
+// cave walks read it per frame).
+static void EventDrawSay() {
+    if (!CoopDebug() || !Enabled() || !CoopWorldsApart() || EdInteriorFlag != 0 || ::GameMode != ED_MODE_EVENT || Chara == nullptr || Chara->frame == nullptr) {
+        return;
+    }
+    static const char *const kNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
+    const TownBody &his = g_town_body[0];
+    const bool      body = GameBodyState() == 1 && !CoopTownEyeOnThisScreen() && his.set.body != nullptr;
+    const bool      skin = !body && g_town_skin && g_town.visible && g_town.body != nullptr && !HidesPartner() && g_indoor.was == (EdInteriorFlag != 0) &&
+                      !SceneHolds() && !(g_room_event.on && EdEventInfo.player_draw == 0);
+    const bool      none = !body && !skin && NetplayRole() == 2 && !CoopWorldsMergeStateInHere() && !NetplayStayerMerge();
+    sceVu0FVECTOR   game;
+
+    Chara->GetPosition(game);
+    const int    member = body ? his.loaded : skin ? g_town.loaded : 0;
+    const float *at = body ? game : skin ? g_town.pos : game;   // (his body is put at the game's player each frame: GameBodyDraw)
+    const int    motion = body ? (int) his.set.body->motion_no : skin ? (int) g_town.body->motion_no : (int) Chara->motion_no;
+
+    std::fprintf(stderr, "coop-town: frame: p%d town event %d draws its player as %s at (%.1f %.1f) motion %d; the game's player at (%.1f %.1f) motion %d\n",
+                 CoopWorldsSelf(), (int) EdEventInfo.event_no, none ? "nobody" : member >= 0 && member < 6 ? kNames[member] : "?", at[0], at[2], motion, game[0],
+                 game[2], (int) Chara->motion_no);
+}
+
+// coop-keydoor1118 (round 2): this copy's own player's prompts, pickers and rings (CoopDrawWheel) after the town's characters,
+// whether or not the other player's model was drawn: they are this player's, not the partner's. Before, CoopDrawWheel was called
+// only at the end of the partner's draw (TownPartnerDraw), so with the other player apart, indoors while this player is out (or
+// out while this one is in), hidden in a building or a scene, or in their room event, a swap question, use prompt, key picker
+// or ring stepped and waited for this player's buttons but was never drawn. DC_COOP_MUTATE=townalonedraw_off (twin): drawn only
+// beside the partner's model, as before.
+static void TownOwnUiDraw(bool partner_drawn) {
+    if (partner_drawn || !Mutated("townalonedraw_off")) {
+        CoopDrawWheel(); // this copy's player's prompts and rings (pad 2's character wheel, when open)
+    }
+}
+
+static bool TownPartnerDraw();
+
+// coop-soloxiao (DC_COOP_DEBUG): the frames the other player's town body is drawn, said when that changes (the first frame of a
+// town included), so a test reads a solo host's "never" and a join's "from this frame" as numbers.
+static bool TownPartnerDrawSaid() {
+    static int  drawn_before = -1;
+    static long frame = 0;
+    const bool  drawn = TownPartnerDraw();
+
+    frame++;
+    if (CoopDebug() && (int) drawn != drawn_before) {
+        drawn_before = drawn ? 1 : 0;
+        std::fprintf(stderr, "coop-town: p%d the other player's town body %s from town draw %ld (link tick %lld)\n", NetplayLocalPlayer(), drawn ? "drawn" : "not drawn", frame,
+                     (long long) NetplayLinkTick());
+    }
+    return drawn;
+}
+
 void CoopTownDraw() {
+    TownOwnUiDraw(TownPartnerDrawSaid());
+}
+
+// The other player's model in town (and the game's player's own member: GameBodyDraw); false when nobody was drawn beside him.
+static bool TownPartnerDraw() {
+    EventDrawSay(); // coop-cavewalk
     // (coop-gatepopup3: the other player's call apart is drawn with the town's late 2D, CoopP2TownMenuDraw, over her model; here,
     // among the characters, her model was drawn after it and stood in front of its buttons: Jep's 2026-10-28 Steam run. As
     // before with DC_COOP_MUTATE=call_under_world, the twin.)
     if (Mutated("call_under_world")) {
         coop::DrawCallQuestion();
     }
+    GameBodyDraw(); // coop-p1body: the game's player's own member, where Toan was left out
+    if (HerApartFisher() >= 0 && GameBodyState() == 1) {
+        return false; // coop-fishing3: her copy apart, her fishing: her own body is the game's player's (GameBodyMember's notes)
+    }
     // coop-inbuild: not on the other side of a door from where she last stepped (a frame between the door and her next step).
     // (coop-scenejoin: nor in his story scene in the room: SceneHolds)
     if (!g_town.visible || g_town.body == nullptr || HidesPartner() || g_indoor.was != (EdInteriorFlag != 0) || SceneHolds()) {
         DoorFadeNote(false, !g_town.visible ? 1 : g_town.body == nullptr ? 2 : HidesPartner() ? 4 : SceneHolds() ? 16 : 8);
-        return;
+        return false;
     }
 
     // coop-roomevent: her room event hides its player as the game's own hides Toan.
     if (g_room_event.on && EdEventInfo.player_draw == 0) {
-        return;
+        return false;
     }
 
     DoorFadeNote(true, 0); // coop-doorfade
@@ -7519,6 +10648,23 @@ void CoopTownDraw() {
     // light raised by EdLimitShadowLight (a shorter shadow) and blended at 0x34. Under the scene's own
     // light at the dungeon's 0x40 hers fell longer and darker than his (Jep, 2026-10-24).
     // DC_COOP_MUTATE=townshadowlight draws it that old way (the town shadow test's twin).
+    // coop-xiaofish: her fishing in her own member's body: its shadow and model in the fishing model's pose, the fishing model's
+    // rod, float and hook in its hand, no weapon (nor for a fisher drawn as Toan: Jep, nobody holds a weapon while fishing)
+    const bool  fishes = FishBodyShown(g_town_owner);
+    const bool  fishing_model = coop::fishbody::HoldsFishingModel(g_town.body) && !Mutated("fishbody_toan");
+    CCharacter *own = fishes ? g_town_body[g_town_owner].set.body : nullptr;
+
+    if (fishes) {
+        sceVu0FVECTOR at, turn;
+
+        g_town.body->GetPosition(at);
+        g_town.body->GetRotation(turn);
+        own->frame->SetPosition(at);
+        own->frame->SetRotation(turn[0], turn[1], turn[2]);
+        own->SetPosition(at);
+        own->SetRotation(turn[0], turn[1], turn[2]);
+        FishBodyPose(g_town_owner, g_town.body, own);
+    }
     CTexture *shadow = TexManager.GetTexture((char *) "shadow_buff", -1);
 
     if (shadow != nullptr && !Mutated("townshadow")) {
@@ -7535,7 +10681,7 @@ void CoopTownDraw() {
         MGSetPLight(shadow_light, colour);
         TexManager.ReloadTexture(Vif1Packet, 0x16);
         MGBeginDrawShadow(*(sceGsTex0 *) &shadow->tex0);
-        g_town.body->DrawShadow();
+        (fishes ? own : g_town.body)->DrawShadow();
         g_town.shadow_alpha = old_way ? 0x40 : 0x34;
         MGEndDrawShadow(g_town.shadow_alpha);
         MGSetPLight(light, colour);
@@ -7548,9 +10694,29 @@ void CoopTownDraw() {
     // texture misses during her model's draw, once a second with DC_COOP_DEBUG (a test reads them).
     const unsigned long misses_before = dc::render::PortTextureMisses();
 
+    if (fishes) {
+        FishPropsBegin(g_town_owner, g_town.body);
+    }
     TexManager.ReloadTexture(Vif1Packet, PartnerTextureBlock());
     g_town.body->TextureAnime(PartnerTextureBlock());
+    if (!fishes) { // coop-faces (fishing: the fishing model, its face hidden; the fisher's own body shows its looks below)
+        FacesThirdBodyForTest();
+        coop::FacesDraw(g_town.body, PartnerTextureBlock(), -1, "the other player's town body");
+    }
     g_town.body->Draw();
+    if (fishes) {
+        FishPropsEnd(g_town_owner);
+        TexManager.ReloadTexture(Vif1Packet, TownBodyBlock(g_town_owner));
+        own->TextureAnime(TownBodyBlock(g_town_owner));
+        coop::FacesDraw(own, TownBodyBlock(g_town_owner), g_town_owner, "the fisher's own body"); // coop-faces
+        own->Draw();
+        FishBodyDrawn(g_town_owner, g_town.body, own);
+    } else if (fishing_model) {
+        g_fish_seen[g_town_owner].toan++;
+    }
+    g_body_frame = g_draw_frame; // coop-warplight
+    WarpOrderNote(true);
+    TownWarpLightDraw();
 
     static unsigned long misses = 0;
     static int           frames = 0;
@@ -7570,22 +10736,33 @@ void CoopTownDraw() {
         std::fprintf(stderr, "coop-town: p%d her model in the test frame: drawn, waist on screen %d at (%.3f %.3f), %lu texture misses in the draw\n",
                      NetplayLocalPlayer(), seen && across >= 0.0f && across <= 1.0f && down >= 0.0f && down <= 1.0f ? 1 : 0, across, down,
                      dc::render::PortTextureMisses() - misses_before);
+        SayHerBlocksBound();
     }
     if (++frames % 60 == 0 && CoopDebug()) {
         std::printf("coop-town: p%d drew her model 60 frames, %lu texture misses\n", NetplayLocalPlayer(), misses);
         misses = 0;
     }
 
-    if (g_partner.weapon_loaded) {
+    if (g_partner.weapon_loaded && !fishing_model) {
         g_partner.weapon->Step();
         TexManager.ReloadTexture(Vif1Packet, PartnerWeaponBlock());
         g_partner.weapon->Draw();
+        g_fish_seen[g_town_owner].weapon++;
     }
-
-    CoopDrawWheel(); // pad 2's character wheel, when open
+    return true;
 }
 
 bool CoopTownSkinsToan() {
+    // coop-p1body: the game's player's own member is drawn in Toan's place (his body: GameBodyDraw, from CoopTownDraw)
+    if (GameBodyDrawn()) {
+        // coop-xiaofish: his fishing in his member's body: Toan's fishing model is drawn after all, with only its rod, float and hook
+        // (in the body's hand), till his body's draw (GameBodyDraw, right after the game's player's)
+        if (EdInteriorFlag == 0 && FishBodyShown(0)) {
+            FishPropsBegin(0, Chara);
+            return false;
+        }
+        return true;
+    }
     const bool skins = g_town_skin && g_town.visible;
     // (Not once a merge's host state is in: the game's player is player 1's Toan from there.)
     const bool p2_apart = Enabled() && (CoopWorldsApart() || PreJoinP2()) && NetplayRole() == 2 && !CoopWorldsMergeStateInHere() && !NetplayStayerMerge();
@@ -7609,7 +10786,16 @@ bool CoopTownSkinsToan() {
 // outside (Jep, 2026-10-24: "P2 still turns into Toan when entering the building"). Linked, or player 1's copy, nobody
 // is drawn beside him indoors, as before. DC_COOP_MUTATE=indoor_toan (twin): no skin indoors, Toan drawn as before.
 void CoopTownInteriorStep() {
+    // (coop-daycrash's test, DC_COOP_TEST_DAYTRANS_ASK=question:<n>: the first step this copy plays in a room, its load done)
+    if (static bool said = false; !said && TestEnv("DC_COOP_TEST_DAYTRANS_ASK") != nullptr && std::strncmp(TestEnv("DC_COOP_TEST_DAYTRANS_ASK"), "question:", 9) == 0) {
+        said = true;
+        std::fprintf(stderr, "coop-daytrans: test: this copy plays in the room %s at link tick %lld\n", EdInteriorName, (long long) NetplayLinkTick());
+        std::fflush(stderr);
+    }
     coop::BagSizeStep(); // coop-bags (a room has no CoopTownStep)
+    coop::FishPoolsStep(); // coop-fishpools
+    BodyBudgetForTest(); // coop-p1body
+    GameBodyStep();      // coop-p1body
     CoopTownDoorFadeSaid(); // coop-doorfade
     g_room_shown_before = g_town.visible; // coop-housefade
     g_town.visible = false;
@@ -7634,6 +10820,7 @@ static int g_door_skins = 0;
 static int g_door_toans = 0;
 
 void CoopTownDoorOpenStep() {
+    GameBodyStep(); // coop-p1body (a door's opening steps no walk)
     if (!Enabled() || !CoopWorldsApart() || NetplayRole() != 2) {
         return;
     }
@@ -7749,6 +10936,13 @@ void OwnTownView(float (*view)[4], float *eye, bool walking) {
         window_own = window_his = 0;
     }
 
+    // coop-daytrans: this copy's player watches the time of day's scene: its climb from their own camera.
+    if (EdInteriorFlag == 0 && CoopDayTransView(view, eye)) {
+        g_town_view.active = true;
+        HoldDrawRng();
+        return;
+    }
+
     // coop-eventslots: this copy's player's own event in their parked slot (another's holds the live engine): its camera here.
     if (EdInteriorFlag == 0 && CoopEventSlotsView(view, eye)) {
         g_town_view.active = true;
@@ -7810,6 +11004,17 @@ void OwnTownView(float (*view)[4], float *eye, bool walking) {
 
     // coop-scenejoin: his story scene in the room, together: her screen shows it from the game's camera (the scene's).
     if (!walking || (!g_town.visible && !merge_window) || !NetplayHasPlayer() || Chara == nullptr || SceneHolds()) {
+        return;
+    }
+    // coop-windmill: a finished part's scene outdoors that this copy's player came along to (its ready check): the scene's camera, as a
+    // room's story scene (her own camera stays hers through any other town event of his).
+    if (CoopWorldsPartSceneShown()) {
+        if (static int said = -1; said != EdEventInfo.event_no) {
+            said = EdEventInfo.event_no;
+            std::fprintf(stderr, "coop-town: player %d's screen shows the finished part's scene (town event %d) from its camera\n", NetplayLocalPlayer(),
+                         EdEventInfo.event_no);
+            std::fflush(stderr);
+        }
         return;
     }
 
@@ -7930,11 +11135,17 @@ void CoopTownView(float (*view)[4], float *eye, bool walking) {
     // copy, its drawn eye and look, the town's mode, which camera the game draws through, and her talk's and the merge's state.
     if (static const bool trace = TestEnvOn("DC_COOP_TEST_EYETRACE"); trace) {
         static long long frame_no = 0;
+        sceVu0FVECTOR    toan = {};
 
-        std::fprintf(stderr, "eyetrace: p%d f%lld lt%lld apart %d mode %d now %s eye (%.1f %.1f %.1f) fwd (%.2f %.2f %.2f) hertalk %d defer %d skin %d own %d\n",
+        if (Chara != nullptr) {
+            Chara->GetPosition(toan);
+        }
+        // (coop-housecam2: and the game's player's place, and retail's camera spot out of the last door taken, fix_camera_pos)
+        std::fprintf(stderr, "eyetrace: p%d f%lld lt%lld apart %d mode %d now %s eye (%.1f %.1f %.1f) fwd (%.2f %.2f %.2f) hertalk %d defer %d skin %d own %d toan (%.1f %.1f %.1f) door (%.1f %.1f %.1f)\n",
                      NetplayLocalPlayer(), frame_no++, (long long) NetplayLinkTick(), CoopWorldsApart() ? 1 : 0, (int) ::GameMode,
                      NowCamera == (CCamera *) &MainCamera ? "main" : NowCamera == (CCamera *) &TalkCamera ? "talk" : "other", eye[0], eye[1], eye[2], view[0][2],
-                     view[1][2], view[2][2], g_room_event.on ? 1 : 0, CoopTownSwapDeferred() ? 1 : 0, g_town_skin ? 1 : 0, g_town_view.own ? 1 : 0);
+                     view[1][2], view[2][2], g_room_event.on ? 1 : 0, CoopTownSwapDeferred() ? 1 : 0, g_town_skin ? 1 : 0, g_town_view.own ? 1 : 0,
+                     toan[0], toan[1], toan[2], fix_camera_pos[0], fix_camera_pos[1], fix_camera_pos[2]);
     }
     // coop-pt1111b (item 4, DC_COOP_DEBUG): on a copy whose player is not the reader of the own town event running, the most its
     // drawn eye moved in one frame through that event and the 10 frames after it (a frame drawn from the reader's event camera
@@ -7983,7 +11194,10 @@ void CoopTownView(float (*view)[4], float *eye, bool walking) {
     // camera), the farthest it stood from the copy's own player (Toan on player 1's copy, her on the others'; a camera left at someone else and
     // sliding back), and the most it moved in one frame (a cut, retail's at a talk's end too), said once it is over (x-talk-door -Back's line);
     // and each frame of those whose eye moved 40 or more. A walking camera moves a few units a frame and stands some 30 to 90 from its player.
-    if (static const bool debug = CoopDebug(); debug && NetplayHasPlayer()) {
+    // coop-talkdoor: "before" is the frames apart: the window starts at the split (it held the frames before it, the state load's camera walk
+    // to the talk spot when the stay apart was short: 475 from Toan 3 ticks after the load read as the merge's), and a copy apart counts its
+    // frames by its role (apart the link is down and no local player is set: those frames were skipped, and the ring kept the ones before the split).
+    if (static const bool debug = CoopDebug(); debug && NetplayRole() != 0) {
         struct EyeFrame {
             float        move, spike, off;
             std::int64_t tick;
@@ -8027,6 +11241,9 @@ void CoopTownView(float (*view)[4], float *eye, bool walking) {
             std::copy(last, last + 3, before);
             std::copy(eye, eye + 3, last);
             have++;
+            if (!apart_was && apart_now) {
+                ring_n = 0; // (the split: the frames before the merge are the ones apart)
+            }
             if (apart_was && !apart_now) {
                 left = 61;
                 from = NetplayLinkTick();
@@ -8150,6 +11367,75 @@ void CoopTownView(float (*view)[4], float *eye, bool walking) {
         }
         apart_was = apart;
         std::copy(eye, eye + 3, last);
+    }
+
+    // coop-doorcam (Jep's rc1 playtest: P1 went into the mayor's house, "P2's camera spun toward the house"): on every copy whose own
+    // player stayed in the town's outside at a split (either player, any number of them), its drawn view over the 120 frames after:
+    // the most it turned in one frame and the most it came to look away from where it looked at the split (degrees), and the most
+    // its eye moved in a frame. Another player's door is no turn of this one's camera (t-doorcam reads it).
+    {
+        static bool  stayed_was = false;
+        static int   frames = -1;
+        static float most = 0.0f, away = 0.0f, moved = 0.0f;
+        static float first[3] = {}, prior[3] = {}, eye_was[3] = {};
+        const bool   stayed = CoopWorldsStayedHere() && EdInteriorFlag == 0;
+        const float  forward[3] = {view[0][2], view[1][2], view[2][2]};
+        const auto   degrees = [](const float *a, const float *b) {
+            return std::acos(std::clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1.0f, 1.0f)) * 57.29578f;
+        };
+
+        if (stayed && !stayed_was) {
+            frames = 0;
+            most = away = moved = 0.0f;
+            std::copy(forward, forward + 3, first);
+        } else if (frames >= 0 && stayed && ++frames <= 120) {
+            most = std::max(most, degrees(prior, forward));
+            away = std::max(away, degrees(first, forward));
+            moved = std::max(moved, std::hypot(std::hypot(eye[0] - eye_was[0], eye[1] - eye_was[1]), eye[2] - eye_was[2]));
+            if (frames == 120) {
+                std::fprintf(stderr, "coop-town: p%d stayed outside at the split: over 120 frames its view turned at most %.1f degrees in a frame, "
+                                     "%.1f from where it looked, its eye at most %.1f in a frame\n",
+                             NetplayRole(), most, away, moved); // (the role: apart the local player reads 0)
+                std::fflush(stderr);
+                frames = -1;
+            }
+        } else if (!stayed) {
+            frames = -1;
+        }
+        stayed_was = stayed;
+        std::copy(forward, forward + 3, prior);
+        std::copy(eye, eye + 3, eye_was);
+    }
+
+    // coop-herswing: on every copy, once player 2's Circle swing begins (both copies step her camera), this copy's drawn view over the
+    // 120 frames after: the most it turned in one frame and from where it looked (degrees). Hers turns round behind her on her copy;
+    // every other copy's screen is its own player's and stays (t-doorcam -Case p2swing reads it).
+    {
+        static int   frames = -1;
+        static float most = 0.0f, away = 0.0f;
+        static float first[3] = {}, prior[3] = {};
+        const float  forward[3] = {view[0][2], view[1][2], view[2][2]};
+        const auto   degrees = [](const float *a, const float *b) {
+            return std::acos(std::clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1.0f, 1.0f)) * 57.29578f;
+        };
+
+        if (g_herswing_began) {
+            g_herswing_began = false;
+            frames = 0;
+            most = away = 0.0f;
+            std::copy(prior, prior + 3, first); // (the frame before the swing's first step)
+        }
+        if (frames >= 0 && ++frames <= 120) {
+            most = std::max(most, degrees(prior, forward));
+            away = std::max(away, degrees(first, forward));
+            if (frames == 120) {
+                std::fprintf(stderr, "coop-town: p%d's view over 120 frames from player 2's camera swing: at most %.1f degrees in a frame, %.1f from where it looked\n",
+                             NetplayRole(), most, away);
+                std::fflush(stderr);
+                frames = -1;
+            }
+        }
+        std::copy(forward, forward + 3, prior);
     }
 
     // coop-houseenter (DC_COOP_DEBUG; Jep, 2026-10-27: P1 came into the house where she was: her screen went black a few
@@ -8368,6 +11654,7 @@ void CoopTownViewEnd(CCamera *camera) {
 }
 
 void CoopTownSnapshotTexturesOut() {
+    GameBodyTexturesOut(); // coop-p1body
     if (Mutated("town_model_after_rebuild")) {
         return;
     }
@@ -8379,8 +11666,101 @@ void CoopTownSnapshotTexturesOut() {
     TexManager.CleanUpTextureList();
 }
 
+// jointake (the coordinator's option B, 11-12: the take's tick held the host 9-11 ms under load, 4-6 of them her model's load,
+// on a tick that already simulates ~8.5 ms): her model (file, pack, weapon) loads on the frame between the state set's
+// checkpoint and its take (SnapFrameStart), dormant (g_town.loaded stays -1: nothing steps or draws her); the take's TownLoad
+// takes it up and does only her place, her camera and the rest. DC_COOP_MUTATE=town_load_at_take (twin): at the take, as before.
+bool HostLoadsHerForSet();
+
+bool CoopTownPreloadForTake() {
+    if (g_preload.chara >= 0 || Mutated("town_load_at_take") || mode != GAME_MODE_EDIT || !HostLoadsHerForSet()) {
+        return false;
+    }
+    const auto     start = LoadClock::now();
+    const int      chara = TownMember();
+    const ModelSet now = ModelSetNow();
+    const int      loaded_chara = g_partner.loaded_chara;
+
+    ModelSetPut(g_preload.set); // (into the spare set: g_town.body and g_partner's buffers as they were, put back below)
+    const bool ok = TownLoadModel(chara);
+
+    g_preload.set = ModelSetNow();
+    ModelSetPut(now);
+    g_partner.loaded_chara = loaded_chara;
+    if (!ok) {
+        std::printf("coop: her town partner's model could not load ahead of the state set's take: at the take instead\n");
+        return false;
+    }
+    g_preload.chara = chara;
+    g_preload.map = MapNo;
+    g_preload.ms = LoadMsSince(start);
+    std::printf("coop: her town partner's model loaded ahead of the state set's take, unused till then: %.2f ms (her file %.2f ms, its pack %.2f ms, "
+                "the weapon %.2f ms)\n",
+                g_preload.ms, g_town_file_ms, g_town_pack_ms, g_town_weapon_ms);
+    std::fflush(stdout);
+    return true;
+}
+
+// jointake: a model loaded ahead that no take took up (the take refused, the session gone): her blocks emptied again, as before
+// it (in the town it was loaded in; elsewhere the area's own load already emptied them). Her next load is a whole one.
+void CoopTownPreloadDrop(const char *why) {
+    if (g_preload.chara < 0) {
+        return;
+    }
+    const bool here = mode == GAME_MODE_EDIT && MapNo == g_preload.map;
+
+    g_preload.chara = -1;
+    if (here) {
+        TexManager.DeleteTextureBlock(PartnerTextureBlock());
+        TexManager.DeleteTextureBlock(PartnerWeaponBlock());
+        TexManager.CleanUpBuffer();
+        TexManager.CleanUpTextureList();
+    }
+    std::printf("coop: her town partner's model loaded ahead was let go (%s)%s\n", why, here ? ": her texture blocks emptied" : "");
+    std::fflush(stdout);
+}
+
+// jointake: the texture slots (each slot's block, size, depth and name), retail's 72 blocks only (74-79 are player 2's
+// menu engine, this copy's own): a state set's take and its apply say it, so a row sees both copies' slots alike.
+std::uint32_t CoopTownTextureSlotsHash() {
+    std::uint32_t hash = 2166136261u;
+    auto          add = [&hash](const void *data, std::size_t size) {
+        const auto *bytes = static_cast<const unsigned char *>(data);
+        for (std::size_t i = 0; i < size; i++) {
+            hash = (hash ^ bytes[i]) * 16777619u;
+        }
+    };
+
+    static const bool each = TestEnvOn("DC_COOP_TEST_SLOTS_LOG"); // (a test's: each slot said)
+
+    for (int i = 0; i < kTextureCount; i++) {
+        const CTexture &tex = TexManager.textures[i];
+
+        if (tex.name[0] == 0 || tex.block < 0 || tex.block >= 72) {
+            continue;
+        }
+        if (each) {
+            std::fprintf(stderr, "coop-town: slot %d block %d %dx%d bpp %d tex0 %016llx %.32s\n", i, (int) tex.block, (int) tex.width, (int) tex.height,
+                         (int) tex.bpp, (unsigned long long) tex.tex0, tex.name);
+        }
+        add(&i, sizeof i);
+        add(&tex.block, sizeof tex.block);
+        add(&tex.width, sizeof tex.width);
+        add(&tex.height, sizeof tex.height);
+        add(&tex.bpp, sizeof tex.bpp);
+        add(tex.name, strnlen(tex.name, sizeof tex.name));
+        // (not TEX0: its TBP0/CBP are this copy's renderer keys, not VRAM (render/texture_registry.hpp: handed out round-robin per
+        // process), so her blocks 52/53 have other keys on a taker that loads her again after its apply; drawing only, read by no tick
+        // and no checksum. rejointex: j-joinload's "her copy B draws her" checks what a player sees of them)
+    }
+    return hash;
+}
+
 void CoopTownSnapshotApplied() {
     CoopEventSlotsApplied(); // coop-eventslots
+    // coop-p1body: the game's player's body, its blocks emptied before the apply (GameBodyTexturesOut), loaded again at once (as her
+    // town partner below): left to his next walking tick, Toan stood there for the ticks between on the copy that took the set.
+    GameBodyLoad();
     // coop-townstand: a state file's partner this copy had not loaded yet (CoopTownSyncApply): loaded now, at its place.
     if (g_file_load_due) {
         g_file_load_due = false;
@@ -8409,6 +11789,32 @@ void CoopTownSnapshotApplied() {
         g_town.loaded = -1;
     }
     g_reload_in_place = false;
+
+    // rejointex twin (DC_COOP_MUTATE=partner_keys_crossed, on the taker): her body sheets' keys put on other live sheets' (the town's),
+    // every slot still bound and no texture miss, the wrong pictures on her: j-joinload's colour check of her must FAIL on it.
+    if (Mutated("partner_keys_crossed")) {
+        const std::uint64_t keys = 0x3FFFull | (0x3FFFull << 37); // TEX0's TBP0 and CBP
+        int                 crossed = 0, from = 0;
+
+        for (CTexture &texture : TexManager.textures) {
+            if (texture.name[0] == 0 || texture.block != PartnerTextureBlock()) {
+                continue;
+            }
+            for (; from < kTextureCount; from++) {
+                const CTexture &other = TexManager.textures[from];
+                if (other.name[0] != 0 && other.block >= 0 && other.block < 72 && other.block != 26 && other.block != PartnerTextureBlock() &&
+                    other.block != PartnerWeaponBlock()) {
+                    break;
+                }
+            }
+            if (from >= kTextureCount) {
+                break;
+            }
+            texture.tex0 = (texture.tex0 & ~keys) | (TexManager.textures[from++].tex0 & keys);
+            crossed++;
+        }
+        std::fprintf(stderr, "coop: test: her body sheets' keys crossed with %d other sheets (partner_keys_crossed)\n", crossed);
+    }
 }
 
 void CoopTownTickView() {
@@ -8476,6 +11882,7 @@ struct TownSync {
     // by 120, whenever she walked into the merge (under load). DC_COOP_MUTATE=town_cam_last_own (twin): each copy its own.
     sceVu0FVECTOR cam_last;
     std::int32_t  visible; // coop-townstand: she was shown on the taker (a state file's load shows her only then)
+    std::int32_t  cam_behind; // coop-herswing: TownCam::behind
 };
 TownSync g_town_sync;
 
@@ -8508,6 +11915,12 @@ void CoopTownCamTestLine(long long tick) {
     std::fprintf(stderr, "\n");
 }
 
+// coop-localfix: a host with no partner in town loads her for the state set (CoopTownSyncTake); jointake: and ahead of it.
+bool HostLoadsHerForSet() {
+    return !Mutated("town_place_own") && !Mutated("host_loads_late") && g_town.loaded < 0 && Chara != nullptr && Chara->frame != nullptr &&
+           EdInteriorFlag == 0 && pEditGround != nullptr && SaveData != nullptr && SaveData->GetDngStatus() != nullptr;
+}
+
 void CoopTownSyncTake() {
     g_town_sync = TownSync{};
     PresenceGet(&g_town_sync.presence_was, &g_town_sync.presence_absent);
@@ -8517,11 +11930,13 @@ void CoopTownSyncTake() {
     // state set carries her and her copy keeps hers loaded (reloaded in place after the apply, CoopTownSnapshotApplied). Her
     // copy put hers away and loaded her again ticks later, and that late load drew her shadow alone. Not shown till she counts
     // as there (her presence), on both copies alike. DC_COOP_MUTATE=host_loads_late (twin): put away there, as before.
-    if (!Mutated("town_place_own") && !Mutated("host_loads_late") && g_town.loaded < 0 && Chara != nullptr && Chara->frame != nullptr &&
-        EdInteriorFlag == 0 && pEditGround != nullptr && SaveData != nullptr && SaveData->GetDngStatus() != nullptr) {
+    if (HostLoadsHerForSet()) {
         if (TownLoad(TownMember())) {
             g_town.visible = false;
-            std::printf("coop: her town partner loaded for the state set (the host had none)\n");
+            std::printf("coop: her town partner loaded for the state set (the host had none): %.2f ms on the game thread (her file %.2f ms, its pack %.2f ms, "
+                        "the weapon %.2f ms)%s\n",
+                        g_town_load_ms, g_town_file_ms, g_town_pack_ms, g_town_weapon_ms,
+                        g_town_ahead ? "; her model loaded ahead" : "; her model loaded here");
             TownCamInit(); // and her camera, from his (so her copy draws from it till the merge, not from his)
         } else {
             g_town.loaded = -1;
@@ -8536,6 +11951,7 @@ void CoopTownSyncTake() {
         g_town_sync.cam_indoor = g_town_cam.indoor ? 1 : 0;
         g_town_sync.cam_distance = g_town_cam.distance;
         g_town_sync.cam_swing = g_town_cam.swing;
+        g_town_sync.cam_behind = g_town_cam.behind; // coop-herswing
         sceVu0CopyVector(g_town_sync.cam_last, g_town_cam.last); // coop-camlast
         std::memcpy(g_town_sync.cam + from, reinterpret_cast<const unsigned char *>(g_town_cam.camera) + from, sizeof(CCameraFollow) - from);
     }
@@ -8587,6 +12003,7 @@ bool CoopTownPreJoinHere(float *toan, float *yaw) {
 // (netplay's routing) and the arriver has no body till it ends; on the tick the town or room walks again every copy runs the swap,
 // with his stand from the sender, on one link tick. This travels in the state set (kExtraSwapDefer).
 // DC_WORLDS_MUTATE=merge_into_her_event / merge_into_her_town_event (twins): the swap at the merge's start, as before.
+
 namespace {
 struct SwapDefer {
     std::int32_t on;
@@ -8666,6 +12083,7 @@ void CoopTownSwapDeferTick() {
     }
     if (mode != 2 || MapNo != g_defer.map) { // GAME_MODE_EDIT: the event took her out of the zone: the arriver went with her
         g_defer.on = 0;
+        g_own_camera.kept = false; // coop-housecam2
         CoopWorldsBagsBack();
         std::fprintf(stderr, "coop: her event left the zone with its swap due (mode %d): dropped\n", (int) mode);
         return;
@@ -8708,9 +12126,54 @@ void CoopTownSwapDeferTick() {
         g_defer.toan[1] = her[1];
         g_defer.toan[2] = her[2] + kTownSpawn * sinf(turn[1]);
         g_defer.yaw = turn[1];
+        g_own_camera.kept = false; // coop-housecam2: he arrives at her door, not where his own camera was
         std::fprintf(stderr, "coop: her scene left the room: he arrives beside her at the door (%.0f %.0f %.0f)\n", g_defer.toan[0], g_defer.toan[1], g_defer.toan[2]);
     }
     CoopTownBecomePartner(g_defer.toan, g_defer.yaw);
+}
+
+// coop-housecam2 (the developer's v0.2 rc4 playtest: "after leaving a building, the camera is stuck inside of the building instead of the real spot"):
+// player 1 came out of his house apart into the town where she stayed, and the merge went by her state. His copy had already run retail's
+// own way out of the door (editloop: the game's camera at the door's camera spot, looking at him), but the state set brought her copy's
+// game camera over it, and her copy had put that one behind his facing (CoopTownBecomePartner, as she became the partner): he faces away
+// from the door he came out of, so behind him is inside the house. Each player's camera is their own screen's (coop-wave3: out of the
+// checksum, nothing in the step reads it), so the copy arriving where it stands keeps its own game camera across the apply. Through her
+// event (the swap deferred to its end) it is kept aside for the swap instead, which puts it back where the event leaves the camera to him.
+// The partner's camera is the mod's own (TownCam: no state set region) and needs nothing here. DC_COOP_MUTATE=merge_cam_from_set (twin):
+// the set's camera, as before.
+
+void CoopTownOwnCameraBefore(bool lands_here) {
+    constexpr std::size_t from = offsetof(CCameraFollow, pos);
+
+    g_own_camera.held = false;
+    g_own_camera.kept = false;
+    if (!lands_here || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || Mutated("merge_cam_from_set")) {
+        return;
+    }
+    std::memcpy(g_own_camera.bytes, reinterpret_cast<const unsigned char *>(&MainCamera) + from, sizeof g_own_camera.bytes);
+    g_own_camera.held = true;
+}
+
+void CoopTownOwnCameraAfter() {
+    constexpr std::size_t from = offsetof(CCameraFollow, pos);
+
+    if (!g_own_camera.held) {
+        return;
+    }
+    g_own_camera.held = false;
+    sceVu0FVECTOR set_eye, own_eye;
+
+    MainCamera.GetPos(set_eye);
+    if (CoopTownSwapDeferred()) {
+        g_own_camera.kept = true;
+        std::fprintf(stderr, "coop: the arriver's own town camera kept aside for the swap at her event's end (the set's eye at (%.0f %.0f %.0f))\n", set_eye[0], set_eye[1],
+                     set_eye[2]);
+        return;
+    }
+    std::memcpy(reinterpret_cast<unsigned char *>(&MainCamera) + from, g_own_camera.bytes, sizeof g_own_camera.bytes);
+    MainCamera.GetPos(own_eye);
+    std::fprintf(stderr, "coop: the arriver's own town camera kept across the state set: eye (%.0f %.0f %.0f), the set's (%.0f %.0f %.0f)\n", own_eye[0], own_eye[1], own_eye[2],
+                 set_eye[0], set_eye[1], set_eye[2]);
 }
 
 bool CoopTownBecomePartner(const float *toan, float yaw) {
@@ -8749,6 +12212,7 @@ bool CoopTownBecomePartner(const float *toan, float yaw) {
     g_town_cam.map = MapNo;
     g_town_cam.distance = game->GetDistance();
     g_town_cam.swing = 0.0f;
+    g_town_cam.behind = 0; // coop-herswing
     g_town_cam.indoor = indoors;
     if (indoors) {
         g_indoor.was = true;
@@ -8802,7 +12266,16 @@ bool CoopTownBecomePartner(const float *toan, float yaw) {
     // slid from her to him over the next frames on his copy, whose screen it is (shown: x-talk-door-townher-back, his eye 506 from
     // Toan on the merge's first frame, 91 a frame back to him). Outdoors it comes with him now, as the town's own arrival puts it:
     // behind him, on every copy alike (the state both step). DC_COOP_MUTATE=merge_cam_left (twin): left at her, as before.
-    if (!indoors && !Mutated("merge_cam_left")) {
+    // coop-housecam2: on the copy that arrived, its own camera kept aside at the apply (above CoopTownOwnCameraBefore), where his own door left it.
+    if (!indoors && g_own_camera.kept) {
+        sceVu0FVECTOR own_eye;
+
+        g_own_camera.kept = false;
+        std::memcpy(reinterpret_cast<unsigned char *>(&MainCamera) + from, g_own_camera.bytes, sizeof g_own_camera.bytes);
+        MainCamera.GetPos(own_eye);
+        std::fprintf(stderr, "coop: her merge: the game camera is this copy's own again, eye (%.0f %.0f %.0f), Toan at (%.0f %.0f %.0f)\n", own_eye[0], own_eye[1], own_eye[2], at[0],
+                     at[1], at[2]);
+    } else if (!indoors && !Mutated("merge_cam_left")) {
         sceVu0FVECTOR turn;
         float         angle = 0.0f;
 
@@ -8896,6 +12369,7 @@ void CoopTownSyncApply() {
             g_town_cam.map = g_town_sync.cam_map;
             g_town_cam.distance = g_town_sync.cam_distance;
             g_town_cam.swing = g_town_sync.cam_swing;
+            g_town_cam.behind = g_town_sync.cam_behind; // coop-herswing
             g_town_cam.indoor = g_town_sync.cam_indoor != 0;
             if (!Mutated("town_cam_last_own")) {
                 sceVu0CopyVector(g_town_cam.last, g_town_sync.cam_last); // coop-camlast
@@ -9019,6 +12493,26 @@ bool TownMemberPickable(int chara) {
     return TownPickable(chara);
 }
 
+// coop-memberstage4 (item 5, the bodies of players 3 to 6 on a floor: design for six, test with two; "prove by numbers what can
+// be"): DC_COOP_TEST_BODY_BUDGET=1 on a dungeon floor too, once, at its 120th tick of play: the same measure (every member's dungeon
+// model and weapon as one more body each, in free blocks of the test's own, deleted after), so the floor's texture table says how
+// many more players' bodies it holds (players 3 to 6: four more, the game's player and the partner body loaded already; a body of
+// theirs would be loaded by the same LoadBodyInto, as every town body is). A player never sets the variable.
+void CoopBodyBudgetFloorTest() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_BODY_BUDGET");
+    static bool       done = false;
+    static int        ticks = 0;
+
+    if (!on || done || mode != GAME_MODE_DUNGEON || !CoopPlainPlay() || BtEventMode != 0 || UserStatus == nullptr || ++ticks < 120) {
+        return;
+    }
+    done = true;
+    char place[48];
+
+    std::snprintf(place, sizeof place, "floor %d (players' bodies on it)", (int) UserStatus->cur_floor + 1);
+    BodyBudgetMeasure("dungeon", selectMapNo, place);
+}
+
 int TownPlayerMember() {
     return TownMember();
 }
@@ -9028,8 +12522,10 @@ int TownPlayerMember() {
 // coop-bagapart (Jep's 2026-10-27 playtest: "P2 has P1's inventory when P1 isn't in the area"): player 2's copy apart in a
 // town or a building plays Toan with her member drawn in his place, and her bag is the game's pack (coop_worlds' SwapBags),
 // so the town's own menu (Item, Weapon, Allies) showed her items under Toan's name, portrait, weapons and status. Around its
-// init, step and draw her member is the party's current one, as her linked menu has it (coop_townmenu's ViewBegin); a member
-// she picks there (Allies) becomes the one she plays. DC_COOP_MUTATE=apart_menu_toan (twin): Toan's, as before.
+// init, step and draw her member is the party's current one, as her linked menu has it (coop_townmenu's ViewBegin).
+// DC_COOP_MUTATE=apart_menu_toan (twin): Toan's, as before.
+// coop-townally (11-16): its end once took a cur_chara her menu changed as her pick, but retail's town Allies page never changed
+// it (BATTLE_MENU_MODE_TOWN refuses the Cross): that pick is the page's own now (coop_prompt's TownAlliesPick, every player).
 static int g_apart_menu_chara = -1;
 
 void CoopTownApartMenuBegin() {
@@ -9057,14 +12553,8 @@ void CoopTownApartMenuEnd() {
         return;
     }
 
-    const int picked = status->cur_chara;
-
     status->cur_chara = (s8) g_apart_menu_chara;
     g_apart_menu_chara = -1;
-    if (picked != TownMember() && TownPickable(picked)) {
-        g_partner.choice = picked;
-        std::fprintf(stderr, "coop-town: player 2 picks member %d in her menu apart\n", picked);
-    }
 }
 
 namespace {
@@ -9156,8 +12646,9 @@ static float g_clock_before = 0.0f;
 static float g_now_before = 0.0f;
 
 static bool EveryoneInMenus() {
-    return OwnPauseAndGeorama() && !CoopWorldsApart() && g_town.visible && ::GameMode == ED_MODE_WALK && CoopTownP1MenuLocal() &&
-           (coop::PlayerInMenu(2, coop::kActorMenuTown) || CoopP2TownPaused() || CoopP2MenuOpen()) && !Mutated("menus_clock_runs");
+    // coop-townrings: each player's element ring in town is a menu of theirs, as on a floor (coop_wheel.cpp)
+    return OwnPauseAndGeorama() && !CoopWorldsApart() && g_town.visible && ::GameMode == ED_MODE_WALK && (CoopTownP1MenuLocal() || coop::ElementRingOpen(1)) &&
+           (coop::PlayerInMenu(2, coop::kActorMenuTown) || CoopP2TownPaused() || CoopP2MenuOpen() || coop::ElementRingOpen(2)) && !Mutated("menus_clock_runs");
 }
 
 // coop-pt1109c (Jep 11-09, playtest items 1b, 1c): retail's clock (MainEditMode) steps only in the town's walk, so his talk stood the clock on
@@ -9166,7 +12657,8 @@ static bool EveryoneInMenus() {
 // long talk plays once, with the clock as it then is (the LAST period, whatever passed). All of it reads GameMode and her talk's state, which step
 // alike on both copies, so it plays on one tick. Alone, as retail. Owed is kept apart from change_time_event: that flag stands the clock and shuts
 // the menus (retail's waits of moments), and a talk can be long.
-// Twins (opt8: a carried talk on retail's mode alone now; its clock twin went with the together path): day_change_no_hold (no wait), day_change_each (one play for each period owed).
+// Twins (opt8: a carried talk on retail's mode alone now; its clock twin went with the together path): day_change_no_hold (no wait), day_change_each (one play for each period owed). coop-joinload: day_change_each retired with its
+// row (x-town-talk-time-his~each, gone in coop-daytrans): the owed path is reached under daytrans_off alone, so no row could turn it on.
 namespace coop {
 namespace {
 int g_day_change_owed = 0;      // the changes owed through a talk (state set: both copies alike)
@@ -9182,17 +12674,27 @@ static bool OwnEventTalkClock() {
 }
 
 bool CoopTownDayChangeHeld() {
-    // (coop-eventslots: or anyone's own event in their parked slot, as the live one's: the change's scene never starts under it; a scene
-    // begun under a parked event's menu parted the copies at x-eventslots catch. DC_COOP_MUTATE=dayhold_ignores_parked: as before)
-    return Linked() && !Mutated("day_change_no_hold") && (::GameMode == ED_MODE_TALK || CoopTalkAny() || OwnEventTalkClock() ||
-                                                          (CoopEventSlotsAnyParked() && !Mutated("dayhold_ignores_parked"))); // (opt8: anyone's talk, from its slot; coop-scriptmenus: one player's own town event)
+    // coop-daytrans (Jep 11-11): together outdoors the change no longer waits for anyone: it starts at once in its world slot, its scene for
+    // the players free, the others skip it (CoopDayTransStart). Its parked-event hold (eventslots: a scene begun under a parked event's menu
+    // parted the copies) is gone with its cause: the event fade stepped in the draw (CoopTownFadeStepped). coop-daytrans2: apart nothing
+    // holds it either: the link is down there (Linked false), and retail's talk mode stands the clock (MainEditMode steps it in the walk
+    // alone), so no period falls due in a talk apart (x-town-daytrans apart). The hold below is reached under daytrans_off alone; its own
+    // twin day_change_no_hold, which no row could turn on to a failure (apart it changed nothing), went with it.
+    if (CoopDayTransTakes()) {
+        return false;
+    }
+    return Linked() && (::GameMode == ED_MODE_TALK || CoopTalkAny() || OwnEventTalkClock()); // (opt8: anyone's talk, from its slot; coop-scriptmenus: one player's own town event)
 }
 
 // cand57 (opt8 with coop-scriptmenus): the clock steps through a talk or one player's own town event as through a walk, for the others (Jep's talk
 // rule, pt1109c), unless every present player is in a talk or a menu (opt8's CoopTalkWorldHeld, Jep 11-09). opt8 keeps his talk together in the
 // walk's mode, so the walk's own rule (editloop: walking and not held) covers it; this covers the town's own talk mode and the own event.
+// (coop-daytrans2: apart the link is down and a copy is one player: retail's talk mode stands the clock, so no period falls due in a talk
+// there. DC_COOP_MUTATE=apart_clock_in_talk (twin, x-town-daytrans apart): the clock steps through a talk apart as through one together.)
 bool CoopTownClockRunsInTalk() {
-    return Linked() && (::GameMode == ED_MODE_TALK || OwnEventTalkClock()) && !CoopTalkWorldHeld();
+    const bool linked = Linked() || (CoopWorldsApart() && Mutated("apart_clock_in_talk"));
+
+    return linked && (::GameMode == ED_MODE_TALK || OwnEventTalkClock()) && !CoopTalkWorldHeld();
 }
 
 bool CoopTownOwnEventClockShort() {
@@ -9225,7 +12727,7 @@ bool CoopTownDayChangeOwedNow() {
     if (CoopTownDayChangeHeld() || change_time_event != 0) {
         return false;
     }
-    coop::g_day_change_owed = Mutated("day_change_each") ? coop::g_day_change_owed - 1 : 0;
+    coop::g_day_change_owed = 0;
     std::fprintf(stderr, "coop-town: nobody's talking: the day change asked for (%d still owed, clock %.3f, link tick %lld)\n", coop::g_day_change_owed, NowTime,
                  (long long) NetplayLinkTick());
     return true;
@@ -9235,6 +12737,30 @@ void CoopTownDayChangeStarted() {
     std::fprintf(stderr, "coop-town: the day change starts at link tick %lld, clock %.3f, period %d, %s\n", (long long) NetplayLinkTick(), NowTime, EdGetTime(NowTime),
                  CoopTalkAny() || ::GameMode == ED_MODE_TALK ? "someone talking" : "nobody talking");
     std::fflush(stderr);
+}
+
+// coop-daytrans (cause of what eventslots' dayhold guarded, x-eventslots dayhold~ignored run past its scene: OUT OF SYNC at 660): the
+// event engine's fade (fade_col, fade_in_out, fade_end) is the event's state, a script waiting on its end (_CHECK_FADE), and retail steps
+// it in its draw (EdFadeInOut). Linked, a copy whose player has a menu of their own open draws that menu (CoopTownDrawnMode), not the
+// town: its EdFadeInOut was not reached. There the board's closing fade-in stood at alpha 40.53 on the bait-menu player's copy and ran to
+// 0 on the other's; event 0x84's own fade then ended 16 ticks apart (its scene over at 614 and 630) and the copies parted. In the linked
+// town outdoors the fade steps once a tick on every copy, at the town's frame (and each event slot's fade in its own step), and the
+// draw only draws it. DC_COOP_MUTATE=fade_in_draw (twin): stepped in the draw, as before.
+namespace dc::game {
+void EdFadeStep(); // editloop3.cpp (coop-daytrans)
+} // namespace dc::game
+
+bool CoopTownFadeStepped() {
+    return Linked() && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && !Mutated("fade_in_draw");
+}
+
+void CoopTownFadeTick() {
+    g_draw_frame++; // coop-warplight: this tick's frame (the draw order trace)
+    TownWarpLightStep();
+    WarpLightTrace(); // (each town tick, drawn or not)
+    if (CoopTownFadeStepped()) {
+        dc::game::EdFadeStep();
+    }
 }
 
 // Test hook (DC_COOP_TEST_TALK_CLOCK=A,B[,her|,event]): 60 ticks into a talk (his; with ",her" hers with his over; coop-scriptmenus: with ",event" one
@@ -9676,6 +13202,7 @@ static void DoorPromptTest() {
 }
 
 void CoopTownWorldAsideTrace() {
+    g_edit_passes++;
     DoorPromptTest(); // coop-doorprompt
     // coop-pt1108c: DC_COOP_DEBUG: the clock while both parts menus are open (the tests read that it stands).
     if (static int both_ticks = 0; CoopDebug() && CoopP2MenuOpen() && ::GameMode == ED_MODE_GEORAMA_MENU && ++both_ticks % 30 == 1) {
@@ -9708,6 +13235,9 @@ void CoopTownWorldAsideTrace() {
             sum += std::fabs(anime->current[0]) + std::fabs(anime->current[1]) + std::fabs(anime->current[2]);
         }
         std::printf("coop-town: under player 1's %s map animations %d value %.4f\n", what, EditMapInfo->obj_anime_count, sum);
+    }
+    if (float her[4] = {0.0f, 0.0f, 0.0f, 1.0f}; TownPartnerShown(her, nullptr)) { // (the tests read that she walks under his pause)
+        std::printf("coop-town: under player 1's %s player 2 at (%.1f %.1f)\n", what, her[0], her[2]);
     }
     for (int i = 0; i < 10; i++) {
         if (EdVillagerInfo[i].placed != 0 && EdVillager[i].near_camera && EdVillager[i].frame != nullptr && EdVillager[i].CheckDraw() != 0) {
@@ -9787,6 +13317,8 @@ int CoopTownDrawnMode(int mode) {
 // all the same (her body in CoopTownStepAside, Toan in the town's own step), so this only draws. Builders stay out
 // (2026-10-21). DC_COOP_MUTATE=georama_walker_hidden: nobody drawn, as before (twin).
 void CoopGeoramaDrawWalker() {
+    CoopGeoramaDrawVillagers(); // coop-georamavillagers (the developer 11-18): and the villagers, walking (linked or apart)
+
     int local = NetplayLocalPlayer();
 
     if (local == 0 || !OwnPauseAndGeorama() || Mutated("georama_walker_hidden")) {
@@ -9798,6 +13330,7 @@ void CoopGeoramaDrawWalker() {
     if (local == 1) {
         // His copy, he builds: her body, unless she builds too.
         if (!g_town.visible || g_town.body == nullptr || HidesPartner()) {
+            TownOwnUiDraw(false); // coop-keydoor1118: his own prompts all the same (as CoopTownDraw's, with her out of sight)
             return;
         }
 
@@ -9842,6 +13375,9 @@ bool CoopTownHidesBuildHelp() {
     if (debug && left) {
         std::printf("coop-debug: p1 town hides her help bar a frame after her Georama closed\n");
     }
+
+    // coop-fishhud: and player 1's fishing help bar (the game's live slot) on every other player's copy (coop_eventslots.cpp).
+    hide = CoopFishingHidesLiveHelp() || hide;
 
     return hide;
 }
@@ -9956,6 +13492,74 @@ TownCam *WalkerCam(int index) {
     return WalkerFor(index) != nullptr ? &g_town_cam : nullptr;
 }
 
+// coop-daytrans (Jep 11-11: the time of day's scene plays only for players not busy): player k (0 up) plays in this town now.
+bool CoopTownPlayerPresent(int k) {
+    if (k == 0) {
+        return true;
+    }
+    decltype(g_town) *walker = WalkerFor(k);
+
+    return walker != nullptr && walker->body != nullptr && walker->visible;
+}
+
+// coop-storygaps: where player k's (1 up) own body stands in this town (its walker's), true when they play in it now. Every copy alike
+// (the walkers are lockstep state).
+bool CoopTownPlayerStandsAt(int k, float *at) {
+    decltype(g_town) *walker = WalkerFor(k);
+
+    if (k < 1 || !CoopTownPlayerPresent(k) || walker == nullptr) {
+        return false;
+    }
+    at[0] = walker->pos[0];
+    at[1] = walker->pos[1];
+    at[2] = walker->pos[2];
+    return true;
+}
+
+// coop-storygaps: the number of the player whose Cross starts the town's other body's own events (her room event's, her talk's).
+int CoopTownBodyPlayerNo() {
+    return kTownBodyPlayer;
+}
+
+// What player k (0 up) is busy with now, or nullptr when free: a talk, an event of their own (live or parked), their fishing, a menu
+// (the game's, a town's own, a shop), a message that waits for their Cross (a chest's), a pause or a Georama. All of it is state every
+// copy steps alike (the talks' and events' slots, the actor table's menu bits, the agreed pads' pauses), so every copy decides alike.
+const char *CoopTownPlayerBusy(int k) {
+    if (CoopTalkOn(k) || (k == 0 && ::GameMode == ED_MODE_TALK)) { // (coop-daytrans2: and the game's player's in retail's talk mode)
+        return "talking";
+    }
+    if (CoopEventSlotParked(k) || CoopTownOwnTownEvent() == k + 1) {
+        return "in an event of their own";
+    }
+    if (CoopFishingOn(k)) {
+        return "fishing";
+    }
+    if (coop::PlayerInMenu(k + 1)) {
+        return "in a menu";
+    }
+    if (CoopSysMesHolds(k + 1)) {
+        return "answering a message";
+    }
+    if (InQuestion(k)) { // coop-daycrash: a story start's box or question, a call's, a prompt of their own: the scene goes on without them
+        return "in a question";
+    }
+    // (the game's player: the town's own modes are his, retail's; but the event mode of another player's own event he walks beside: free)
+    if (k == 0 && ::GameMode == ED_MODE_EVENT && CoopTownOwnTownEvent() == 0) {
+        return "in an event";
+    }
+    if (k == 0 && ((::GameMode != ED_MODE_WALK && ::GameMode != ED_MODE_EVENT) || EdPauseFlag != 0)) {
+        return ::GameMode == ED_MODE_GEORAMA || ::GameMode == ED_MODE_GEORAMA_MENU ? "in the Georama" : "in a menu or paused";
+    }
+    // (a walker's own, by their number: their pause, town menu, Georama; coop-daytrans2, design for three)
+    if (k >= 1 && CoopGeoramaWalkerBuilds(k + 1)) {
+        return "in the Georama";
+    }
+    if (k >= 1 && CoopTownWalkerPaused(k + 1)) {
+        return "in a menu or paused";
+    }
+    return nullptr;
+}
+
 CCharacter *CoopTownPlayerBody(int index, CTexAnimeData **anime, int *anime_count) {
     if (index == 0) {
         if (anime != nullptr) {
@@ -10049,4 +13653,12 @@ void CoopTownWalkersForTest() {
 // coop-eventslots: event_no is one of the town's map event points' (the board's 11), not a door's, a talk's or a story's.
 bool CoopTownPlayerEventIsMap(int event_no) {
     return TownMapEvent(event_no);
+}
+
+// coop-wave3: the yaw her town stick is read against: her own camera's while linked, else the game's.
+float CoopTownPartnerCameraAngle() {
+    using namespace dc::game;
+    return coop::Linked() && coop::g_town_cam.ready ? coop::g_town_cam.camera->GetAngleH()
+           : EdMoveCharaInfo.camera != nullptr      ? EdMoveCharaInfo.camera->GetAngleH()
+                                                    : MainCamera.GetAngleH();
 }

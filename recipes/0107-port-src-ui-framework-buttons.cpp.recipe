@@ -1,0 +1,57 @@
+# port/src/ui/framework/buttons.cpp from Chronicle's port/src/ui/framework/buttons.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/ui/framework/buttons.cpp
+base port/src/ui/framework/buttons.cpp
+from b8fab49857a589de36328d2b18385c8d80e67cad
+to 22e664bba0e7d29524db852212a96bb1c6c5277b
+@@ -19,0 +20,2
++bool NetplayMutated(const char *name); // Jep (co-op), coop-swapbtn: coop/netplay_test.cpp (the twin's switch)
++
+@@ -73,2 +75,3
+- c55944f49735e64e
+- 4a3acafbdfc6619e
++    CTexture      tex{};     /**< Engine texture descriptor. */
++    unsigned      tbp = 0;   /**< Host texture key. */
++    std::uint64_t stamp = 0; /**< Jep (co-op), coop-swapbtn: the registry's stamp of the entry made at tbp. */
+@@ -463,0 +467,8
++// Jep (co-op), coop-swapbtn: the plates made, at namespace scope for TestButtonPlate.
++using ButtonCacheKey = std::tuple<int, int, int, int, int, int>;
++
++std::map<ButtonCacheKey, CachedButtonTex> &ButtonCache() {
++    static std::map<ButtonCacheKey, CachedButtonTex> cache;
++    return cache;
++}
++
+@@ -469,2 +480,2
+- 54d57768a1836670
+- 944b79f5b0561b25
++    using CacheKey = ButtonCacheKey;
++    auto &cache = ButtonCache();
+@@ -475,1 +486,7
+- 221c2d77be8fc122
++    // Jep (co-op), coop-swapbtn (Jep's 11-16 playtest: the swap question's YES plate drew a font sheet's glyphs): the plate is
++    // this cache's while its key holds the entry it made (the stamp), not merely while something lives there: a state set's
++    // texture rebuild puts the table's sheets at the table's keys, over this plate's. DC_NETPLAY_MUTATE=plate_key_live (twin):
++    // any live entry taken, as before.
++    static const bool key_live = NetplayMutated("plate_key_live");
++    if (it != cache.end() && it->second.tbp != 0 &&
++        (key_live ? PortKeyLive(it->second.tbp) : PortKeyStamp(it->second.tbp) == it->second.stamp)) {
+@@ -584,0 +602,1
++    entry.stamp = PortKeyStamp(tbp); // coop-swapbtn
+@@ -810,0 +829,17
++// Jep (co-op), coop-swapbtn (tests, DrawYesNoPopup's probe and plant in the mod): the plate BevelButton::Draw takes
++// for this box and style, made first when make (as a draw makes it), else the cache's own; nullptr when it holds none.
++// *made_stamp: the registry's stamp of the entry it was made as.
++CTexture *TestButtonPlate(const Rect &box, const ButtonStyle &style, bool make, std::uint64_t *made_stamp) {
++    const int seed_variant = (box.y / 13) + (box.x / 17) * 3; // (as BevelButton::Draw)
++    if (make) {
++        GetProceduralButtonTex(box.w, box.h, style.preset, style.rounded, seed_variant, style.pressed);
++    }
++    const ButtonCacheKey key{box.w, box.h, static_cast<int>(style.preset), style.rounded ? 1 : 0, seed_variant & 15, style.pressed ? 1 : 0};
++    const auto           it = ButtonCache().find(key);
++    if (it == ButtonCache().end() || it->second.tbp == 0) {
+=580 78757b23d6c7f9ec
++    }
++    *made_stamp = it->second.stamp;
+~476 828ca0d2cd83382f|    |
++}
++

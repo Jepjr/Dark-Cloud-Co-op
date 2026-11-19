@@ -101,9 +101,19 @@ int LateJoin(std::uint64_t identity);
 bool JoinHoldsHello();
 bool JoinPickTake(int &member, std::string &name);
 
+// coop-joinname (Jep 11-16: the join and leave notices name a player by its profile, never its address): this copy's own
+// profile name as the lobby shows it (its seat's, else the profile kept for its player id), "" none; and the name a seat of
+// the lobby's table shows for a player id (the host's table, or a guest's copy of it), "" when no seat has that player.
+std::string OwnName();
+std::string NameFor(std::uint64_t identity);
+
 // The table, for the game after the start and for a later test: seat k's member, -1 none.
 int  PickOf(int seat);
 bool NewGame();
+
+// coop-padlight: the seat (0 up) a controller of this copy plays in the open lobby, -1 none (no lobby, or no seat taken on it).
+// The host's own seat plays controller 1 (its pad is not kept).
+int SeatOfPad(int pad);
 
 } // namespace lobby
 } // namespace coop

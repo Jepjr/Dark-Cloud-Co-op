@@ -17,7 +17,10 @@ constexpr std::uint32_t kNetplayHelloMagic = 0x44434849; // "IHCD"
 struct NetplayHello {
     std::uint32_t magic;
     std::uint32_t player;
-    std::uint32_t protocol;
+    std::uint32_t protocol; // version-scheme: frozen at 28 from 0.1.1.5 (the counter is retired; release says the version)
+    // version-scheme (Jep 11-14): this copy's version, "0.1.1.5" (build\version.txt), NUL-padded. Right after protocol, so a
+    // Hello of another layout still carries it as far as the size check reads (netplay.cpp's helloHead).
+    char          release[16];
     std::uint64_t build;
     std::int32_t  delay;
     // This copy's session (new each time it links), whether it is at its first ready tick (not playing
@@ -60,7 +63,7 @@ struct NetplayHello {
     std::uint8_t  element_quick_select;
     std::uint8_t  swap_keeps_lock_on;
     std::uint8_t  coop;
-    std::uint8_t  coop_independent_cameras;
+    std::uint8_t  coop_independent_cameras; // (retired by coopoptions: always 0, every copy's camera its own)
     float         detail_distance;
     std::uint8_t  fast_messages;
     std::uint8_t  clock;
@@ -68,14 +71,36 @@ struct NetplayHello {
     std::int32_t  map;
     std::uint8_t  enemy_damage;
     std::uint8_t  player_damage;
-    std::uint8_t  own_bags; // separate item bags as they are in effect (config or DC_COOP_OWN_BAGS)
+    std::uint8_t  own_bags; // (retired by coopoptions: always 0, every player's bag their own)
     std::uint8_t  revive_powder; // coop-revive: the Revive Powder rule as it is in effect (DC_COOP_REVIVE_POWDER)
-    std::uint8_t  story_gather;  // coop-floorgate: game.coop_story_gather (bit 0); coop-gateflow: game.coop_gate_picker (bit 1); coop-eventslots: not game.coop_fishing_shared (bit 2); coop-pt1111o: game.coop_menus (bit 3), game.coop_menu_panel (bit 4)
+    std::uint8_t  story_gather;  // bits 0 and 1 retired (coop-gatherpicker; were story gather, gate picker); coop-eventslots: not game.coop_fishing_shared (bit 2); bits 3 and 4 retired (coopoptions); trade3: game.coop_swap_same_zone (bit 5)
     // coop-lobby: this copy's lobby identity (game.netplay_player_id), so a rejoin gets its seat back (protocol 12).
     std::uint64_t player_id;
     // release2 (protocol 21, train 56's one bump): the disc release this copy's game data comes from (NetplayHelloRegion).
     // Set by NetplayHelloMake alone, like player_id, so the settings part (NetplayHelloSettings) never differs by it.
     std::uint8_t  region;
+    // coop-joinload (protocol 24; Jep 11-11: a joiner always loads in as if it had just loaded the game): a copy joining from its title
+    // says 1 (kJoinAsks); the host answers 2 (kJoinLoads: its load pieces follow, the joiner loads the town as a save load does and the
+    // pair is apart from there) or links as before (the one exception: a rejoin to the floor it dropped from); the joiner, loaded,
+    // says 3 (kJoinLoaded). 0 in every other Hello. Set by netplay.cpp, never by NetplayHelloMake.
+    std::uint8_t  start_mode;
+    // coop-entrwin: this copy's place in a floor's entrance window apart (CoopWorldsWalkInRole: 1 the lead, 2 a walker, 0 none);
+    // and, set in the Hello the host links with alone (as link_source), the player whose own entrance both copies play at the
+    // lockstep at its entrance spot (coop::EntranceWalkStart), the host deciding it from both Hellos; 0 none.
+    std::uint8_t  walk_in;
+    std::uint8_t  entrance_walk;
+    // coop-entrance2 rule 3: a walker's arrival after the lead (ticks, CoopWorldsWalkInGap; 255 none), the stagger by arrival order.
+    std::uint8_t  walk_gap;
+    // coop-b4arrive (Jep's rc3 playtest: "P2 joined P1 on B4 and the floor entrance animation didn't play"): this copy's own arrival
+    // on the other's floor is under way and the merge forms in it (a pick join, CoopWorldsArrivalCut), so the other's state will
+    // land over it before it ends; and, set in the Hello the host links with alone (as entrance_walk), the arriver whose cut
+    // arrival both copies play at the lockstep (coop::ArrivalWalkStart), the host deciding it from the arriver's Hello; 0 none.
+    std::uint8_t  arrival_cut;
+    std::uint8_t  cut_walk;
+    // coop-joinname (Jep 11-16: "when a player joins the game, it shouldn't show their IP anymore since they will always join with an
+    // associated profile"): this copy's own profile name as its lobby shows it (coop::lobby::OwnName), NUL-padded, "" none. Set by
+    // NetplayHelloMake alone, like player_id. The join and leave notices name the player by it (netplay.cpp's PeerName).
+    char          profile[16];
 };
 #pragma pack(pop)
 
@@ -107,13 +132,16 @@ void NetplayHelloLogSha();
 bool NetplayHelloStop();
 
 // coop-pt1111o: what a joiner is told when it takes the host's co-op settings: those of the host's that differ from this
-// copy's, as "game.coop_menus on (yours: off)", comma-separated. Empty when none differ.
+// copy's, as "game.coop_swap_same_zone on (yours: off)", comma-separated. Empty when none differ.
 std::string NetplayHelloAdoptNote(const NetplayHello &mine, const NetplayHello &host);
 
 // Empty when the two copies can link; else what keeps them apart, as the HUD and the log say it.
 std::string NetplayHelloCompare(const NetplayHello &mine, const NetplayHello &theirs);
-// coop-hellosize51: this build's protocol (a Hello of another size is read against it).
+// coop-hellosize51: this build's protocol (a Hello of another size is read against it). Frozen at 28 (version-scheme).
 std::uint32_t NetplayHelloProtocol();
+// version-scheme: this copy's version ("0.1.1.5"), and whether two Hellos say one version.
+const char *NetplayHelloRelease();
+bool        NetplayHelloSameRelease(const NetplayHello &mine, const NetplayHello &theirs);
 
 // The way past differing settings: when only settings a running game can change differ (not the
 // build, the protocol or the language), the joiner takes the host's for this run only: config.json keeps
@@ -123,8 +151,18 @@ void NetplayHelloAdopt(const NetplayHello &host);
 // coop-pt1111p: the keys NetplayHelloAdopt sets, copied from one settings set into another (config.json keeps from's).
 namespace dc::platform { struct Config; }
 void NetplayHelloAdoptedKeys(dc::platform::Config &to, const dc::platform::Config &from);
+// coop-soakjoin: the adopted keys one at a time (their config.json names, each value in 32 bits), for netplay.cpp's kCmdSetting.
+int           NetplaySharedKeyCount();
+const char   *NetplaySharedKeyName(int key);
+std::uint32_t NetplaySharedKeyGet(const dc::platform::Config &config, int key);
+void          NetplaySharedKeySet(dc::platform::Config &config, int key, std::uint32_t value);
 // netplay.cpp: the adopted keys as this run's (on) or not (off); with the title's online session in one.
 void NetplayAdoptSession(bool on);
+// coop-soakjoin (netplay.cpp): linked, the shared keys change on every copy on one tick (kCmdSetting); a link up (they are
+// those running), the session over (its own again), and an adopt's change (Taking: the host's, set as they come).
+void NetplaySharedSettingsLinked();
+void NetplaySharedSettingsEnded();
+void NetplaySharedSettingsTaking(bool on);
 
 // coop-joinfix: only the settings part of this copy's Hello (from tick_rate on), without its state digest (which reads every
 // save slot); and whether two Hellos' settings parts differ.

@@ -23,6 +23,20 @@
 
 namespace coop {
 
+// coop-downmenu (the developer's rc5b playtest, 11-19: "dead players ... can't open their menu. dead players should be able to escape even if they
+// can't use inventory items or anything like that"): a player lying down opens their own local menu (linked) as one standing does, but
+// only for the dungeon's way out, retail's Move page ("Leave the dungeon?": an Escape Powder from their bag if they carry one, else half
+// their gilda, free with the floor cleared). It opens on that page's icon; every other page (items, weapons, members, Atla, options,
+// save, manual, quit) is refused with the refuse sound. It stays open while they lie there (a menu opened standing still closes as its
+// player goes down). Their leaving is any player's menu Escape (CoopWorldsExitBy: the worlds part, the others stay and play on), and
+// they get up as they go (DownPlayerLeaves). DC_COOP_MUTATE=downmenu_shut (twin): a downed player's menu opens no more, as before;
+// downmenu_pages (twin): it opens with every page.
+// Whether that player's Triangle opens their menu while they lie down (the same answer on every copy).
+bool FullMenuDownOpens(int player);
+// From the ring's page choice (main_ring.cpp's PortBattleMenuSelect): whether the menu stepping now is a downed player's, its Move page
+// alone open to it.
+bool FullMenuDownOnly();
+
 // Whether the menu is open beside the running world now.
 bool FullMenuLive();
 
@@ -35,6 +49,12 @@ bool FullMenuLoading();
 // the files once read; PresentationFilesCheck each tick of the presentation's loop (built: its models made from them): a
 // line when they changed.
 u_char *PresentationBuffer(u_char *retail);
+// coop-menubuffers: the floor's battle menu's work area (BtlMenuBufferSet's dungeon case): a pinned block of its own, not retail's read_buffer.
+u_long128 *DungeonMenuWorkBuffer(u_long128 *retail);
+// coop-menubuffers: the Use Item window's pak (InitEventItemSelect: eventmnu2.pak and its message set): a pinned block of its own.
+u_long128 *EventItemSelectBuffer(u_long128 *retail);
+// coop-menubuffers: the work area of a script's world map and name entry (edit.cpp's EdInitMenu): a pinned block of its own.
+u_long128 *ScriptMenuReadBuffer(u_long128 *retail);
 void    PresentationReadsBegin();
 void    PresentationReadsEnd();
 void    PresentationFilesTrace(const void *at, std::size_t size);
@@ -53,6 +73,8 @@ int FullMenuOwner();
 // coop-fullmenu: whether this player has a menu open (the first or the second; both players can, 2026-10-24). coop-localmenu:
 // as the step knows it, the player's in-menu bit (PlayerInMenu, set by its open command on every copy alike).
 bool FullMenuOpenFor(int player);
+// coop-ports2 (tests): the link tick of the last menu write applied, -1 before one.
+std::int64_t FullMenuTestWriteTick();
 // coop-localmenu: whether this copy's menu engine runs that player's menu now (what the open and close commands report).
 bool FullMenuRunsFor(int player);
 // coop-pt1111n: inside her menu's view (UserStatus->cur_chara is her member) player 1's member, which the view kept; else -1.
@@ -63,12 +85,13 @@ bool FullMenuRunsLocalFor(int player);
 // From retail's menu opening (movechara.cpp, a recipe), on every copy alike: true when it took the opening (the world enters
 // no menu task); false leaves it to retail's tasks, as before.
 bool FullMenuOpenLocal();
+void FullMenuDropPortOne(int mask); // coop-soakfloor: those buttons off port 1 for the rest of the tick
 // Whether menus run local (linked, the menus on): Route moves no port on a menu's Triangle then.
 bool FullMenuLocalOn();
 bool FullMenuCarryOn(); // coop-small2: local menus as a merge carries one (no linked partner yet)
 // coop-soakfix4: local menus on but for the partner being linked (a catch-up under way counts: the link is up).
 bool FullMenuLocalOnLinkUp();
-// coop-menulocal: the pad button (kInput*) that opens a local menu: Triangle, Start with game.coop_menu_panel on.
+// coop-menulocal: the pad button (kInput*) that opens a local menu: Triangle.
 std::uint16_t FullMenuLocalButton();
 // The map jump that player's closed local menu left (the close command carries it).
 int FullMenuCloseJump(int player);
@@ -87,6 +110,12 @@ bool FullMenuHoldsPartner();
 
 // BattleMenuDraw: whether to leave out the still frame it draws behind the menu (the world is live).
 bool FullMenuLiveScene();
+// coop-swapmenulook: the menu's backdrop at retail's brightness (PortDrawBattleMenu's bright: 0x80 to 0x40 as it opens, 0x40 open,
+// back up as it closes): over the live scene a black fill that leaves the scene at that brightness, as the still is drawn.
+void MenuBackdrop(int bright, bool live);
+// coop-swapmenulook: the still frame_image made the scene as just drawn (the pages draw pieces of it over themselves).
+void MenuStillFromScreen();
+void MenuOldFillTrace(int black); // (the twin's old fills, logged under DC_MENU_BACKDROP_TRACE)
 
 // coop-menuflash: the dungeon's MainDraw: whether this copy draws the mini-map that the other player's menu (opening
 // or open) hid on both copies.
@@ -96,8 +125,8 @@ bool FullMenuMapKept();
 // (opening or open) hides it.
 int FullMenuHudY(int y);
 
-// Session reset: closed.
-void FullMenuResetForSession();
+// Session reset: closed. coop-menushut: keep_own_local, this copy's own local menu's engine goes on (a checkpoint's self-take).
+void FullMenuResetForSession(bool keep_own_local = false);
 
 // coop-quitown (Jep's note 9, 2026-10-25: "P2 closed P1s game when hitting quit from menu"): the menu's Quit Game runs
 // on both linked copies (each steps every menu on the agreed pads), so only the copy of the player whose menu it is
@@ -140,7 +169,7 @@ bool MenuBuildsWorldWeapon(int chara);
 // player's, who left with it open, Jep's 2026-10-24) ends with the menu's own way out (ExitBattleMenu), and the
 // pad leaves the menu's stick mode, or this copy's player walks with the stick stepping the quick-use slot.
 // DC_COOP_MUTATE=staymenu (its twin): both stay, as before.
-void FullMenuEndForSplit();
+void FullMenuEndForSplit(bool keep_local = false); // coop-016: keep_local, this copy's own local menu goes on (option A)
 // coop-pt1106-lockup: the sender's own retail floor menu goes on as a local menu as a take comes due (coop_fullmenu.cpp).
 bool FullMenuRetailToLocal(int stayer = 0);
 // coop-soakfix4: the menu beside the world (g_full), opened during a catch-up, goes on as a local menu as the lockstep starts.
@@ -189,15 +218,15 @@ void MenuCameraSwap(MenuCameraOwn &own);
 // them it holds (only the 16 the world reads, since their removal) and a hash of the others' bytes on this copy.
 void MenuWorkCensus(std::size_t *held, std::size_t *total, std::uint32_t *own_hash);
 void MenuWorkRegionsAll(void (*add)(void *at, std::size_t size, void *context), void *context);
+void OwnSoundRegionsAll(void (*add)(void *at, std::size_t size, void *context), void *context); // coop-soundset (coop_ownlook.cpp, the sound_in_set twin)
+void OwnLookRegionsAll(void (*add)(void *at, std::size_t size, void *context), void *context); // coop-wave4 (coop_ownlook.cpp, the look_in_set twin)
 // (DC_COOP_MUTATE=merge_menu_retail or scriptmenu_merge_retail, a retail menu stepped in the lockstep through a merge: their twins
 // need the menu state carried, as before)
 bool MenuRetailLockstepMutated();
-// coop-pt1111m: the menus are retail's, in the lockstep (game.coop_menus off): their working globals are world state, in the set
-bool MenuWorkInSet();
-bool          MenuWorkKeptMutated(); // (DC_COOP_MUTATE=menusoff_menu_out, the twin: a link's apply keeps this copy's own)
-void          MenuWorkSave(std::vector<unsigned char> &out);
-void          MenuWorkRestore(const std::vector<unsigned char> &in);
-std::uint32_t MenuWorkHash();
+
+// coop-wepmenu: whether a menu's opening reads every character's weapons page files ahead, off the game thread (menu_misc.cpp's
+// MenuWeaponPagePrefetch); DC_COOP_MUTATE=wepmenu_no_prefetch: not (the twin: the page opens each file on the game thread).
+bool WeaponPagePrefetchOn();
 
 } // namespace coop
 

@@ -302,7 +302,8 @@ int main(int argc, char **argv) {
                                 "\nstatus=" + SteamCoreStatus() + "\ninvited=" + std::to_string(SteamCoreInvited() ? 1 : 0) +
                                 "\nfind=" + std::to_string(find) + "\nhost=" + std::to_string(find_host) + "\nhostname=" + find_name +
                                 "\npaced=" + std::to_string(SteamCorePaced() ? 1 : 0) + "\ninputon=" + std::to_string(SteamCoreInputOn() ? 1 : 0) +
-                                "\nqok=" + std::to_string(qok ? 1 : 0) + "\nqpend=" + std::to_string(pending) + "\nqrate=" + std::to_string(rate) +
+                                "\nqok=" + std::to_string(qok ? 1 : 0) +
+                                "\nqstate=" + std::to_string(watched_session != 0 ? SteamCoreSessionState(watched_session) : -1) + "\nqpend=" + std::to_string(pending) + "\nqrate=" + std::to_string(rate) +
                                 "\nline=" + (lok ? line : "") + "\nlisten=" + std::to_string(SteamCoreListening()) + "\nrefused=" + (*SteamCorePickRefused() != '\0' ? std::to_string(picked) + "\t" + SteamCorePickRefused() : std::string()) + "\n";
 
             if (listing) {

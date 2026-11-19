@@ -52,6 +52,23 @@ void OthersKeyItemMes(int player, int item, int volume);
 // message waiting for the opener's Cross there, as before.
 void OthersAtlaNotice(int opener, int map_no, int atla);
 
+// coop-notices (Jep 11-18): who hears of a find. Picker: its finder alone; SameFloor: every player on the find's dungeon floor
+// (together that is everyone in the pair's world; apart, a player in the floor's other half); Everyone: every player in the session,
+// wherever they are (an Atla: the Georama is everyone's). PickupAudience: an item's (an Atla's is Everyone).
+enum class Audience { Picker, SameFloor, Everyone };
+Audience PickupAudience(int item);
+Audience AtlaAudience();
+// Apart: another player's find heard by the progress channel (kind 0 an Atla: map_no its dungeon, id its atla; kind 1 an item: id
+// the item). Queued, and shown in the game's own message window on this player's screen for an item drop's time once this player
+// is free (ApartNoticeTick's free: playing or walking, no menu, talk, event or message of their own up); it holds nobody (no key,
+// no walk held) and waits on nobody. Together again before it showed: dropped (said).
+void ApartNoticeHeard(int finder, int kind, int map_no, int id);
+void ApartNoticeTick(bool free);
+// The system message up now is such a notice (the town's walk is not held by it).
+bool SystemMesNotice();
+// The message an apart find notice showed, while it is still up (-1: none): the tests' line.
+int  ApartNoticeUp();
+
 // Coop code that set DngMessMan's message for player 2 (her weapon's wear, break, build-up) says so after it.
 void DngMesBy(int player);
 // The dungeon's draw: whether this copy draws DngMessMan's message.

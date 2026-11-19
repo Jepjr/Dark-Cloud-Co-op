@@ -1,0 +1,25 @@
+# tools/kazarov/include/platform/input.hpp from Chronicle's tools/kazarov/include/platform/input.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target tools/kazarov/include/platform/input.hpp
+base tools/kazarov/include/platform/input.hpp
+from 3a686a9eb43590719f91ad5dbd470ee65e3ecfc2
+to ac2c34f6ca8758aee642f2d45e1532597dc1d944
+@@ -24,1 +24,4
+- e37c841482ad482d
++// Jep (co-op): four slots, not two: a third controller was never opened (Jep's PC, 2026-11-12: an Azeron keypad and two
++// Xbox pads, the second Xbox pad dead). The game reads ports 0 and 1; the others are for a lone player's merged pad 0
++// (InputSetPadsMerged) and for handing controllers to players on this PC.
++constexpr int kInputPadCount = 4;
+@@ -62,0 +66,4
++    // Jep (co-op), coop-wave3: the camera yaw this pad's left stick is read against (each player's camera is its own copy's;
++    // the yaw goes with the pad so every copy steps the same move), in 65536ths of a turn. kInputNoSteer: none (the game
++    // reads its camera, as retail).
++    std::int32_t steer = INT32_MIN;
+@@ -63,0 +71,1
++constexpr std::int32_t kInputNoSteer = INT32_MIN; // Jep (co-op), coop-wave3
+@@ -143,0 +152,6
++// Jep (co-op): one player on this PC with no controller handed to anyone else: pad 0 reads every connected
++// controller at once (buttons added, each stick from the pad pushing it furthest) with the keyboard and mouse, so
++// every screen that reads pad 0 takes them all. Off (the default) reads pad 0 alone.
++void InputSetPadsMerged(bool on);
++bool InputPadsMerged();
++

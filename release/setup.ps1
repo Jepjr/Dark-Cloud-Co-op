@@ -773,9 +773,12 @@ Step '7/8 The mod folder' {
     $script:exeSha = $sha
     $pinLines = Get-Content -LiteralPath (Join-Path $work 'chronicle-pin.txt') | Where-Object { $_ -match '^(upstream|kazarov)\s' }
     Set-Content -LiteralPath (Join-Path $mod 'VERSION.txt') -Value @(
-        "Dark Cloud Co-op $($release.version)", "mod $($release['mod-commit'])", "build version $script:buildVersion", $pinLines, "game\darkcloud.exe SHA-256 $sha",
+        "Dark Cloud Co-op $($release.version) (the setup: built on this PC)", $(if ($release['content-version']) { "content-version $($release['content-version'])" }),
+        "mod $($release['mod-commit'])", "build version $script:buildVersion", $pinLines, "game\darkcloud.exe SHA-256 $sha",
         "game data: $data ($($release['data-release']))",
-        'Both players need the same release (the link checks it), on Chronicle at the same commit, with their own NTSC (US 1.02) disc.')
+        # (dropin, Jep 11-12: the link compares the content version, so this build links with the release's drop-in zip too)
+        'Players link when their builds have the same content-version: this setup, the drop-in zip of this release and',
+        'builduild.ps1 of this commit all make the same exe. Each player uses their own NTSC (US 1.02) disc.')
 }
 
 # 7. The temporary build folder, deleted.

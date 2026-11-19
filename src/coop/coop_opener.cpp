@@ -4,6 +4,7 @@
 #include "coop/coop.hpp"
 #include "coop/coop_actor.hpp"
 #include "coop/coop_camera.hpp"
+#include "coop/coop_writeguard.hpp" // coop-tripwires2
 #include "coop/coop_core.hpp"
 #include "coop/coop_menu.hpp"
 #include "coop/coop_message.hpp"
@@ -15,6 +16,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib> // coop-tripwires2: std::abort
 #include <cstring>
 #include <utility>
 
@@ -30,6 +32,8 @@
 #include "dngmessageman.hpp"
 #include "dngstatusdata.hpp"
 #include "dun/gameloop.hpp"
+#include "framevu1.hpp"    // coop-camflash
+#include "motionmodel.hpp" // coop-camflash
 #include "dungeonmap.hpp"
 #include "gamepad.hpp"
 #include "itemdata.hpp"
@@ -68,6 +72,10 @@ extern s32            iventMarker;
 extern s32            atraGetMsgBord;
 extern s32            infoMap;
 extern s32            infoMapOld;
+void ClearSystemMes();
+void SystemMesStep();
+void SystemMesDraw();
+void SysMesStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context); // sysmes.cpp
 } // namespace dc::game
 
 namespace coop {
@@ -96,6 +104,23 @@ struct Present {
 
 Present g_present[kMaxPlayers];
 
+// coop-bigchestp2 (Jep's 11-15 playtest: "Opening a big chest as P2 didn't prompt with the chest opening options, it just played
+// the non-cinematic chest opening animation and said that the sword was acquired without actually showing the sword"): whether
+// the opener is this copy's own player, so its engine (retail's presentation: its camera, the item held up, its message and
+// the end that frees the opener) runs here. Linked, the link's player. Unlinked (apart, or a host alone) the copy plays one
+// player, the game's player (the resident, CharaMain): NetplayLocalPlayer() is 0 there unless the copy records a catch-up
+// (g_solo), so on her copy gone ahead alone onto a floor (no recording) her own chest was taken for another player's: no
+// engine, the others' notice, and no end (she stayed posed in it). DC_COOP_MUTATE=opener_local_only (twin): the link's player
+// alone, as before.
+bool OpenerHere(int opener) {
+    const int local = NetplayLocalPlayer();
+
+    if (local != 0 || Mutated("opener_local_only")) {
+        return local == opener;
+    }
+    return opener == ActorNumber(0);
+}
+
 // The opener's chest pose pack (its member's _ex00.chr, retail's Init loads it into BtCashBuffer for sled 0's LoadPackData),
 // loaded on every copy into pinned arenas: one address on every copy, carried by the state set, as CharaMain's motions point
 // into it.
@@ -118,6 +143,7 @@ struct Engine {
     CGamePad       pad{};
     InputPadState  before{};
     int            steps = 0;
+    bool           zero_pad = false; // the twin's line said (once per presentation)
 };
 
 Engine g_opener_engine;
@@ -151,6 +177,46 @@ void ScreenPut(const ScreenKept &k) {
     atraGetMsgBord = k.board;
     infoMap = k.map;
     DngMessMan.enabled = k.window;
+}
+
+// coop-tripwires3 (the write guard on the engine's early stop: EngineClear wrote DngMessMan.enabled, itemOpenSmallFlag and infoMap on
+// the opener's copy alone when a state set without the presentation ended its world half): the engine's screen state (the opening
+// box's and the Atla's flags, the message window's switch, the mini-map's and its kept value) is the engine's own, not the world's.
+// It is exchanged in around what reads or writes it for the presentation, on the opener's copy alone: the engine's step, the floor's
+// draw (CoopViewBegin/End) and motionDrive's steps of the presentation's effects; the world's words are left as every copy has
+// them, so nothing is put back at its end or kept around a state set (PresentSetScope has nothing to do). Made at the engine's
+// start from the world's words, as retail's presentation starts from them. DC_COOP_MUTATE=opener_screen_world (twin): the world's
+// words, kept and put back as before.
+struct ScreenOwn {
+    ScreenKept k;
+    s32        map_old = 0;
+    bool       made = false;
+    int        depth = 0;
+};
+ScreenOwn g_engine_screen;
+
+void EngineScreenSwap() {
+    ScreenOwn &s = g_engine_screen;
+
+    std::swap(itemOpenSmallFlag, s.k.small);
+    std::swap(itemOpenBigFlag, s.k.big);
+    std::swap(atraGetStatus, s.k.atla);
+    std::swap(atraGetMsgBord, s.k.board);
+    std::swap(infoMap, s.k.map);
+    std::swap(infoMapOld, s.map_old);
+    const bool window = DngMessMan.enabled != 0;
+
+    DngMessMan.enabled = s.k.window;
+    s.k.window = window;
+}
+
+void EngineScreenStart() {
+    if (Mutated("opener_screen_world")) {
+        return;
+    }
+    ScreenSave(g_engine_screen.k);
+    g_engine_screen.map_old = infoMapOld;
+    g_engine_screen.made = true;
 }
 
 bool LoadPosePack(const char *path) {
@@ -300,10 +366,23 @@ struct WorldKept {
     int           interpolate_;
 };
 
+// coop-bigchestp2: unlinked (apart, a host alone) the copy has no agreed pads (NetplayPlayerPad false: a zero pad, so her
+// engine never saw her Cross on its message and never ended). There the game's pad is the copy's own player's, as in retail:
+// the engine reads it as it is. DC_COOP_MUTATE=opener_pad_link_only (twin): the agreed pad alone, as before.
 void PadIn(Engine &e, int player) {
     InputPadState now{};
 
-    NetplayPlayerPad(player, now);
+    if (!NetplayPlayerPad(player, now)) {
+        if (!Mutated("opener_pad_link_only")) {
+            e.pad = GamePad;
+            return;
+        }
+        if (!e.zero_pad) {
+            e.zero_pad = true;
+            std::fprintf(stderr, "coop-opener: player %d's engine pad unlinked is the agreed pad: none, a zero pad (opener_pad_link_only)\n",
+                         player);
+        }
+    }
 
     PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&e.pad);
 
@@ -320,6 +399,83 @@ void PadIn(Engine &e, int player) {
     e.before = now;
 }
 
+// coop-tripwires2 (the write guard's floor tour: the engine wrote SystemMessage, SystemMesNo, SystemMesCount and SystemMesInputKey
+// on the opener's copy alone): retail's one system message slot is the world's on a floor (the state set carries it, and the step
+// reads it: PickerGetsDrop holds a pickup while another player's message waits for a key), but the engine's "acquired" went into it
+// on the opener's copy alone, so her pickup under it was held there and taken on hers (OUT OF SYNC). The engine now keeps its own
+// message slot (the ranges sysmes.cpp's SysMesStateRanges and the owner's tag name, as the town's per-player slots): exchanged in
+// around its step, and stepped and drawn after the world's in the floor's draw (CoopOpenerMesStepDraw), on the opener's copy
+// alone; the world's slot is left as every copy has it. DC_COOP_MUTATE=opener_mes_world (twin): the world's slot, as before.
+struct MesRange {
+    void       *at;
+    std::size_t bytes;
+    std::size_t offset;
+};
+constexpr std::size_t kMesBytes = 96 * 1024;
+MesRange              g_mes_ranges[16] = {};
+int                   g_mes_range_count = 0;
+std::size_t           g_mes_range_bytes = 0;
+alignas(16) unsigned char g_engine_mes[kMesBytes];
+bool                  g_engine_mes_made = false;
+
+void AddMesRange(void *at, std::size_t bytes, const char *name, void *) {
+    if (g_mes_range_count >= 16 || g_mes_range_bytes + bytes > kMesBytes) {
+        std::fprintf(stderr, "coop-opener: the message slot does not fit (%d ranges, at %s)\n", g_mes_range_count, name);
+        std::fflush(stderr);
+        std::abort();
+    }
+    g_mes_ranges[g_mes_range_count++] = {at, bytes, g_mes_range_bytes};
+    g_mes_range_bytes += (bytes + 15) & ~static_cast<std::size_t>(15);
+}
+
+void EngineMesSwap() {
+    for (int i = 0; i < g_mes_range_count; i++) {
+        auto *live = static_cast<unsigned char *>(g_mes_ranges[i].at);
+        auto *kept = g_engine_mes + g_mes_ranges[i].offset;
+
+        for (std::size_t b = 0; b < g_mes_ranges[i].bytes; b++) {
+            std::swap(live[b], kept[b]);
+        }
+    }
+}
+
+// The engine's slot made at its start: the live one's bytes, cleared (no message up, no owner), as a fresh slot is.
+void EngineMesStart() {
+    if (Mutated("opener_mes_world")) {
+        return;
+    }
+    if (g_mes_range_count == 0) {
+        SysMesStateRanges(AddMesRange, nullptr);
+        MessageTagRanges(AddMesRange, nullptr);
+    }
+    for (int i = 0; i < g_mes_range_count; i++) {
+        std::memcpy(g_engine_mes + g_mes_ranges[i].offset, g_mes_ranges[i].at, g_mes_ranges[i].bytes);
+    }
+    EngineMesSwap();
+    ClearSystemMes();
+    MessageTagClear();
+    EngineMesSwap();
+    g_engine_mes_made = true;
+}
+
+struct EngineMesIn {
+    EngineMesIn() : on_(g_engine_mes_made) {
+        if (on_) {
+            EngineMesSwap();
+        }
+    }
+    ~EngineMesIn() {
+        if (on_) {
+            EngineMesSwap();
+        }
+    }
+    EngineMesIn(const EngineMesIn &) = delete;
+    EngineMesIn &operator=(const EngineMesIn &) = delete;
+
+  private:
+    bool on_;
+};
+
 // The engine's presentation state off this copy's screen (its end, or a state load that ended the world half under it).
 void EngineClear(const char *why) {
     Engine &e = g_opener_engine;
@@ -327,13 +483,18 @@ void EngineClear(const char *why) {
     if (e.player == 0) {
         return;
     }
-    if (!e.done) {
+    WriteGuardMenu guard("chest opener stop"); // coop-tripwires3: on the opener's copy alone (a test's: DC_QA_WRITE_GUARD)
+    if (!e.done && !g_engine_screen.made) { // coop-tripwires3: its own screen goes with it; the world's words are not its to put back
         itemOpenSmallFlag = 0;
         itemOpenBigFlag = 0;
         DngMessMan.enabled = true;
         SetMIniMapStatus(1);
-        ClearSystemMes();
+        if (!g_engine_mes_made) { // coop-tripwires2: its own slot goes with it; the world's is not its to clear
+            ClearSystemMes();
+        }
     }
+    g_engine_mes_made = false;
+    g_engine_screen = ScreenOwn{};
     std::fprintf(stderr, "coop-opener: player %d's engine stops (%s) after %d steps\n", e.player, why, e.steps);
     e = Engine{};
 }
@@ -350,6 +511,8 @@ void EngineTick(int player) {
         e.kind = p.kind;
         e.pad = GamePad;
         NetplayPlayerPad(player, e.before);
+        EngineMesStart(); // coop-tripwires2
+        EngineScreenStart(); // coop-tripwires3
     }
     if (e.done) {
         return; // its end sent; the world frees the opener on the command's tick
@@ -357,7 +520,12 @@ void EngineTick(int player) {
 
     bool done = false;
     {
+        // coop-tripwires2: the engine runs on the opener's copy alone, so the write guard watches it as a local menu's scope (outermost:
+        // what is left changed after its pad, camera and WorldKept are back is what this copy alone wrote into the state set).
+        WriteGuardMenu guard("chest opener step"); // (a test's: DC_QA_WRITE_GUARD)
         present::Scope scope(present::For{player}, COOP_PRESENT_HERE); // the guard: the step leaves the lockstep's state as it was
+        EngineMesIn    mes; // coop-tripwires2: its own message slot
+        PresentScreenIn screen; // coop-tripwires3: its own screen state
         DrawRng        rng;
         WorldKept      kept(p);
         CCameraFollow *world_camera = NowCamera__3;
@@ -480,7 +648,7 @@ static bool StartAtla(int player, int active) {
         p.posed = 1;
     }
     driveNoInterpolate = 1;
-    if (NetplayLocalPlayer() != player) { // coop-pt1111b (item 12): the others see its effect stand in the ball's place
+    if (!OpenerHere(player)) { // coop-pt1111b (item 12): the others see its effect stand in the ball's place
         OthersAtlaFxStart(player, index, p.turn);
     }
     std::fprintf(stderr, "coop-opener: player %d takes Atla %d (ball %d) at tick %lld: posed %d\n", player, p.item, index,
@@ -587,7 +755,7 @@ bool AnyPresenting() {
 // One tick of a player's presentation, its world half on every copy alike, then on the opener's own copy its engine. resident:
 // the game's player (CharaMain's body, DunMoveChara's play task), else the partner (her walk's StepBusy).
 static bool StepWorld(int opener, bool resident) {
-    const bool here = NetplayLocalPlayer() == opener; // this copy is the opener's: the engine runs here
+    const bool here = OpenerHere(opener); // this copy is the opener's: the engine runs here
 
     if (!PlayerPresenting(opener)) {
         if (g_opener_engine.player == opener) {
@@ -600,13 +768,16 @@ static bool StepWorld(int opener, bool resident) {
 
     p.ticks++;
     // (once each: the load puts the presentation's ticks back to 40, so 70 comes again; this copy's own flags, alike on both)
+    // coop-tripwires3: DC_COOP_TEST_PRESENT_RELOAD=file: nothing taken midway, so the load at 70 is DC_STATE_LOAD_AT's file, from
+    // before the presentation: the world half ends under the opener's engine, as a state set without it does (a merge, a rejoin).
     if (static const bool reload = TestEnvOn("DC_COOP_TEST_PRESENT_RELOAD"); reload) {
-        static bool taken = false;
-        static bool loaded = false;
+        static const bool from_file = TestEnvIs("DC_COOP_TEST_PRESENT_RELOAD", "file");
+        static bool       taken = false;
+        static bool       loaded = false;
 
         if (p.ticks == 40 && !taken) {
             taken = true;
-            g_reload_due = 1;
+            g_reload_due = from_file ? 0 : 1;
         } else if (p.ticks == 70 && taken && !loaded) {
             loaded = true;
             g_reload_due = 2;
@@ -652,6 +823,7 @@ static bool StepWorld(int opener, bool resident) {
         }
     }
     if (p.kind == kPresentAtla) {
+        LogAtlaFly(opener, here, p.ticks); // coop-atlafly test hook
         // Its name on the others' screens (coop-closetitem, Jep 10-31), about where the opener's shows it (the effect's frame
         // 129.5): each other player's own notice, gone by itself (coop-pt1111b, Jep's 11-11 choice B; OthersAtlaNotice).
         // DC_COOP_MUTATE=atlaname_opener_only (twin): never.
@@ -801,15 +973,34 @@ void PresentTestTick(bool held) {
             at += std::snprintf(lit + at, sizeof lit - at, "%s%d", at > 0 ? "," : "", i + 1);
         }
     }
+    const PresentScreenIn screen; // coop-tripwires3: the opener's own screen state, as its screen has it
     std::fprintf(stderr, "coop-opener: test: p%d clock %lld task %d presenting %d engine %d mesoff %d motion %d held %d atla %d lit %s\n", NetplayLocalPlayer(), clock,
                  (int) gameTask, (int) g_present[opener - 1].kind, g_opener_engine.player != 0 && !g_opener_engine.done ? 1 : 0, DngMessMan.enabled ? 0 : 1,
                  motion, held ? 1 : 0, (int) atraGetStatus, at > 0 ? lit : "0");
 }
 
+PresentScreenIn::PresentScreenIn() : on_(false), counted_(g_engine_screen.made) {
+    if (counted_) {
+        on_ = g_engine_screen.depth++ == 0; // (the outermost alone: an inner one is the outer's)
+        if (on_) {
+            EngineScreenSwap();
+        }
+    }
+}
+
+PresentScreenIn::~PresentScreenIn() {
+    if (on_) {
+        EngineScreenSwap();
+    }
+    if (counted_ && g_engine_screen.depth > 0) {
+        g_engine_screen.depth--;
+    }
+}
+
 PresentSetScope::PresentSetScope(bool take) : take_(take) {
     const Engine &e = g_opener_engine;
 
-    if (e.player == 0 || e.done || (!take && Mutated("present_screen_lost"))) {
+    if (e.player == 0 || e.done || (!take && Mutated("present_screen_lost")) || g_engine_screen.made) { // (coop-tripwires3: own screen)
         return;
     }
     ScreenSave(g_screen_kept);
@@ -857,4 +1048,38 @@ void PresentResetForSession() {
     }
 }
 
+// coop-camflash: see coop_opener.hpp. On the opener's copy alone (its engine's step 1; the camera written is the presentation's,
+// SubCamera, which no other copy draws or checks; the effect is stepped on that copy alone too).
+void ChestCameraOwe(CMotionModel *effect) {
+    if (Mutated("camflash_stale")) {
+        std::fprintf(stderr, "coop-camflash: the chest's first frame left on SubCamera's last eye at link tick %lld (camflash_stale)\n",
+                     (long long) NetplayLinkTick());
+        return;
+    }
+    if (effect == nullptr || effect->frame == nullptr || NowCamera__3 == nullptr) {
+        return;
+    }
+    // The effect posed at the frame step 1 set (10): its step evaluates the pose at its clock, then moves the clock on, so with
+    // the clock put back motionDrive's own step this tick evaluates the very same pose, as retail's. Then retail's step-2 read.
+    const MOTION_STATE clock = effect->motion.state;
+
+    effect->Step();
+    effect->motion.state = clock;
+    setCameraPassData(static_cast<CFrameVu1 *>(effect->frame), NowCamera__3, (char *) "cam", (char *) "int");
+    if (TestEnvOn("DC_COOP_DEBUG")) {
+        std::fprintf(stderr, "coop-camflash: the chest's camera from its effect's first pose at link tick %lld\n", (long long) NetplayLinkTick());
+    }
+}
 } // namespace coop
+
+// coop-tripwires2: gameloop.cpp DrawDungeon, after the world's SystemMesStep and SystemMesDraw: the opener's engine's own message
+// slot stepped and drawn as retail's one was (on the opener's copy alone: only it has an engine).
+void CoopOpenerMesStepDraw() {
+    if (!coop::g_engine_mes_made) {
+        return;
+    }
+    coop::EngineMesIn mes;
+
+    dc::game::SystemMesStep();
+    dc::game::SystemMesDraw();
+}

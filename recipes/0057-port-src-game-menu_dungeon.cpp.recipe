@@ -1,0 +1,306 @@
+# port/src/game/menu_dungeon.cpp from Chronicle's port/src/game/menu_dungeon.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_dungeon.cpp
+base port/src/game/menu_dungeon.cpp
+from 99d3c0cb3f72a6dfe648e6d7df30d3ae555f9545
+to 6cf4fa29a88a21bd4aa03cd3a7529145f0b8638b
+@@ -19,0 +20,1
++#include "coop/netplay_test.hpp" // coop-itemview: NetplayMutated
+@@ -52,0 +54,7
++void CoopCharaWheelMark(int chara, float x, float y, int alpha); // coop (port/src/coop/coop_hud.cpp)
++bool CoopKnockoutEndsForPartner(); // coop-kojoin (port/src/coop/coop_combat.cpp)
++namespace coop {
++int CharaWheelPick(int chara, int knocked_out); // trade3 (port/src/coop/coop_prompt.cpp)
++} // namespace coop
++void CoopEntranceDraw();           // coop-gatepopup2 (port/src/coop/coop_useprompt.cpp)
++
+@@ -467,0 +476,1
++    CoopEntranceDraw(); // coop-gatepopup2: a call's boxes and the notice over the floor menu (no floor HUD here)
+@@ -1008,0 +1018,71
++// coop-swapmenulook (Jep: a duplicated menu must look like the original): the quick change ring's drawing, split out of
++// CharaChangeDraw and the element picker as they were, so each co-op player's own ring (port/src/coop/coop_wheel.cpp) is drawn
++// by the game's own code. DC_QUICK_RING_TRACE=1 logs each piece (a draw-mode test compares the two rings by these numbers).
++namespace {
++bool QuickRingTrace() {
+=1269 559317b143d93452
++        const char *value = std::getenv("DC_QUICK_RING_TRACE");
++        return value != nullptr && value[0] == '1';
++    }();
++    return trace;
++}
++} // namespace
++
++void QuickRingPoint(int slot, int count, float radius, float turn_frames, float direction, float *x, float *y) {
++    const float step = TWO_PI / count;
++    float       turn = step / 20.0f;
++
++    if (direction < 0.0f) {
++        turn = -turn;
++    }
++
++    const float angle = PI + (step * slot + turn * turn_frames);
++    *x = radius * cos(angle);
++    *y = radius * sin(angle);
++}
++
++void QuickRingFace(CTexture *faces, int chara, float x, float y, int shade, int alpha) {
++    int u = chara * 0x30;
++    int v = 0;
++
+~2078 dfc34a514fbae294|    |
+~2079 f86956a30c17aaa6|        |
++        v = 0x30;
++    }
++
++    const CRect_i_ screen(x, y, 0x30, 0x30);
++
++    DrawMenu2DSprite(faces, screen, CRect_i_(u, v, 0x30, 0x30), shade, shade, shade, alpha);
++    if (QuickRingTrace()) {
++        std::fprintf(stderr, "quick ring: face %d at %d,%d size %d texel %d,%d shade %d alpha %d\n", chara, (int) screen.x, (int) screen.y,
++                     (int) screen.width, u, v, shade, alpha);
++    }
++}
++
++void QuickRingFrame(int base_x, int base_y, float radius, CTexture *stay) {
++    DrawMenuWaku(base_x - radius - 11.0f, base_y - 12, 0x34, 0x34, 0, stay, 0x80);
++    if (QuickRingTrace()) {
++        std::fprintf(stderr, "quick ring: frame at %d,%d size %d\n", (int) (base_x - radius - 11.0f), base_y - 12, 0x34);
++    }
++}
++
++void QuickRingHandStep() {
+~662 1f271025f3a2442d|    |
++
+~1693 a3a5e35a5ce6d0ec|    |
+~665 dee4747251b49c65|        |
++    }
++}
++
++void QuickRingHandAt(int base_x, int base_y, float radius, int *x, int *y) {
++    *x = base_x - radius - 32.0f;
++    *y = base_y + 6;
++}
++
++void QuickRingHand(int x, int y) {
++    DrawMenuObjectVibe(x, y, 1, 0x40);
++    if (QuickRingTrace()) {
++        std::fprintf(stderr, "quick ring: hand at %d,%d\n", x, y);
++    }
++}
++
+@@ -1182,3 +1262,1
+- 7c773405caf27d9c
+- ad57e26a2489898b
+- 2f0d32156c4d81c6
++        QuickRingPoint(ChangeMenu.ring_slot[i], ChangeMenu.party_size, changeMenu_long, 0.0f, 0.0f, &ChangeMenu.ring_pos[i][0], &ChangeMenu.ring_pos[i][1]);
+@@ -1186,0 +1265,1
++    (void) step;
+@@ -1493,0 +1573,7
++    // coop-swapmenulook: the places through the ring's one routine (QuickRingPoint, the character ring's sum).
++    (void) turn;
++    const float frames = g_picker.step == PickerStep::Closing   ? static_cast<float>(g_picker.close_frame)
++                         : g_picker.step == PickerStep::Turning ? g_picker.turn_frame
++                                                                : 0.0f;
++    const float direction = g_picker.step == PickerStep::Turning ? g_picker.turn_direction : 0.0f;
++
+@@ -1495,3 +1581,1
+- a76b68a3b0a03703
+- c3914308d05122ed
+- 32ac98e7e74410b2
++        QuickRingPoint(g_picker.ring_slot[i], g_picker.count, changeMenu_long, frames, direction, &g_picker.ring_pos[i][0], &g_picker.ring_pos[i][1]);
+@@ -1504,14 +1588,1
+- ae9dac94209e1bd7
+- bdb25ed6769b78df
+- e3b0c44298fc1c14
+- a9bba450ebbe3459
+- 29cee8e2f343ec7b
+- 466e4c9db7c825d3
+- 2a44168318e224e1
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- d5bd50a4007a5952
+- be3c25e527eb78e0
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 1cf70964f05942c9
++    return ElementChoicesOf(NowWeaponHave, EquippedWeapon(), choices.data()); // coop-p2controls: the rule, for any player's weapon
+@@ -1526,7 +1597,1
+- 50a51c3532c14efa
+- e3b0c44298fc1c14
+- 77fe5d4ce82fcbb6
+- 2114195428022402
+- 9c6af9ede4b29493
+- 2a44168318e224e1
+- 28d86778615f6af4
++    g_picker.selected = ElementChoiceOfCurrent(g_picker.elements, g_picker.count, current); // coop-p2controls: shared
+@@ -1659,0 +1725,18
++} // namespace
++
++// coop-swapmenulook: one element's stone in the ring's 48-pixel place whose corner is x, y (the picker's own drawing, split out).
++void QuickRingElement(CTexture *icons, int element, float x, float y, int alpha) {
+~1677 8eb54f3146b203ea|    |
+~1678 e9ab2110a3dc8bdc|    |
++    int left = static_cast<int>(x + inset);
++    int top = static_cast<int>(y + inset);
++
++    DrawMenu2DSprite(icons, CRect_i_(left, top, kIconSize, kIconSize), CRect_i_(cell % 8 * kIconSize, cell / 8 * kIconSize, kIconSize, kIconSize), 0x80, 0x80, 0x80, alpha);
++    if (QuickRingTrace()) {
++        std::fprintf(stderr, "quick ring: element %d at %d,%d size %d texel %d,%d alpha %d\n", element, left, top, kIconSize, cell % 8 * kIconSize,
++                     cell / 8 * kIconSize, alpha);
++    }
++}
++
++namespace {
++
+@@ -1676,7 +1759,1
+- c62170a26d22cce0
+- 8eb54f3146b203ea
+- e9ab2110a3dc8bdc
+- 96798796dceff86a
+- 76e0bbd7e2d15153
+- e3b0c44298fc1c14
+- e20f2b2cc36c52cd
++            QuickRingElement(g_picker.icons, g_picker.elements[i], QuickCharaPos[0] + g_picker.ring_pos[i][0], QuickCharaPos[1] + g_picker.ring_pos[i][1], alpha);
+@@ -1690,2 +1767,2
+- 794661ed961c5905
+- 1f271025f3a2442d
++        QuickRingFrame(QuickCharaPos[0], QuickCharaPos[1], changeMenu_long, StayTex);
++        QuickRingHandStep();
+@@ -1693,3 +1770,2
+- a3a5e35a5ce6d0ec
+- dee4747251b49c65
+- 2a44168318e224e1
++        int hand_x = 0;
++        int hand_y = 0;
+@@ -1697,1 +1773,2
+- 7abb62911355ef43
++        QuickRingHandAt(QuickCharaPos[0], QuickCharaPos[1], changeMenu_long, &hand_x, &hand_y);
++        QuickRingHand(hand_x, hand_y);
+@@ -1724,0 +1802,8
++    ElementAppliedToLiveWeapon();
++}
++
++} // namespace
++
++// coop-p2controls3: what a new element does to the player's live weapon (its trail colour; Ruby's shot), as the picker's close does;
++// player 1's own element ring (coop_wheel.cpp) runs it after his pick.
++void ElementAppliedToLiveWeapon() {
+@@ -1738,1 +1823,44
+- 0fdd034175cd9c06
++// coop-p2controls (Jep): the picker's rules for any weapon, so each co-op player's own ring (coop_wheel.cpp) offers what the
++// picker offers: the stones the weapon has (elements' elem), then none where the weapon may go without one or has nothing else.
++int ElementChoicesOf(const WEAPON_HAVE *elements, const WEAPON_HAVE *weapon, s8 *choices) {
++    int count = 0;
++
+=136 a9bba450ebbe3459
++        if (elements->elem[i] > 0) {
+=1509 466e4c9db7c825d3
++        }
++    }
++
+=1513 d5bd50a4007a5952
+=1514 be3c25e527eb78e0
++    }
++
++    return count;
++}
++
++// The ring's first choice: the weapon's own element (none for an element out of the stones' range).
++int ElementChoiceOfCurrent(const s8 *choices, int count, int current) {
++    int selected = 0;
++
++    for (int i = 0; i < count; i++) {
++        if (choices[i] == current || (choices[i] == WEAPON_ELEMENT_NONE && (current < 0 || current > 4))) {
++            selected = i;
++        }
++    }
++
++    return selected;
++}
++
++// An element's icon in quickchr.img's wepicon sheet: its cell's corner and size in pixels.
++void ElementIconCell(int element, int *u, int *v, int *size) {
+~1677 8eb54f3146b203ea|    |
++
++    *u = cell % 8 * kIconSize;
++    *v = cell / 8 * kIconSize;
++    *size = kIconSize;
++}
++
++// quickchr.img's none cell made, as the picker makes it before loading the bank.
++void ElementIconsMakeNone(u8 *bank) {
++    MakeNoneIcon(bank);
++}
+@@ -1778,0 +1907,5
++    // coop-kojoin: P2 came to the floor of a knocked-out P1: his knockout menu closes as a cancel does, and he lies down.
++    if (ChangeMenu.mode == 1 && CoopKnockoutEndsForPartner()) {
++        return 1;
++    }
++
+@@ -1939,0 +2073,8
++                // trade3 (Jep's rc3): another player's member is asked for as a trade (1: the wheel closes, the member kept), or
++                // refused on the knocked-out menu (2), never taken plainly.
+=1940 f739029e726dfa52
++                    if (const int coop_pick = coop::CharaWheelPick(ChangeMenu.selected, ChangeMenu.mode); coop_pick != 0) {
++                        return coop_pick == 1 ? 1 : 0;
++                    }
++                }
++
+@@ -2041,0 +2183,1
++                (void) turn;
+@@ -2043,3 +2185,2
+- 87c4de4c199e46b5
+- 12bb801517a6d1f5
+- 8bcf721bf3c7c2b5
++                    QuickRingPoint(ChangeMenu.ring_slot[i], ChangeMenu.party_size, changeMenu_long, static_cast<float>(ChangeMenu.unk_4c),
++                                   ChangeMenu.turn_direction, &ChangeMenu.ring_pos[i][0], &ChangeMenu.ring_pos[i][1]);
+@@ -2056,0 +2198,1
++                (void) turn;
+@@ -2058,3 +2200,2
+- 08738d91d4a93647
+- 12bb801517a6d1f5
+- 8bcf721bf3c7c2b5
++                    QuickRingPoint(ChangeMenu.ring_slot[i], ChangeMenu.party_size, changeMenu_long, ChangeMenu.turn_frame, ChangeMenu.turn_direction,
++                                   &ChangeMenu.ring_pos[i][0], &ChangeMenu.ring_pos[i][1]);
+@@ -2075,7 +2215,0
+- a6cdcb93bd29ea3a
+- 102dc9d56a62cfa9
+- e3b0c44298fc1c14
+- dfc34a514fbae294
+- f86956a30c17aaa6
+- b80dbaf03ecef8fc
+- 86afdf70a95436e8
+@@ -2087,1 +2221,2
+- 9ab8d7bb7cc798a3
++            QuickRingFace(portraits, chara, x, y, shade, alpha);
++            CoopCharaWheelMark(chara, x, y, alpha); // coop: whose member it is (port/src/coop/coop_hud.cpp)
+@@ -2091,1 +2226,1
+- 694b428270799535
++            QuickRingFrame(QuickCharaPos[0], QuickCharaPos[1], changeMenu_long, StayTex);
+@@ -2112,2 +2247,1
+- f838459c38f203e0
+- 3bd1468e29e9007a
++            QuickRingHandAt(QuickCharaPos[0], QuickCharaPos[1], changeMenu_long, &cursor_x, &cursor_y);
+@@ -2121,5 +2255,1
+- 1f271025f3a2442d
+- e3b0c44298fc1c14
+- a3a5e35a5ce6d0ec
+- dee4747251b49c65
+- 2a44168318e224e1
++        QuickRingHandStep();
+@@ -2164,1 +2294,1
+- fbd8742d1574df07
++            QuickRingHand(cursor_x, cursor_y);
+@@ -2424,0 +2555,4
++    // coop-itemview (v0.2 soak seed 20261117083): retail answered an item with no model (a weapon, an empty cell) with 0, "read
++    // under way", having read nothing: EnterItemPolygonView then set the view up from whatever the read slots last held (his
++    // menu's character files, c01model.pak as the view's picture) and crashed in EnterIMGFile. Such an item now ends the view:
++    // none drawn, nothing waiting. DC_NETPLAY_MUTATE=itemview_stale (twin): the 0 of before.
+@@ -2426,1 +2560,7
+- db2e875652d12519
++        if (NetplayMutated("itemview_stale")) {
++            return 0;
++        }
++
+~2431 245a3aead0ea64e2|        |
++        std::println("coop-itemview: item {} has no model to view: the view ends, no read waits", item_no);
++        return 1;

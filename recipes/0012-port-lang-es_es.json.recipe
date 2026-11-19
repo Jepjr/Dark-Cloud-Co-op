@@ -1,0 +1,25 @@
+# port/lang/es_es.json from Chronicle's port/lang/es_es.json (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/lang/es_es.json
+base port/lang/es_es.json
+from ec974d09f92ea25544f6f37d83827cd399be12b0
+to e8f12cfa299ec3f379aac3b6e70d80c36ef93274
+@@ -6,0 +7,1
++    "options.help.host_sets": "El jugador 1 elige\nesto en cooperativo.",
+@@ -46,0 +48,4
++    "options.game.chara_quick_select.label": "Selección rápida personaje",
++    "options.game.chara_quick_select.help": "\"Selección rápida\"\nAbajo en la cruceta\nabre el anillo de\npersonajes.",
++    "options.game.chara_quick_select.choice.0": "Sí",
++    "options.game.chara_quick_select.choice.1": "No",
+@@ -167,0 +173,10
++    "options.page.co-op": "Cooperativo",
++    "options.page.co-op.help": "\"Cooperativo\"\nJugar juntos.",
++    "options.game.coop_whereis.label": "Dónde está cada uno",
++    "options.game.coop_whereis.help": "\"Dónde está cada uno\"\nLa lista arriba a la\nderecha de dónde está\ncada jugador.",
++    "options.game.coop_whereis.choice.0": "Sí",
++    "options.game.coop_whereis.choice.1": "No",
++    "options.game.coop_swap_same_zone.label": "Intercambio juntos",
++    "options.game.coop_swap_same_zone.help": "\"Intercambio juntos\"\nCambiar de personaje\nsolo si ambos jugadores\nestán en el mismo lugar.",
++    "options.game.coop_swap_same_zone.choice.0": "Sí",
++    "options.game.coop_swap_same_zone.choice.1": "No",
+@@ -316,0 +332,1
++    "title.menu.multiplayer": "MULTIJUGADOR",

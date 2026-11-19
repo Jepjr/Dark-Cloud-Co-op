@@ -1,2 +1,5 @@
 # Store every file byte for byte: the tree proof depends on it (no line-ending conversion).
 * -text
+# The test harness's text is LF in git and on disk: a file with mixed line endings merges as whole changed lines, and a
+# merge once dropped a test from landing.txt that way (land.ps1 merges with -X renormalize and refuses a lost line).
+debug/test/** text=auto eol=lf

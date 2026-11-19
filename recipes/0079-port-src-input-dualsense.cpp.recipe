@@ -1,0 +1,12 @@
+# port/src/input/dualsense.cpp from Chronicle's port/src/input/dualsense.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/input/dualsense.cpp
+base port/src/input/dualsense.cpp
+from 2378d70c58b2a77dc2d89e2f1928cf53d7ed1cb1
+to d0aedff43110da1adfa203527e69317377ba8dff
+@@ -6,0 +7,1
++#include "coop/coop_lightbar.hpp" // Jep (co-op): coop-padlight
+@@ -29,0 +31,4
++    // Jep (co-op), coop-padlight: each pad shows the colour of the player it plays; retail's own below stays for the twin.
++    if (coop::LightbarUpdate()) {
++        return;
++    }

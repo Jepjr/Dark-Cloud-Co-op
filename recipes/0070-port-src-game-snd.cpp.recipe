@@ -1,0 +1,146 @@
+# port/src/game/snd.cpp from Chronicle's port/src/game/snd.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/snd.cpp
+base port/src/game/snd.cpp
+from 823e8b8205c0e317d523d3764ddc477e977b51c4
+to d3410f50e115e7e758d2085c7c11e78c76a05e81
+@@ -36,0 +37,2
++bool CoopFootSoundHeard(const float *position); // coop-herscreen (port/src/coop/coop_town.cpp)
++
+@@ -42,2 +43,0
+- 54a9260f25582e84
+- e3b0c44298fc1c14
+@@ -44,0 +45,1
++// Jep (co-op): out of the anonymous namespace: coop_audio.cpp reads these three (GetSeInfo's rows, the music state, the listener).
+@@ -854,0 +856,2
++namespace {
++
+@@ -1521,0 +1525,3
++} // namespace
++
++// Jep (co-op): out of the anonymous namespace: coop_audio.cpp reads it (GetSeInfo's rows, the music state, the listener).
+@@ -1537,0 +1544,2
++namespace {
++
+@@ -1646,0 +1655,3
++} // namespace
++
++// Jep (co-op): out of the anonymous namespace: coop_audio.cpp reads these two (GetSeInfo's rows, the music state, the listener).
+@@ -1672,0 +1684,2
++namespace {
++
+@@ -1711,2 +1724,2
+- 54a9260f25582e84
+- e3b0c44298fc1c14
++// Jep (co-op): out of the anonymous namespace: coop_audio.cpp carries the music state over a state set and reads the
++// sound table choices and the listener (GetSeInfo's rows, the partner's placed sounds).
+@@ -1719,0 +1733,18
++int          now_voice_set;
++int          now_bgm_no;
++BgmPlayState now_bgm_play = BgmPlayState::Stopped;
++int          now_bgm_vol;
++float        now_bgm_fade_vol;
++
+=1751 91aaa7631a75ca51
+=1752 f3a2cbb225518e95
++
+=1754 a283be2dd10d6760
+=1755 0a25e5bd6a146d69
++
+=1771 4b8fc4b07dc74e6e
+=1772 a7b5f6d65c9f8779
+=1773 476dc7548023f608
++
++namespace {
++
+@@ -1736,4 +1766,0
+- e1cf1460b8a9e9d0
+- d999cfa1eadd09ac
+- f8f0aa9dce4cf417
+- b51abf6a3d319291
+@@ -1742,1 +1768,0
+- 4598f547c005aa91
+@@ -1751,6 +1776,0
+- 91aaa7631a75ca51
+- f3a2cbb225518e95
+- e3b0c44298fc1c14
+- a283be2dd10d6760
+- 0a25e5bd6a146d69
+- e3b0c44298fc1c14
+@@ -1771,4 +1790,0
+- 4b8fc4b07dc74e6e
+- a7b5f6d65c9f8779
+- 476dc7548023f608
+- e3b0c44298fc1c14
+@@ -1817,0 +1834,13
++// Jep (co-op, coop-wave4): the special sound set this copy's own sound driver holds (now_sp_no) and the one it is loading
++// (load_sp_no, load_sp_adr): each copy's own, out of the state set (coop_ownlook.cpp). Their place, for that file's lines
++// and its twin's regions.
++void CoopSndSpecialRegions(void (*add)(void *at, std::size_t size, void *context), void *context) {
++    add(&now_sp_no, sizeof now_sp_no, context);
++    add(&load_sp_no, sizeof load_sp_no, context);
++    add(&load_sp_adr, sizeof load_sp_adr, context);
++}
++
++int CoopSndSpecialNow() {
++    return now_sp_no;
++}
++
+@@ -1991,9 +2020,2
+- 5ee2d062b92e29bb
+- 4f9b643cd7212eae
+- 6fdd2e928b7a4a40
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- e12f3d2d102aac1a
+- c3bc2db2335ab909
+- d96e6631bb25201a
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.
+@@ -2393,19 +2415,1
+- dfbbba3fbb47fa0e
+- 76fbff90954899ec
+- e3b0c44298fc1c14
+- f24a98fa977da4e8
+- addb31f0af7a077d
+- 3f6ca2fde0b51321
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- 4a4b3651e7d5725e
+- e3b0c44298fc1c14
+- cd6fabd41b36c745
+- 350e4b28d2ac08cc
+- 77885ad5ce27a0ac
+- 52fe4c8892d78b2c
+- 2a44168318e224e1
+- 28d86778615f6af4
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 54a9260f25582e84
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.
+@@ -2414,0 +2419,1
++ * Jep (co-op): out of the anonymous namespace: coop_audio.cpp plays the partner's sounds through it.
+@@ -2431,2 +2435,0
+- 0fdd034175cd9c06
+- e3b0c44298fc1c14
+@@ -2508,0 +2512,3
++    if (!CoopFootSoundHeard(position)) { // coop-herscreen: a villager's step this copy's player would not hear (coop_town.cpp)
++        return;
++    }
+@@ -2837,15 +2843,1
+- d280fdf4fe70ea9a
+- c2b31e8218dae255
+- e3b0c44298fc1c14
+- f24a98fa977da4e8
+- addb31f0af7a077d
+- c6e4ec2a3c058de0
+- 2a44168318e224e1
+- e3b0c44298fc1c14
+- cd6fabd41b36c745
+- 5b6df8d93012b122
+- 77885ad5ce27a0ac
+- a71c7f5d60f44179
+- 2a44168318e224e1
+- 28d86778615f6af4
+- d10b36aa74a59bcf
++// Jep (co-op): defined in src/coop/coop_audio.cpp, which replaces this function.

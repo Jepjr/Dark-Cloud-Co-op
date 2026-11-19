@@ -1,0 +1,119 @@
+# port/src/data/data_read.cpp from Chronicle's port/src/data/data_read.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/data/data_read.cpp
+base port/src/data/data_read.cpp
+from 019ce30bd3f1935b98da815c4d0733bc30e87e1d
+to fcf1ed20080bfa3e8000f7324592e8c78cec2335
+@@ -12,0 +13,1
++#include <future> // Jep (co-op), coop-wepmenu
+@@ -499,0 +501,73
++// Jep (co-op), coop-wepmenu (the developer's v0.2-rc4 playtest, 11-18: "when you open the weapons menu for the first time the
++// game freezes for a second"): the reads a menu page makes as it opens (LoadFileBG: retail read them in the background over the
++// following frames, the port reads them whole on the game thread) cost each file's first open, its bytes aside: a cold
++// commenu/a_usa/kgetoan2.img (182 KB) 9.0 ms, commenu/c01wtes.chr (1.2 MB) 0.97 ms; warm 0.10 and 0.34 ms (PC-01, a data copy
++// never opened before). DataReadPrefetch reads named files on a thread of their own ahead of their page; DataReadLoadFile then
++// copies the same bytes from memory (waiting for one still on its way), so the result is the read's own, byte for byte. The
++// prefetched bytes live here, in the data layer, outside the game's state.
++namespace {
++
++using PrefetchBytes = std::shared_ptr<const std::vector<std::uint8_t>>;
++
++struct Prefetched {
++    std::uint64_t                     epoch = 0;
++    std::shared_future<PrefetchBytes> bytes;
++};
++
++std::mutex                                        prefetch_mutex;
++std::unordered_map<const IndexedFile *, Prefetched> prefetched;
++std::vector<std::future<void>>                    prefetch_jobs; // (each joined before it is dropped, the last at exit)
++std::atomic<std::uint64_t>                        loads_done{0};
++std::atomic<std::uint64_t>                        loads_prefetched{0};
++
++PrefetchBytes PrefetchedFor(const IndexedFile *file) {
++    std::shared_future<PrefetchBytes> bytes;
++    {
++        const std::scoped_lock lock(prefetch_mutex);
++        const auto             found = prefetched.find(file);
++        if (found == prefetched.end() || found->second.epoch != data_index_epoch) {
+~307 795a1734e32de48a|            |
++        }
++        bytes = found->second.bytes;
++    }
++    PrefetchBytes ready = bytes.get(); // (a read still on its thread: waited for, never longer than reading it here)
++    return ready != nullptr && std::cmp_equal(ready->size(), file->size) ? ready : nullptr;
++}
++
++} // namespace
++
++void DataReadPrefetch(const std::vector<std::string> &paths) {
++    std::vector<std::pair<IndexedFile, std::promise<PrefetchBytes>>> work;
++    {
++        const std::scoped_lock lock(prefetch_mutex);
++        for (const std::string &path : paths) {
+~501 1964fc9ff6da0ba9|            |
++            const auto         found = file != nullptr ? prefetched.find(file) : prefetched.end();
++            if (file == nullptr || (found != prefetched.end() && found->second.epoch == data_index_epoch)) {
++                continue;
++            }
++            std::promise<PrefetchBytes> promise;
++            prefetched[file] = {data_index_epoch, promise.get_future().share()};
++            work.emplace_back(*file, std::move(promise));
++        }
++        std::erase_if(prefetch_jobs, [](const std::future<void> &job) { return job.wait_for(std::chrono::seconds(0)) == std::future_status::ready; });
++        if (work.empty()) {
++            return;
++        }
++        prefetch_jobs.push_back(std::async(std::launch::async, [work = std::move(work)]() mutable {
++            for (auto &[file, promise] : work) {
++                auto bytes = std::make_shared<std::vector<std::uint8_t>>();
++                if (!ReadResolved(&file, *bytes)) {
++                    bytes.reset();
++                }
++                promise.set_value(std::move(bytes));
++            }
++        }));
++    }
++}
++
++void DataReadLoadCounts(std::uint64_t *loads, std::uint64_t *from_prefetch) {
++    *loads = loads_done.load(std::memory_order_relaxed);
++    *from_prefetch = loads_prefetched.load(std::memory_order_relaxed);
++}
++
+@@ -507,1 +581,10
+- 29dab11379f1f6f1
++    loads_done.fetch_add(1, std::memory_order_relaxed);
++    if (const PrefetchBytes bytes = PrefetchedFor(file); bytes != nullptr) { // Jep (co-op), coop-wepmenu: ReadWhole's result
++        std::memcpy(buffer, bytes->data(), bytes->size());
++        capacity = dcdata::SectorsFor(bytes->size()) * dcdata::kSector;
++        std::ranges::fill(std::span(static_cast<std::uint8_t *>(buffer), capacity).subspan(bytes->size()), std::uint8_t{0});
++        *size = static_cast<int>(bytes->size());
++        loads_prefetched.fetch_add(1, std::memory_order_relaxed);
++    } else {
+~507 29dab11379f1f6f1|        |
++    }
+@@ -828,0 +912,25
++bool DataNtscRelease() {
++    static const bool ntsc = [] {
+~790 34f8db7acce2a7b9|        |
++        if (!file) {
++            return false;
++        }
+~794 8273bf63205cd73f|        |
++        const bool                loaded = file->archived ? data_archive->Read(file->archive_index, bytes) : [&] {
+~558 ce50187152759e18|            |
+~329 a379e3b718a17224|            |
+~800 397f9287e9f980a3|            |
++        }();
++        if (!loaded) {
++            return false;
++        }
++        const std::string text(bytes.begin(), bytes.end());
++        std::size_t       key = text.find("\"release\"");
++        std::size_t       colon = key == std::string::npos ? key : text.find(':', key);
++        std::size_t       open = colon == std::string::npos ? colon : text.find('"', colon);
++        std::size_t       close = open == std::string::npos ? open : text.find('"', open + 1);
++        return close != std::string::npos && text.substr(open + 1, close - open - 1).find("NTSC") != std::string::npos;
++    }();
++    return ntsc;
++}
++

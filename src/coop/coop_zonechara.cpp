@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "btactstatus.hpp"
+#include "dngstatusdata.hpp" // coop-deadswap: the down op's CheckActItemSlot
+#include "itemdata.hpp"      // coop-deadswap: ITEM_REVIVAL_POWDER
 #include "dngmessageman.hpp"
 #include "dun/gameloop.hpp"
 #include "gamepad.hpp"
@@ -23,16 +25,20 @@
 namespace dc::game {
 extern s32        gameTask;
 extern s32        mode; // GAME_MODE_DUNGEON is 3 (main.hpp)
+extern s32        selectMapNo; // the dungeon (coop-swapcombo's nextfloor op)
 extern CRunScript EdEventScript; // the floor's event interpreter (editloop3.cpp)
+void              ToanKey_On(); // charakey.cpp: Toan's Cross (coop-swapcombo's test op)
 } // namespace dc::game
 
 #include "coop/coop_actor.hpp"
+#include "coop/coop_combat.hpp" // coop-swapcombo: StartAttack (the swing op)
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
 #include "coop/coop_menu.hpp"
 #include "coop/coop_message.hpp"
 #include "coop/coop_party.hpp"
 #include "coop/coop_prompt.hpp"
+#include "coop/coop_town.hpp"   // towncrash: TownBodyOnFloorForTest (the townbody op)
 #include "coop/coop_wheel.hpp"
 #include "coop/coop_worlds.hpp"
 #include "coop/netplay.hpp"
@@ -116,6 +122,13 @@ int ZoneHolders(int chara, int except) {
             count++;
         }
     }
+    // coop-forcefloor, coop-golapse (Jep 11-14: never two players on one member): apart, the other copy's player plays its member
+    // elsewhere (on its way here after its go, or a go that lapsed: still that member there), so it counts as played: the floor's
+    // force and the leave-floor switch leave this copy's player on its own. DC_COOP_MUTATE=forcefloor_elsewhere_ignored (twin): not
+    // counted (this player switched, two players on one member).
+    if (chara >= 0 && CoopWorldsApart() && PromptApartOtherMember() == chara && !Mutated("forcefloor_elsewhere_ignored")) {
+        count++;
+    }
     return count;
 }
 
@@ -169,6 +182,18 @@ bool ZoneForceMetByOther(RS_STACKDATA *stack, int chara) {
 
     const int others = ZoneHolders(chara, 0);
 
+    // coop-forcefloor: the floor's own force against the table the gates read before the floor (coop_worlds' ZoneFloorChara).
+    if (script == &EdEventScript) {
+        const int table = CoopWorldsZoneFloorChara(selectMapNo, UserStatus->cur_floor);
+
+        std::fprintf(stderr, "coop-zone: forcefloor: table: map %d floor %d fenced to %d (%s) by its script, the table says %d: %s\n", selectMapNo,
+                     (int) UserStatus->cur_floor, chara, Name(chara), table, table == chara ? "agree" : "DIFFER");
+    }
+    if (others > 0 && CoopWorldsApart() && PromptApartOtherMember() == chara) {
+        std::fprintf(stderr, "coop-zone: forcefloor: player %d plays %d (%s) elsewhere%s: it counts as playing it here\n", 3 - CoopWorldsSelf(), chara,
+                     Name(chara), CoopWorldsForceComing() == chara ? " (on its way onto this floor)" : "");
+    }
+
     if (Mutated("zoneforce_skipall")) { // (twin of the nobody case: player 1 kept whoever plays z)
         std::fprintf(stderr, "coop-zone: the floor's zone %d (%s): player 1 keeps %d (zoneforce_skipall)\n", chara, Name(chara), (int) UserStatus->cur_chara);
         return true;
@@ -177,6 +202,13 @@ bool ZoneForceMetByOther(RS_STACKDATA *stack, int chara) {
     if (others == 0 || Mutated("zoneforce_p1")) {
         std::fprintf(stderr, "coop-zone: the floor's zone %d (%s): no other player plays it, player 1 (%d) is switched as retail at link tick %lld\n", chara,
                      Name(chara), (int) UserStatus->cur_chara, (long long) NetplayLinkTick());
+        // coop-memberowner (Jep's rule 11-14: a forced character becomes the player's member; no going back once the floor's
+        // restriction lifts, a swap the normal way brings another): the game's player on this copy keeps it as its member (who
+        // held it moves off it). DC_COOP_MUTATE=zone_force_unkept (twin): not kept, the member before comes back at the next
+        // floor's restore, as before.
+        if (GamePlayer() >= 0 && !Mutated("zone_force_unkept")) {
+            SetMember(GamePlayer(), chara, MemberWhy::kZone);
+        }
         return false;
     }
     std::fprintf(stderr, "coop-zone: the floor's zone %d (%s): %d other player(s) already play it, player 1 keeps %d (%s) at link tick %lld\n", chara,
@@ -292,7 +324,7 @@ bool ZoneMenuGrey(int chara, bool pick) {
         return false;
     }
     // The page's owner: the player whose menu engine runs on this copy (her local menu), else the entry swapped in, else the menus' player.
-    const int picker = FullMenuRunsFor(2) ? 1 : ActorSwapped() > 0 ? ActorSwapped() : NetplayMenuOwner() == 2 ? 1 : 0;
+    const int picker = FullMenuRunsFor(2) ? 1 : ActorSwapped() > 0 ? ActorSwapped() : 0;
     // (Their own member; another player's is a trade, which always goes; any other only when it would leave z unplayed.)
     const bool grey = !Mutated("zonemenu_nogrey") && chara != ZoneMemberOf(picker) && ZoneHolders(chara) == 0 && !ZonePickLegal(picker, chara, false);
 
@@ -321,7 +353,7 @@ void LeaveFloorSwitch() {
     // (Not while a pick is loading: a trade gives her z by her pick, which PickPartner loads after this step.)
     const bool loading = g_partner.loaded_chara >= 0 && g_partner.choice >= 0 && g_partner.choice != g_partner.loaded_chara;
 
-    if (zone < 0 || gameTask != GAME_TASK_PLAY || BtEventMode != 0 || zone >= UserStatus->party_size || ZoneHolders(zone) > 0 ||
+    if (zone < 0 || !CoopPlainPlay() || BtEventMode != 0 || zone >= UserStatus->party_size || ZoneHolders(zone) > 0 ||
         PromptSwapOpen() || loading) {
         return;
     }
@@ -343,10 +375,11 @@ void LeaveFloorSwitch() {
         }
         std::fprintf(stderr, "coop-zone: nobody on the floor plays %d (%s): player %d (%d) is switched to it at link tick %lld\n", zone, Name(zone), i + 1,
                      ZoneMemberOf(i), (long long) NetplayLinkTick());
+        // (coop-memberowner: why zone: the floor's rule gives the member whoever held it, who moves on)
         if (i == 0) {
-            PromptChangePlayer(zone);
+            PromptChangePlayer(zone, MemberWhy::kZone);
         } else if (i == 1) {
-            g_partner.choice = zone; // (loaded by PickPartner this tick)
+            SetPick(1, zone, MemberWhy::kZone); // (loaded by PickPartner this tick)
         }
         return;
     }
@@ -360,7 +393,10 @@ void LeaveFloorSwitch() {
 //   loaded): p<N>:radial:<c> (the ring's Cross on c), p<N>:menu:<c> (the Characters page's pick of c), race:<y> (player 1's ring
 //   open on player 2's member x; player 2 becomes y; then the ring's Cross on the x it offered), both (each player asks the
 //   other for their member on one tick), leave (player 2 leaves the floor, her overlay's Leave floor).
+//   force:<z> (the floor script's zone sequence for z, now). lobby:<c> (the lobby's pick c for player 1, as its start applies it).
 //   at:<tick> (wait until that link tick: the pad presses of DC_COOP_MENUPRESS come on the same clock).
+//   down:<N> (coop-deadswap: player N goes down now: player 1 by his co-op down, player 2 by her fall). downasked:<N>:<T> (player N
+//   goes down T ticks after the next swap question is up, while it waits for its answer).
 // DC_COOP_TEST_ZONE_ANSWER=yes: a swap question is answered yes by the one asked.
 
 struct ZoneTest {
@@ -373,9 +409,31 @@ struct ZoneTest {
     int              race_x = -1;
     int              race_y = -1;
     bool             done = false;
+    int              down_who = 0;   // coop-deadswap: downasked's player
+    int              down_after = 0; // its ticks after the question is up
+    int              down_up = -1;   // the ticks the question has been up (-1 not yet)
 };
 
 ZoneTest g_test;
+
+// coop-deadswap: player who goes down, every copy on this tick. Player 1: his life to 0, and the game's own check of it in his step
+// (movechara: CheckLife() <= 0, out of his hit-proof frames) takes him down the co-op way (PlayerGoesDown), as a monster's blow
+// does; a Revival Powder among his active items is taken out first (the game's death would use it). Player 2: her fall.
+void TestDown(int who, const char *op) {
+    if (who == 1) {
+        auto *status = (CDngStatusData *) UserStatus;
+
+        for (int slot; (slot = status->CheckActItemSlot(ITEM_REVIVAL_POWDER)) != -1;) {
+            std::fprintf(stderr, "coop-test: zone op %s: player 1's Revival Powder in active slot %d taken out first\n", op, slot);
+            status->item_pack.quick_item_slot[slot] = -1;
+        }
+        UserStatus->hp[UserStatus->cur_chara] = 0;
+        BtActStatus.invincible_frames = 0;
+    } else if (who == 2) {
+        PartnerFalls("zone test");
+    }
+    std::fprintf(stderr, "coop-test: zone op %s: player %d goes down at link tick %lld\n", op, who, (long long) NetplayLinkTick());
+}
 
 void Members(char *out, size_t size) {
     std::snprintf(out, size, "p1 %d p2 %d", ActorChara(0), ActorChara(1));
@@ -438,7 +496,7 @@ void RunForce(int zone) {
 }
 
 bool Settled() {
-    return gameTask == GAME_TASK_PLAY && !PromptSwapOpen() && (g_partner.choice < 0 || g_partner.choice == g_partner.loaded_chara);
+    return CoopPlainPlay() && !PromptSwapOpen() && (g_partner.choice < 0 || g_partner.choice == g_partner.loaded_chara);
 }
 
 void Report(const char *what) {
@@ -461,6 +519,14 @@ bool RunOp(const std::string &op) {
                      (long long) NetplayLinkTick());
         if (std::strcmp(path, "radial") == 0) {
             WheelConfirm(player - 1, chara);
+        } else if (std::strcmp(path, "plain") == 0) {
+            // coop-memberowner: a plain pick straight to the members' writer, past every screen's own offer (as a screen whose view
+            // of the members lags would send it): the one refusal rule's own row.
+            if (player == 1) {
+                PromptChangePlayer(chara, MemberWhy::kPick);
+            } else if (!SetPick(player - 1, chara, MemberWhy::kPick)) {
+                MemberRefused(player - 1, chara, MemberWhy::kPick);
+            }
         } else if (player == 1) {
             // The Characters page's pick, as BtMenuLoadChara takes it: asked of the co-op first, then the change.
             if (MenuCharaChange(chara) >= 0) {
@@ -469,6 +535,61 @@ bool RunOp(const std::string &op) {
         } else {
             FullMenuApplyPickForTest(player, chara);
         }
+        return true;
+    }
+    // coop-swapcombo (A): nextfloor takes both players onto the dungeon's next floor (as a floor-start checkpoint's copy goes: the
+    // dungeon's load, retail's reset of the game's player to Toan among it), every copy on this tick.
+    // coop-memberowner: force:<z> runs the floor script's zone sequence for z now (as DC_COOP_TEST_ZONE_FORCE does at the load),
+    // every copy on this tick: after a trade, so the game's player is on the floor's member while his own is another.
+    if (std::sscanf(op.c_str(), "force:%d", &chara) == 1) {
+        RunForce(chara);
+        return true;
+    }
+    // coop-memberowner: lobby:<host> applies the lobby's pick for player 1 as its start does (CoopPartyLobbyPicks), every copy on
+    // this tick (the question whether a lobby pick survives the dungeon's load). The real start applies it in a town, where the
+    // game's body stays retail's until the dungeon's load; on this floor the body the floor loaded is put back at once (no model
+    // of the pick is loaded here), so only the members' record is the lobby's: what the next floor's load then meets.
+    if (std::sscanf(op.c_str(), "lobby:%d", &chara) == 1) {
+        std::fprintf(stderr, "coop-test: zone op lobby: player 1's lobby pick %d at link tick %lld\n", chara, (long long) NetplayLinkTick());
+        const int body = UserStatus->cur_chara;
+
+        CoopPartyLobbyPicks(chara, -1, false);
+        UserStatus->cur_chara = (s8) body;
+        return true;
+    }
+    if (op == "nextfloor") {
+        std::fprintf(stderr, "coop-test: zone op nextfloor: onto floor %d at link tick %lld\n", (int) UserStatus->cur_floor + 2, (long long) NetplayLinkTick());
+        NetplayGoToFloor(selectMapNo, UserStatus->cur_floor + 1);
+        return true;
+    }
+    // towncrash: townbody loads the floor partner's member as the town body (as a Norune visit leaves it), every copy on this tick;
+    // the floor partner loads again over it on the next tick (coop_town.cpp TownBodyOnFloorForTest).
+    if (op == "townbody") {
+        const int chara = g_partner.loaded_chara;
+
+        std::fprintf(stderr, "coop-test: zone op townbody: the town body as %d at link tick %lld\n", chara, (long long) NetplayLinkTick());
+        TownBodyOnFloorForTest(chara);
+        return true;
+    }
+    // towncrash: leave takes player 1 out of the dungeon by his floor menu's way out (Jep's rc3 run; as DC_WORLDS_TEST_FLOOR_LEAVE
+    // does), every linked copy on this tick: the copies split, he to the dungeon's town, she stays on the floor.
+    if (op == "leave1") {
+        std::fprintf(stderr, "coop-test: zone op leave1: player 1 takes the floor's way out as %d at link tick %lld\n", (int) UserStatus->cur_chara,
+                     (long long) NetplayLinkTick());
+        CoopWorldsExitBy(1);
+        gameTask = GAME_TASK_EXIT_FADE_START;
+        return true;
+    }
+    // coop-swapcombo part 3: swing:<N> starts player N's attack on every copy on this tick (player 1's as his Cross does,
+    // ToanKey_On for Toan; player 2's as her Cross does, StartAttack), so the next op asks mid-swing.
+    if (std::sscanf(op.c_str(), "swing:%d", &player) == 1) {
+        if (player == 1 && UserStatus->cur_chara == CHARA_TOAN) {
+            ToanKey_On();
+        } else if (player == 2) {
+            StartAttack();
+        }
+        std::fprintf(stderr, "coop-test: zone op %s: player %d swings (action %d, hers %d) at link tick %lld\n", op.c_str(), player,
+                     (int) BtActStatus.action_on, g_partner.attacking ? 1 : 0, (long long) NetplayLinkTick());
         return true;
     }
     long long at = 0;
@@ -490,7 +611,7 @@ bool RunOp(const std::string &op) {
             g_test.race_stage = 1;
             return false;
         case 1:
-            g_partner.choice = g_test.race_y; // player 2 changes member while his ring is open
+            SetPick(1, g_test.race_y, MemberWhy::kTest); // player 2 changes member while his ring is open
             g_test.race_stage = 2;
             return false;
         case 2:
@@ -503,6 +624,16 @@ bool RunOp(const std::string &op) {
             g_test.race_stage = 0;
             return true;
         }
+        return true;
+    }
+    if (std::sscanf(op.c_str(), "down:%d", &player) == 1) {
+        TestDown(player, op.c_str());
+        return true;
+    }
+    if (std::sscanf(op.c_str(), "downasked:%d:%d", &player, &chara) == 2) {
+        g_test.down_who = player;
+        g_test.down_after = chara;
+        g_test.down_up = -1;
         return true;
     }
     if (op == "both") {
@@ -525,7 +656,7 @@ void StepTest() {
     static const char *picks = TestEnv("DC_COOP_TEST_ZONE_PICKS");
 
     if (g_test.done || (force < 0 && picks == nullptr) || UserStatus == nullptr || !NetplayStateFileLoaded() || g_partner.loaded_chara < 0 ||
-        gameTask != GAME_TASK_PLAY || BtEventMode != 0) {
+        !CoopPlainPlay() || BtEventMode != 0) {
         return;
     }
     if (!g_test.armed) {
@@ -539,6 +670,13 @@ void StepTest() {
             }
             at += n + (end != nullptr ? 1 : 0);
         }
+    }
+    // (coop-deadswap: downasked's down, counted from the question's first tick up, past the ops' settling)
+    if (g_test.down_who != 0 && PromptSwapOpen() && ++g_test.down_up >= g_test.down_after) {
+        const int who = g_test.down_who;
+
+        g_test.down_who = 0;
+        TestDown(who, "downasked");
     }
     if (!g_test.forced) {
         g_test.forced = true;
@@ -568,10 +706,59 @@ void StepTest() {
 
 } // namespace
 
+// coop-entrance: the zone test hook still has picks to make (DC_COOP_TEST_ZONE_FORCE / _PICKS set and not done): the descend
+// driver's DC_COOP_DUNTEST_WAIT=ready waits for it, so a floor's gate comes after a trade (x-entrance -Case p1xiao).
+bool ZoneTestPending() {
+    static const bool armed = TestEnvInt("DC_COOP_TEST_ZONE_FORCE", -1) >= 0 || TestEnv("DC_COOP_TEST_ZONE_PICKS") != nullptr;
+
+    return armed && !g_test.done;
+}
+
 bool ZoneTestAnswersYes() {
     static const bool yes = TestEnv("DC_COOP_TEST_ZONE_ANSWER") != nullptr && std::strcmp(TestEnv("DC_COOP_TEST_ZONE_ANSWER"), "yes") == 0;
 
     return yes;
+}
+
+// coop-forcefloor test hook (DC_WORLDS_TEST_ZONE_FLOOR=map:floor:z, coop_worlds' table reads it too): on this copy's first tick
+// of play on that floor, the floor script's zone sequence for z runs (RunForce), as a fenced floor's start runs it.
+static void TestFloorForce() {
+    static int  map = -1, floor = -1, zone = -1;
+    static bool read = false, done = false;
+
+    if (!read) {
+        read = true;
+        if (const char *const spec = TestEnv("DC_WORLDS_TEST_ZONE_FLOOR"); spec != nullptr) {
+            std::sscanf(spec, "%d:%d:%d", &map, &floor, &zone);
+        }
+    }
+    if (done || map < 0 || selectMapNo != map || UserStatus->cur_floor != floor || mode != 3) {
+        return;
+    }
+    static bool forced = false;
+    // (retail's force is in the floor's start script, script 100, as it begins: F(z) then _SET_LIMMIT_ZONE(z), so the test's runs
+    // there too, while a follower is still on its way (at first play it ran after her merge); at the first tick of play only
+    // when the start script was missed)
+    const bool start_script = BtEventMode != 0 && BtEventInfo.running_script_no == 100;
+
+    if (!forced && !start_script && (!CoopPlainPlay() || BtEventMode != 0)) {
+        return;
+    }
+    if (!forced) {
+        forced = true;
+        std::fprintf(stderr, "coop-test: forcefloor: on the test's fenced floor (map %d floor %d): its zone force runs (%s), player %d plays %d\n", map, floor,
+                     start_script ? "the start script" : "first play", CoopWorldsApart() ? CoopWorldsSelf() : 1, (int) UserStatus->cur_chara);
+        RunForce(zone);
+        std::fprintf(stderr, "coop-test: forcefloor: after the force: this copy's player plays %d; the members' record p1 %d p2 %d at link tick %lld\n",
+                     (int) UserStatus->cur_chara, Member(0), Member(1), (long long) NetplayLinkTick());
+        return;
+    }
+    // (then once, linked together on it with the partner's body loaded: who plays what, both copies alike)
+    if (!CoopWorldsApart() && g_partner.loaded_chara >= 0 && (g_partner.choice < 0 || g_partner.choice == g_partner.loaded_chara)) {
+        done = true;
+        std::fprintf(stderr, "coop-test: forcefloor: together on the fenced floor: p1 plays %d, p2 plays %d; the members' record p1 %d p2 %d at link tick %lld\n",
+                     ActorChara(0), ActorChara(1), Member(0), Member(1), (long long) NetplayLinkTick());
+    }
 }
 
 void ZoneStep() {
@@ -580,6 +767,14 @@ void ZoneStep() {
     }
     LeaveFloorSwitch();
     StepTest();
+}
+
+// coop-forcefloor: the fenced test floor's force (DC_WORLDS_TEST_ZONE_FLOOR), each floor tick, apart too (retail's start script
+// runs on a copy apart as well; ZoneStep is together's only).
+void ZoneTestFloorStep() {
+    if (Enabled() && UserStatus != nullptr) {
+        TestFloorForce();
+    }
 }
 
 } // namespace coop

@@ -18,9 +18,19 @@
 // part.
 
 // Turns the camera to take in both before motionDrive steps it. DunMoveChara calls it each tick.
-// Linked copies with game.coop_independent_cameras give each player a camera instead: the player's
+// Linked copies give each player a camera instead: the player's
 // is the game's, the partner's its own (coop_camera.cpp), and each copy shows its own player's.
 void CoopBeforeMotion();
+
+// coop-wave1a (localaudit 3.2): player 1's first-person view (his R2) is his own row, retail's viewMode__2, not the world's
+// gameTask: the task stays GAME_TASK_PLAY under it, so the world and the other players play on as while he stands (her Cross
+// on a chest, a lock or a door). Reads of "his plain play" (CoopPlainPlay: play, not in his view) and of "his view in play"
+// (CoopEyePlay) keep what GAME_TASK_PLAY and GAME_TASK_EYE_CAMERA meant before. CoopEyeTask is the task his view runs under:
+// GAME_TASK_PLAY, or retail's GAME_TASK_EYE_CAMERA under DC_COOP_MUTATE=eye_task_shared (the twin).
+bool CoopPlainPlay();
+bool CoopEyePlay();
+int  CoopEyeTask();
+bool CoopOwnFirstPerson(bool dungeon, bool town_view); // this copy's own player's view (the look on the left stick: local input)
 
 namespace dc::game {
 class CFrameVu1;
@@ -35,11 +45,22 @@ void CoopViewEnd();
 // The character the floor is drawn round (the chests, water, fires and lights near it): the partner
 // on its own copy while the cameras are independent, else the player.
 CFrameVu1 *CoopViewFrame();
+// coop-camflash2: what this tick's floor draw was drawn from: 1 the other's opening-scene view, 0 another camera, -1 no floor
+// draw this tick (the arrival hold lifts for the view only from a frame drawn from it); CoopViewTickStart clears it each tick.
+int  CoopViewDrewScene();
+int  CoopViewChosenWhy();
+void CoopViewDrawnRef(float *ref); // coop-menutpose: the last floor draw's camera target
+void CoopViewTickStart();
+// coop-camflash2: how black this copy's screen is as its last floor draw left it (the floor's curtain, DispFade, and the event
+// fade, together; 0 to 128), and the floor draw's own: that and the black of the other's view it was drawn from (-1 none).
+int CoopScreenBlack();
+int CoopViewBlack(int *his);
 
 // coop-fpvisible: whether this copy draws the game's player (Toan, or whoever he plays) on the floor and its map
 // arrow. As the game has it (BtActStatus.player_visible, shared state), except on player 2's linked copy while player 1
 // looks in first person: her screen is hers, so he stays in it. Draw-only. DC_COOP_MUTATE=fp_hidden hides him (twin).
 bool CoopPlayerShown();
+bool CoopPartnerEyeDrawn(); // coop-p2actions: this copy's draw is from player 2's first-person view (her body left out)
 // Draws him (Draw_MainUnit, which tests player_visible as well) when CoopPlayerShown, and notes where on screen.
 void CoopDrawPlayer();
 // coop-fpvisible (DC_COOP_DEBUG): once a second, how many frames this copy drew its player on the floor.
@@ -50,6 +71,7 @@ void CoopScreenSpots(int out[8]);
 
 // The partner's camera, for the linked copies' checksum: false while the cameras are shared.
 bool CoopPartnerCamera(float *angle, float *pos);
+void CoopPartnerCameraTrace(long long tick); // coop-choosing: the partner camera's state, each traced tick
 
 // Moves, swings and animates the partner, and takes the monsters' hits on it. DunMoveChara calls it
 // each tick after motionDrive; playing is whether the player is under control on the floor (no
@@ -171,7 +193,7 @@ const char *TestEnvOr(const char *name, const char *fallback);
 int TestEnvInt(const char *name, int fallback);
 // Whether a switch is on: set, not empty and not starting with '0' (DC_PERF_TWIN=1, DC_COOP_MOUSE_TWIN=1).
 bool TestEnvOn(const char *name);
-// Whether the variable is exactly value (DC_COOP_OWN_BAGS=1).
+// Whether the variable is exactly value (DC_COOP_TEST_UNHURT=p2).
 bool TestEnvIs(const char *name, const char *value);
 // DC_COOP_DEBUG: the headless tests' extra log lines. Read once.
 bool CoopDebug();
@@ -179,7 +201,8 @@ bool CoopDebug();
 // Session reset: puts every co-op module's own state back to what a fresh session starts with, so two
 // copies that restart from the host's save after a resync or reconnect go on alike. Netplay calls it
 // on both copies at the resync tick. Each module resets its own part (coop_core.cpp lists them).
-void CoopResetForSession();
+// coop-menushut: own_take, a copy taking its own checkpoint again (TakeState(own)): its own player's local menu goes on.
+void CoopResetForSession(bool own_take = false);
 
 // coop-warmreset (test-time plan WS7 step 1): a warm pair's job start, on both copies on the job's tick, just before its fixture
 // goes back (netplay.cpp ServeResetForJob): CoopResetForSession (what a resync resets: the wheels, the monsters' targets, the

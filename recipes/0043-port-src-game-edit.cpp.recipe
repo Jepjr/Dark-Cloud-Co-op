@@ -1,0 +1,95 @@
+# port/src/game/edit.cpp from Chronicle's port/src/game/edit.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/edit.cpp
+base port/src/game/edit.cpp
+from 22e40f76b6d48fb07b67a9cdce1260000364bccc
+to a44661f8ea4f88c9a997ae0abbfa115372705701
+@@ -58,0 +59,17
++#include "coop/coop_fullmenu.hpp" // coop-menubuffers: the script menus' work area
++#include "coop/coop_faces.hpp"    // coop-faces
++
++// coop hooks (global scope, as src/coop defines them)
++void CoopTownApartMenuBegin(); // coop-bagapart (coop_town.cpp)
++void CoopTownApartMenuEnd();
++bool CoopTownMenuStillHere(); // coop-menubackdrop (coop_townmenu.cpp)
++bool CoopP1PartsMenuElsewhere(); // coop-p1parts (coop_georama_own.cpp)
++void CoopP1PartsMenuOpenElsewhere(); // coop-016 (coop_georama_own.cpp)
++void CoopP1PartsMenuOpenHere(int *texture_blocks, int start_at_atora); // coop-tripwires (coop_georama_own.cpp)
++void CoopBagSizeRaised(int size); // coop-bags (coop_inventory.cpp)
++
++void CoopSysMesOthersStep(); // coop-eventslots (port/src/coop/coop_eventslots.cpp)
++void CoopSysMesOthersDraw();
++namespace dc::game { class CNPCharacter; }
++void CoopTownVillagerDrawBegin(dc::game::CNPCharacter *npcs, int count); // coop-drawwrite: each screen's own detail (coop_town.cpp)
++void CoopTownVillagerDrawEnd(dc::game::CNPCharacter *npcs, int count);
+@@ -1747,0 +1765,5
++namespace {
++void EdDrawCharacters(CCharacter *player, int player_draw_mask, int npc_count, CNPCharacter *npcs, int *npc_draw_masks, int draw_shadows, ED_EVENT_INFO *event);
++} // namespace
++
++// coop-drawwrite: the villagers past this copy's own detail distance fade out on this screen alone (CoopTownVillagerDrawBegin).
+@@ -1748,0 +1771,7
++    CoopTownVillagerDrawBegin(npcs, npc_count);
++    EdDrawCharacters(player, player_draw_mask, npc_count, npcs, npc_draw_masks, draw_shadows, event);
++    CoopTownVillagerDrawEnd(npcs, npc_count);
++}
++
++namespace {
++void EdDrawCharacters(CCharacter *player, int player_draw_mask, int npc_count, CNPCharacter *npcs, int *npc_draw_masks, int draw_shadows, ED_EVENT_INFO *event) {
+@@ -1828,0 +1858,1
++        coop::FacesDraw(player, 8, -1, "the game's own player"); // coop-faces: Toan's fishing model blinks (game.coop_faces; retail's is still)
+@@ -1840,0 +1871,1
++} // namespace
+@@ -1919,0 +1951,4
++int EdGetShopNo() { // coop-p1parts: her shop's opening (coop_townmenu.cpp)
++    return shop_no;
++}
++
+@@ -1951,1 +1986,7
+- c66eb182dbc6206a
++    // coop-p1parts: linked, his parts menu is made on his copy alone (no still, no pad mode, no textures on the other)
++    if (menu_mode == ED_MENU_EDIT && CoopP1PartsMenuElsewhere()) {
++        CoopP1PartsMenuOpenElsewhere(); // coop-016: but the opening's melt of the bag (EditMenuInit's), the world's, here too
+~1962 683899fdb046225f|        |
++    }
++
++    if (texture != nullptr && CoopTownMenuStillHere()) { // coop-menubackdrop: not over player 2's own menu's still on her copy
+@@ -1961,1 +2002,1
+- 5e3ac388d8c17244
++            CoopP1PartsMenuOpenHere(texture_block.data(), EditMenuStatus.mode == EDIT_MENU_MODE_PLACE); // coop-tripwires: EditMenuInit, watched
+@@ -1963,0 +2005,1
++            CoopTownApartMenuBegin(); // coop-bagapart: her member on her copy apart
+@@ -1964,0 +2007,1
++            CoopTownApartMenuEnd();
+@@ -1977,1 +2020,1
+- 19437168eeccfa1c
++            InitNameRegist(name_reg_chara, 16, coop::ScriptMenuReadBuffer(reinterpret_cast<u_long128 *>(read_buffer))); // coop-menubuffers: a block of its own
+@@ -1980,1 +2023,1
+- 743735ac76ced419
++            InitMenuMove(MENU_MOVE_WORLD_MAP_DIRECT, 16, coop::ScriptMenuReadBuffer(reinterpret_cast<u_long128 *>(read_buffer))); // coop-menubuffers: a block of its own
+@@ -2003,0 +2047,1
++            CoopTownApartMenuBegin(); // coop-bagapart: her member on her copy apart
+@@ -2005,0 +2050,1
++            CoopTownApartMenuEnd();
+@@ -2079,0 +2125,1
++    CoopBagSizeRaised(new_count); // coop-bags: retail's one writer of the bag size: every bag takes it at once (coop_inventory.cpp)
+@@ -2226,0 +2273,16
++// coop-eventslots: the town's help and edit-system message state as ranges, for each player's own slot (coop_eventslots.cpp).
++void EdSysMesStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++    add(&SystemMesNo, sizeof SystemMesNo, "ed SystemMesNo", context);
++    add(&HelpMesNo, sizeof HelpMesNo, "HelpMesNo", context);
++    add(&SystemMesCount, sizeof SystemMesCount, "ed SystemMesCount", context);
++    add(&SystemMesPosition, sizeof SystemMesPosition, "ed SystemMesPosition", context);
++    add(&SystemMesW, sizeof SystemMesW, "SystemMesW", context);
++    add(&SystemMesH, sizeof SystemMesH, "SystemMesH", context);
++    add(&SystemMesX, sizeof SystemMesX, "SystemMesX", context);
++    add(&SystemMesY, sizeof SystemMesY, "SystemMesY", context);
++    add(&SystemMesWait, sizeof SystemMesWait, "ed SystemMesWait", context);
++    add(&SystemMesInputKey, sizeof SystemMesInputKey, "ed SystemMesInputKey", context);
++    add(&HelpMesCount, sizeof HelpMesCount, "HelpMesCount", context);
++    add(static_cast<void *>(&EditSystemMes), sizeof EditSystemMes, "EditSystemMes", context);
++}
++
+@@ -2230,0 +2293,1
++    CoopSysMesOthersStep(); // coop-eventslots: every other player's own messages, from their slots
+@@ -2259,0 +2323,1
++    CoopSysMesOthersDraw(); // coop-eventslots: every other player's own messages, on their own screen

@@ -1571,8 +1571,8 @@ bool Open(const int members[], int count, const int weapon_items[]) {
         }
     }
     g_lobby_models.open = loaded;
-    std::fprintf(stderr, "lobby-models: open %d of %d members (%s), texture slots %d of 196, staging %d of %d quadwords\n", loaded,
-                 count, list, used, TexManager.buffer_used, TexManager.buffer_size);
+    std::fprintf(stderr, "lobby-models: open %d of %d members (%s), texture slots %d of %d, staging %d of %d quadwords\n", loaded,
+                 count, list, used, kTextureCount, TexManager.buffer_used, TexManager.buffer_size);
     return loaded > 0;
 }
 

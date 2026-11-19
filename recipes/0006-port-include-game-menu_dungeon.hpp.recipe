@@ -1,0 +1,49 @@
+# port/include/game/menu_dungeon.hpp from Chronicle's port/include/game/menu_dungeon.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/menu_dungeon.hpp
+base port/include/game/menu_dungeon.hpp
+from 9d73f199fbeb9205f670807624cbacd51006278b
+to ae4ca26283f4fd1c2ddfd66aa5464754ea23019f
+@@ -162,0 +163,43
++/**
++ * coop-p2controls: the picker's choices for any weapon (elements: the weapon whose stones count; weapon: the one whose kind
++ * says whether it may go without one), at most six, into choices. Returns how many.
++ */
++int ElementChoicesOf(const struct WEAPON_HAVE *elements, const struct WEAPON_HAVE *weapon, s8 *choices);
++
++/**
++ * coop-p2controls: the index of the weapon's own element among choices (the picker's first selection).
++ */
++int ElementChoiceOfCurrent(const s8 *choices, int count, int current);
++
++/**
++ * coop-p2controls: an element's icon in quickchr.img's wepicon sheet (corner u, v and size, pixels).
++ */
++void ElementIconCell(int element, int *u, int *v, int *size);
++
++/**
++ * coop-p2controls: makes quickchr.img's none cell in a loaded bank, as the picker does before loading it.
++ */
++void ElementIconsMakeNone(u8 *bank);
++
++/**
++ * coop-p2controls3: the player's live weapon after a new element (its trail colour; Ruby's shot), as the picker's close does.
++ */
++void ElementAppliedToLiveWeapon();
++
++/*
++ * coop-swapmenulook: the quick change ring's drawing (CharaChangeDraw's and the element picker's, split out), for each co-op
++ * player's own ring. The ring's middle is QuickCharaPos (the dungeon passes 0x128, 0xD8), its radius changeMenu_long (60 open).
++ */
++// A place on the ring: slot 0 the chosen place (left), turn_frames of the 20-frame turn in direction (below 0: the other way).
++void QuickRingPoint(int slot, int count, float radius, float turn_frames, float direction, float *x, float *y);
++// One member's 48-pixel face (quickchr.img's quickchara) with its corner at x, y.
++void QuickRingFace(CTexture *faces, int chara, float x, float y, int shade, int alpha);
++// One element's stone (quickchr.img's wepicon) in the 48-pixel place whose corner is x, y.
++void QuickRingElement(CTexture *icons, int element, float x, float y, int alpha);
++// The chosen place's stay frame.
++void QuickRingFrame(int base_x, int base_y, float radius, CTexture *stay);
++// The hand: its wobble's step (CursorVibeCnt), its place beside the chosen one, and the hand itself.
++void QuickRingHandStep();
++void QuickRingHandAt(int base_x, int base_y, float radius, int *x, int *y);
++void QuickRingHand(int x, int y);
++

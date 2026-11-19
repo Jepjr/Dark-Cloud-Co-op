@@ -1,0 +1,60 @@
+# port/src/game/menu_draw.cpp from Chronicle's port/src/game/menu_draw.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_draw.cpp
+base port/src/game/menu_draw.cpp
+from b13666a0344053bd9ddbd99a31763a7cf928bffd
+to b625a19a3abe7730b5866b7f3de59615117997b6
+@@ -51,0 +52,14
++#include "coop/coop_fullmenu.hpp" // coop-menubuffers: the floor menu's work area
++
++namespace coop { // coop-keytab (port/src/coop/coop_keytab.cpp): the item menu's fourth board page, Keys
++constexpr int kKeysTabPage = 9;
++bool KeysTabOn();
++bool KeysTabPage(int step);
++int  KeysTabCells();
++int  KeysTabCount();
++int  KeysTabItemAt(int cell);
++void KeysTabIcons(int x, int y, int top, int bottom, int alpha);
++bool KeysTabTagDraw(int tag, int x, int y, dc::game::CTexture *texture, int alpha);
++int  KeysTabBubbleShift();
++} // namespace coop
++
+@@ -65,1 +79,1
+- 54a9260f25582e84
++// Jep (co-op): these two have external linkage: coop/coop_fullmenu.cpp's item board reads and sets them.
+@@ -72,0 +87,2
++namespace {
++
+@@ -142,1 +158,1
+- a4772c31c02468b4
++            return coop::DungeonMenuWorkBuffer(reinterpret_cast<u_long128 *>(read_buffer)); // coop-menubuffers: a block of its own, past the floor's reads
+@@ -1315,1 +1331,2
+- b0f9e2bbacecda17
++    // coop-keytab: four pages (KeysTabPage turns them itself)
++    if (GamePad.Down(PAD_L2 | PAD_L1) && PerBoardPt->menu_kind == PERSONAL_BOARD_ITEM && !coop::KeysTabPage(-1)) {
+@@ -1323,1 +1340,1
+- 816816166ac3bfad
++    if (GamePad.Down(PAD_R2 | PAD_R1) && PerBoardPt->menu_kind == PERSONAL_BOARD_ITEM && !coop::KeysTabPage(1)) {
+@@ -1394,1 +1411,1
+- bd82a0ed875443ac
++        } else if (column == 4 && PerBoardPt->menu_kind != PERSONAL_BOARD_ATLA && PerBoardPt->page != coop::kKeysTabPage) { // coop-keytab: no trash
+@@ -1638,0 +1656,2
++        case coop::kKeysTabPage: // coop-keytab
++            return coop::KeysTabCells();
+@@ -1713,0 +1733,3
++        case coop::kKeysTabPage: // coop-keytab: the party's keys
++            coop::KeysTabIcons(x, y, top, bottom, alpha);
++            break;
+@@ -1864,0 +1887,4
++            if (coop::KeysTabTagDraw(tag, x, y, texture, alpha)) { // coop-keytab: four tabs
++                break;
++            }
++
+@@ -2000,0 +2027,1
++    x += coop::KeysTabBubbleShift(); // coop-keytab: off the fourth tab
+@@ -2036,0 +2064,3
++        case coop::kKeysTabPage: // coop-keytab
++            max = coop::KeysTabCount();
++            break;
+@@ -2255,0 +2286,2
++        case coop::kKeysTabPage: // coop-keytab
++            return coop::KeysTabItemAt(cell);

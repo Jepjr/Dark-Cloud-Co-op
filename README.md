@@ -5,10 +5,13 @@
 **Online co-op for Dark Cloud, built on [Chronicle](https://github.com/TheMoonPeople/Chronicle).**
 
 [![Release](https://img.shields.io/github/v/release/Jepjr/Dark-Cloud-Co-op?style=flat-square)](https://github.com/Jepjr/Dark-Cloud-Co-op/releases)
+[![Downloads](https://img.shields.io/github/downloads/Jepjr/Dark-Cloud-Co-op/total?style=flat-square)](https://github.com/Jepjr/Dark-Cloud-Co-op/releases)
 [![Chronicle](https://img.shields.io/badge/Chronicle-9418a550-blue?style=flat-square)](https://github.com/TheMoonPeople/Chronicle/commit/9418a5506e2a08e7739aa68d70841df6bc516201)
 [![Disc](https://img.shields.io/badge/disc-NTSC%20(US)%201.02-orange?style=flat-square)](#what-you-need)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=flat-square)](#what-you-need)
 [![Players](https://img.shields.io/badge/players-2-green?style=flat-square)](#known-issues)
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G0E62AMQIX)
 
 [How it works](#how-it-works) • [Features](#features) • [Where it's at](#where-its-at) • [What you need](#what-you-need) • [Installing](#installing) • [Playing together](#playing-together) • [Reporting bugs](#reporting-bugs) • [Building it yourself](#building-it-yourself) • [Credits](#credits)
 
@@ -57,14 +60,23 @@ If players fall out of sync, the zone reloads. You don't lose anything, but if y
 <br><b>Story scenes.</b> Item-started story scenes wait until everyone says yes. New in v0.1.1. <a href="FEATURES.md#story-scenes-that-need-everyone">More</a>
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+<a href="FEATURES.md#fishing-together"><img src="https://github.com/user-attachments/assets/a7749fb2-ef55-44ef-bdb3-6d8ff80436c7" alt="Fish together" width="100%"></a>
+<br><b>Fish together.</b> Both at the fishing sign at once, each with your own fish, walking with your rod as your own character. <a href="FEATURES.md#fishing-together">More</a>
+</td>
+<td width="50%" valign="top">
+<a href="FEATURES.md#faces-that-move"><img src="https://github.com/user-attachments/assets/d9e6aca3-4cf8-4275-8881-5d6c868ecb64" alt="Faces that move" width="100%"></a>
+<br><b>Faces that move.</b> Every character blinks with their own eyes, and a fisher's face follows the catch. <a href="FEATURES.md#faces-that-move">More</a>
+</td>
+</tr>
 </table>
 
 - <b>Drop in, drop out.</b> Join or leave any time. The host never stops for you. <a href="FEATURES.md#drop-in-drop-out">More</a>
 - <b>Play apart.</b> One in town, one in the dungeon. Same world, your own way. <a href="FEATURES.md#play-apart">More</a>
 - <b>Leave together.</b> Take an exit and your friend is asked to come along. <a href="FEATURES.md#leaving-a-floor">More</a>
-- <b>Fish together.</b> Both at the fishing sign at once, each with your own fish. New in v0.1.1. <a href="FEATURES.md#fishing-together">More</a>
 
-Also: [shared key items](FEATURES.md#shared-key-items), [shared storage](FEATURES.md#shared-storage), [profiles](FEATURES.md#profiles), [pausing only when everyone pauses](FEATURES.md#pausing) and more. **[All features](FEATURES.md)**
+Also: [shared key items](FEATURES.md#shared-key-items), [shared storage](FEATURES.md#shared-storage), [profiles](FEATURES.md#profiles), [pausing only when everyone pauses](FEATURES.md#pausing) and more. **[All features](FEATURES.md)** • [Settings](FEATURES.md#settings)
 
 ## Where it's at
 
@@ -91,32 +103,42 @@ The game balance is a bit skewed with every additional player. It's fine if you'
 |---|---|
 | **PC** | Windows 10 or 11, 64-bit, with a graphics card that supports Vulkan (anything recent does) |
 | **Disc** | Your own Dark Cloud disc image (.iso): **NTSC (US), version 1.02**. PAL is on the list. |
-| **Chronicle** | At commit [`9418a550`](https://github.com/TheMoonPeople/Chronicle/commit/9418a5506e2a08e7739aa68d70841df6bc516201). If you don't have Chronicle yet, the setup will grab it for you. |
-| **Internet** | For the setup's downloads |
-| **Disk space** | The mod itself is about 25 MB. If Chronicle hasn't extracted your disc yet, that's another 5.5 GB, plus about 1 GB for Chronicle's build tools. |
+| **Chronicle** | Any version. The mod brings its own game and only uses Chronicle's folder and its game data. (The setup and building it yourself use commit [`9418a550`](https://github.com/TheMoonPeople/Chronicle/commit/9418a5506e2a08e7739aa68d70841df6bc516201); the setup grabs it if you have no Chronicle.) |
+| **Disk space** | The mod is about 45 MB. If Chronicle hasn't extracted your disc yet, that's another 5.4 GB. |
 
 ## Installing
 
-1. Grab the setup zip from the [Releases](../../releases) page.
+1. Grab **`Dark Cloud Co-op vX.Y.Z.zip`** from the [Releases](../../releases) page.
+2. Extract it into your Chronicle folder, the one with `port` and `run.bat` in it. You should end up with `<Chronicle>\mods\Dark Cloud Co-op`.
+3. Run **`Play Dark Cloud Co-op.exe`** in that folder.
+
+The first time, it checks Chronicle's game data. If there's none yet, it asks for your disc image and extracts it (about 5 minutes). If the data is from a disc or a Chronicle version it can't play, it tells you what's wrong and leaves your data alone.
+
+> [!WARNING]
+> Nothing here is signed, so Windows may show "Windows protected your PC" the first time. Click **More info**, then **Run anyway**. Windows 11's Smart App Control blocks unsigned programs completely, so that has to be off.
+
+> [!NOTE]
+> **Playing with a friend:** they do the same with the same release, on their own Chronicle with their own disc. The game checks you're on the same version before you connect.
+
+<details>
+<summary><b>Or: the setup, which builds it on your PC</b></summary>
+
+Use this if you'd rather build the game yourself, or have no Chronicle yet. It ends up with exactly the same game as the zip above (the same file, byte for byte), so you can play with people who used either.
+
+1. Grab **`Dark Cloud Co-op vX.Y.Z setup.zip`** from the [Releases](../../releases) page.
 2. Unzip it into your Chronicle folder's `mods` folder. (You can unzip it anywhere and point it at your Chronicle folder instead. If you don't have Chronicle, it'll set one up next to itself.)
 3. If Chronicle hasn't extracted your disc yet, put your .iso next to the setup.
 4. Run **`Set up Dark Cloud Co-op.bat`**.
 
-It builds the mod from source on your PC, which takes a few minutes. When it's done, run **`Play Dark Cloud Co-op.exe`** in `mods\Dark Cloud Co-op`.
+It takes a few minutes and about 1 GB more for Chronicle's build tools. It needs your Chronicle at the commit above; if it isn't, or has data from a different disc, the setup stops and tells you what to do without changing anything. It says what it's going to download before it does, and checks every download. If something goes wrong partway through, run it again: it picks up where it left off (`setup-log.txt` has the details). Windows Defender may flag the freshly built game or hold one of the build's programs; the setup then names it: add your Chronicle folder's `mods` and `.kazarov` folders as exclusions in Windows Security and run it again.
 
-> [!WARNING]
-> Nothing here is signed, so Windows may show "Windows protected your PC" the first time. Click **More info**, then **Run anyway**. Windows 11's Smart App Control blocks unsigned programs completely, so that has to be off. Windows Defender (or another antivirus) may also flag the freshly built game, or hold one of the build's programs while it checks it; if it does, the setup stops and names it: add two folders of your Chronicle folder as exclusions in Windows Security, `mods` and `.kazarov` (for example `C:\Chronicle\mods` and `C:\Chronicle\.kazarov`), then run the setup again. It carries on where it stopped.
-
-> [!NOTE]
-> **Playing with a friend:** they run the same setup on their own Chronicle with their own disc. Two people on the same release end up with exactly the same game, which is what lets you connect.
+</details>
 
 <details>
 <summary><b>A few more things worth knowing</b></summary>
 
-- The mod sits in your Chronicle folder and uses Chronicle's game data and build tools. It doesn't make a second copy of the game.
-- If your Chronicle is on a different version, or has data from a different disc, the setup stops and tells you what to do. It won't change anything in your Chronicle folder.
-- It tells you what it's going to download before it does anything, and checks every download.
-- If something goes wrong partway through, run it again and it picks up where it left off. There's a `setup-log.txt` if you want the details.
+- The mod sits in your Chronicle folder and uses Chronicle's game data. It doesn't make a second copy of the game, and never changes Chronicle's own files.
+- `VERSION.txt` in the mod folder says which version you have. Two copies connect when their `content-version` lines match, however they were installed.
 - Your Chronicle folder's `git status` will show `mods\` as new. Add `/mods/` to its `.git\info\exclude` if that bugs you.
 
 </details>
@@ -134,7 +156,7 @@ On the title screen, START and CONTINUE are single player. **MULTIPLAYER** opens
 Each player has a **profile**: a name your own bag (your items and gilda) is saved under. Profiles are saved with the host's save slot, so your bag lives in that host's game.
 
 - **In the lobby,** each player picks a profile (or makes a new one) and a character, and locks them in before the game loads. Your usual profile is already selected for you.
-- **Joining a game that's already running:** the lobby shows up on your screen only. The host keeps playing while you pick.
+- **Joining a game that's already running:** the lobby shows up on your screen only. The host keeps playing while you pick. You then load into town, as if you had loaded a save (back next to the host only if you dropped out on the floor they're still on).
 - **If you drop and reconnect,** you get your profile and character back automatically, no lobby. If the **host** drops, they need to host again.
 - **A new profile starts with an empty bag.** Bag upgrades count for every profile, including ones made later.
 
@@ -157,14 +179,14 @@ Each player has a **profile**: a name your own bag (your items and gilda) is sav
 Open an [issue](../../issues) and attach `save\log.txt` from **both** players if you can. The log stays on your PC and is never sent anywhere on its own.
 
 > [!TIP]
-> To turn the log off, set `"write_log": false` under `"game"` in `save\config.json`.
+> To turn the log off, see the [log setting](FEATURES.md#settings).
 
 <div align="right"><a href="#dark-cloud-co-op">back to top</a></div>
 
 ## Building it yourself
 
 <details>
-<summary>The setup does all of this for you. Click here if you'd rather do it by hand.</summary>
+<summary>The zip and the setup do all of this for you. Click here if you'd rather do it by hand.</summary>
 
 You'll need Git, PowerShell 7, Python 3, CMake 3.28 or newer, 7-Zip, and a Chronicle clone with this repo at `mods\Dark Cloud Co-op`.
 
@@ -177,7 +199,7 @@ You'll need Git, PowerShell 7, Python 3, CMake 3.28 or newer, 7-Zip, and a Chron
    ```
    pwsh -File "mods\Dark Cloud Co-op\build\build.ps1"
    ```
-   It builds Chronicle at the commit in `chronicle-pin.txt` (your checkout just needs that commit in its history), applies this mod's recipes, and writes `game\` and `Play Dark Cloud Co-op.exe`.
+   It builds Chronicle at the commit in `chronicle-pin.txt` (your checkout just needs that commit in its history), applies this mod's recipes, and writes `game\` and `Play Dark Cloud Co-op.exe`. It prints a `version: content ...` line: a build of a release's commit has that release's `content-version` (see its `VERSION.txt`) and the same `darkcloud.exe`, so it connects with the zip's and the setup's.
 4. Extract your NTSC disc into Chronicle's data folder if you haven't already:
    ```
    game\dcdata.exe extract <your .iso> <Chronicle>\port\run\data
@@ -197,6 +219,8 @@ You'll need Git, PowerShell 7, Python 3, CMake 3.28 or newer, 7-Zip, and a Chron
 
 - [Chronicle](https://github.com/TheMoonPeople/Chronicle) by The Moon People: the decompilation and PC port this whole mod is built on.
 - [Kazarov](https://github.com/TheMoonPeople/Kazarov), the engine layer Chronicle runs on.
+
+If you'd like to support the project: [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G0E62AMQIX)
 
 ---
 

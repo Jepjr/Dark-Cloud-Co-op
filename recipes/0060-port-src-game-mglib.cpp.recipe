@@ -1,0 +1,62 @@
+# port/src/game/mglib.cpp from Chronicle's port/src/game/mglib.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/mglib.cpp
+base port/src/game/mglib.cpp
+from 70b0267fb498388564200f220109be9d4d34296a
+to 7bc65728b5c83035933d361dc5671c8fe2e3055a
+@@ -21,0 +22,3
++#include "coop/coop_camtest.hpp" // Jep (co-op): coop-camflash (CamFlashTick)
++#include "coop/coop_perf.hpp" // Jep (co-op): perf
++#include "coop/netplay.hpp"   // coop: perf
+@@ -116,0 +120,7
++bool          g_tick_view_held = false; // Jep (co-op): cameras (MGPortHoldTickView)
++sceVu0FMATRIX g_held_tick_view;
++bool          g_view_no_cut = false; // Jep (co-op): MGPortSetViewMatrixNoCut
++// Jep (co-op), coop-camflash: whether this tick cut its interpolation (a camera cut, or the mode's first tick), for the
++// test hook CamFlashTick.
++bool          g_tick_camera_cut = false;
++bool          g_tick_list_cut = false;
+@@ -219,1 +229,1
+- 0eb3a972bf4cd11b
++    if (g_view_no_cut || !gfx::Recording() || !g_have_tick_view) { // Jep (co-op): g_view_no_cut
+@@ -236,0 +247,1
++        g_tick_camera_cut = true; // Jep (co-op): coop-camflash
+@@ -398,0 +410,1
++            g_tick_list_cut = true; // Jep (co-op): coop-camflash
+@@ -477,1 +489,2
+- 44a5519dba51d4d3
++            sceVu0CopyMatrix(g_tick_view, g_tick_view_held ? g_held_tick_view : mgRenderInfo.view_scaled);
++            g_tick_view_held = false; // Jep (co-op): cameras
+@@ -478,0 +492,3
++            CamFlashTick(&g_tick_view[0][0], g_tick_camera_cut, g_tick_list_cut); // Jep (co-op): coop-camflash (test hook)
++            g_tick_camera_cut = false;
++            g_tick_list_cut = false;
+@@ -508,0 +525,2
++
++    CoopPerfFlipBegin(); // Jep (co-op): perf
+@@ -512,1 +530,1
+- 34cc8c70f59d956e
++    if ((mgWaitVSync || ClockTickCount() == g_old_vcount) && !CoopPerfCatchingUp() && !NetplayCatchingUp()) { // coop: perf; netplay: a joiner catching up
+@@ -516,0 +535,1
++    CoopPerfFlipEnd(); // coop: perf
+@@ -654,0 +674,21
++// Jep (co-op): upstream dropped this with the aerial map (aa983e72); co-op's own cameras still need it.
++void MGPortSetViewMatrixNoCut(float view[4][4], float *position) {
++    g_view_no_cut = true;
++    MGSetViewMatrix(view, position);
++    g_view_no_cut = false;
++}
++
++// Jep (co-op), coop-camflash: see mglib.hpp.
++void MGPortCutCameraInterpolation() {
+~470 97f065125a500b79|    |
+=236 169bac666599996d
++        g_tick_camera_cut = true;
++    }
++}
++
++// Jep (co-op): cameras
++void MGPortHoldTickView() {
++    sceVu0CopyMatrix(g_held_tick_view, mgRenderInfo.view_scaled);
++    g_tick_view_held = true;
++}
++

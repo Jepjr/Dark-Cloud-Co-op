@@ -37,7 +37,7 @@ void CoopMouseApply() {
     // The Online launchers link through DC_NETPLAY, not game.netplay (as netplay.cpp's Settings reads it);
     // DC_COOP_MOUSE_ENV_TWIN is the twin that reads only the config.
     int           netplay = TestEnvOn("DC_COOP_MOUSE_ENV_TWIN") ? config.netplay : TestEnvInt("DC_NETPLAY", config.netplay);
-    bool          linked = netplay != 0 && config.netplay_controller_only;
+    bool          linked = netplay != 0; // (coopoptions: game.netplay_controller_only retired, always so)
     bool          capture = config.mouse_capture;
     if (linked && !Twin()) {
         bool was_captured = MouseCaptured();

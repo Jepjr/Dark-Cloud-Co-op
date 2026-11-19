@@ -28,6 +28,7 @@
 #include "editloop3.hpp" // (after the headers it leans on, as port/src/editloop3.cpp has them)
 #include "mdt.hpp"
 #include "mglib.hpp"
+#include "npcharacter.hpp" // coop-sceneactors
 #include "rect.hpp"
 #include "snd.hpp"
 #include "spritetable.hpp"
@@ -35,6 +36,7 @@
 
 #include "coop/coop.hpp"
 #include "coop/coop_camera.hpp" // coop-latefall: ArrivalChrFile
+#include "coop/coop_core.hpp"   // coop-sceneactors: kModelQuads
 #include "coop/netplay_socket.hpp"
 
 namespace dc::game {
@@ -200,7 +202,7 @@ unsigned GatherSprites(ScenePicSprites *out) {
         for (SPRITE_TABLE *node = table->heads[layer]; node != nullptr && node != table->tails[layer] && n < kSprites; node = node->next) {
             const CTexture *texture = nullptr;
 
-            for (int t = 0; t < 196; t++) {
+            for (int t = 0; t < kTextureCount; t++) {
                 const CTexture &candidate = TexManager.textures[t];
 
                 if (candidate.block >= kFirstBlock && candidate.block < kFirstBlock + kBlocks && candidate.tex0 == node->tex0) {
@@ -316,6 +318,11 @@ bool SpritesFresh() {
 }
 
 } // namespace
+
+// coop-sceneactors (at the end of this file)
+static void SendActors(std::uint32_t magic, int player, std::uint32_t seq, int map, int floor);
+static bool ReceiveActors(const void *data, int size, int other);
+static void ActorsTick(bool apart, int map, int floor);
 
 void CoopWorldsSceneChrFile(int index, const char *path) {
     if (index >= 0 && index < 16) {
@@ -478,6 +485,7 @@ void CoopWorldsScenePicturesSend(std::uint32_t magic, int player, std::uint32_t 
                      count != 0 ? sprites.sprites[0].texture : "");
     }
     g_sent_count = count;
+    SendActors(magic, player, seq, map, floor); // coop-sceneactors
 }
 
 unsigned CoopWorldsScenePicturesSent() {
@@ -485,6 +493,9 @@ unsigned CoopWorldsScenePicturesSent() {
 }
 
 bool CoopWorldsScenePicturesReceive(const void *data, int size, int other) {
+    if (ReceiveActors(data, size, other)) { // coop-sceneactors
+        return true;
+    }
     if (size == (int) sizeof(ScenePacks)) {
         ScenePacks packs;
 
@@ -550,6 +561,7 @@ void CoopWorldsScenePicturesTick(bool apart, int map, int floor) {
         g_heard.files_set = false;
         g_heard.sprites_set = false;
     }
+    ActorsTick(apart, map, floor); // coop-sceneactors
 }
 
 void CoopWorldsSceneSpritesDraw() {
@@ -602,5 +614,400 @@ void CoopWorldsSceneSpritesDraw() {
     if (CoopDebug() && heard.seq % 30 == 0 && heard.seq != logged) {
         logged = heard.seq;
         std::fprintf(stderr, "worlds: scene pictures drawn %u: %u of %u sprites\n", heard.seq, drawn, heard.count);
+    }
+}
+
+// coop-sceneactors (rc3: "her scene view draws fewer meshes than his screen"): the other's scene's own actors on the copy that
+// shows it. Measured on the B1 lesson after a resync (the cave entry): his frame drew 119 meshes, hers of the same view 67-75;
+// the difference was the scene's event NPC (slot 1, the lesson's elder, e29c03c.cfg of gedit/s99/chara/e29.chr: 28 meshes and its
+// shadow) and the second (away2.cfg). The scene's script loads them (_LOAD_CHARA) and moves them, and only the copy playing the
+// scene runs it: the showing copy has its camera (CoopWorldsSceneView), its player (ScenePoseTick) and its pictures (above), and
+// had none of its actors. Now the playing copy says, with each view, which pack entry each drawn NPC was made from and where it
+// stands, how it turns and where its motion is; the showing copy makes the same model from its own game data, into an actor of
+// its own (never the game's NPC slots, which its own held script uses), poses it so, and draws it and its shadow in the view.
+// Its textures go in the town bodies' blocks of players 4 to 6 (no floor uses them; one only while it holds nothing), and go
+// when the view ends, only while the block still holds what this made. DC_WORLDS_MUTATE=scene_no_actors (twin): none drawn.
+namespace {
+
+constexpr std::uint32_t kSceneActors = 8; // (worlds message kind)
+constexpr int           kActors = 6;      // the event NPC slots (EdEventInfo.npc_count in a dungeon)
+constexpr int           kActorBlocks[] = {134, 135, 136, 137, 138, 139}; // (TownBodyBlock's for players 4 to 6: town only)
+
+#pragma pack(push, 1)
+struct SceneActor {
+    std::uint8_t  on;   // 1 drawn, 2 its shadow drawn too
+    std::int8_t   pack; // the pack it was made from: its place in the scene's packs (ScenePacks), -1 none
+    std::uint8_t  pad[2];
+    char          cfg[24]; // the pack's entry (_LOAD_CHARA's name)
+    float         pos[3], rot[3], scale[3];
+    float         ambient[4]; // ambient_offset (its fade in [3])
+    std::int32_t  motion_no, motion_flags;
+    float         motion_speed, time, blend, blend_step;
+    std::uint32_t frame, next_frame;
+    std::int32_t  asked, playing, blending;
+};
+
+struct SceneActors {
+    std::uint32_t magic;
+    std::uint32_t player;
+    std::uint32_t kind; // kSceneActors
+    std::uint32_t seq;
+    std::int32_t  map;
+    std::int32_t  floor;
+    SceneActor    actors[kActors];
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SceneActors) == kCoopWorldsSceneActorsBytes, "coop_worlds.hpp names this message's size");
+static_assert(sizeof(SceneActors) != sizeof(ScenePacks) && sizeof(SceneActors) != sizeof(ScenePicFiles) &&
+                  sizeof(SceneActors) != sizeof(ScenePicSprites),
+              "worlds messages are told apart by their size");
+static_assert(sizeof(SceneActors) <= 1088, "a worlds message fits one datagram");
+
+// The playing copy: what each NPC slot was made from (the pack's path and the entry), as _LOAD_CHARA loaded it.
+std::string g_npc_pack[kActors];
+std::string g_npc_cfg[kActors];
+
+// The showing copy: the other's last, when, and its own actors.
+struct HeardActors {
+    bool                                  set = false;
+    SceneActors                           msg{};
+    std::chrono::steady_clock::time_point at{};
+} g_heard_actors;
+
+struct Actor {
+    CNPCharacter                       *body = nullptr;
+    CTexAnimeData                      *tex_anime = nullptr;
+    u_char                             *model = nullptr;
+    CDataAlloc2<1>                      arena;
+    std::vector<std::vector<u_long128>> pack; // the pack, read from this copy's game data
+    std::string                         from; // "<pack>|<cfg>" it was made from ("" none)
+    int                                 block = -1;
+    std::vector<std::string>            textures; // the names it put in its block
+    bool                                drawn = false;
+} g_actors[kActors];
+
+bool NoActors() {
+    static const char *const mutate = TestEnv("DC_WORLDS_MUTATE");
+
+    return mutate != nullptr && std::strstr(mutate, "scene_no_actors") != nullptr;
+}
+
+bool ActorsFresh() {
+    return g_heard_actors.set && std::chrono::steady_clock::now() - g_heard_actors.at <= std::chrono::milliseconds(500);
+}
+
+int BlockTextures(int block, std::vector<std::string> *names) {
+    int n = 0;
+
+    for (const CTexture &texture : TexManager.textures) {
+        if (texture.name[0] != 0 && texture.block == block) {
+            n++;
+            if (names != nullptr) {
+                names->emplace_back(texture.name);
+            }
+        }
+    }
+    return n;
+}
+
+void ActorUnload(int i, bool apart) {
+    Actor &a = g_actors[i];
+
+    if (a.from.empty()) {
+        return;
+    }
+    // (Its block emptied only while it holds what this made: merged, the state set brought the other's table.)
+    std::vector<std::string> now;
+
+    if (a.block >= 0) {
+        BlockTextures(a.block, &now);
+    }
+    const bool mine = apart && !now.empty() && std::all_of(now.begin(), now.end(), [&](const std::string &name) {
+        return std::find(a.textures.begin(), a.textures.end(), name) != a.textures.end();
+    });
+
+    if (mine) {
+        TexManager.DeleteTextureBlock(a.block);
+        TexManager.CleanUpTextureList();
+    }
+    std::fprintf(stderr, "worlds: scene actors: slot %d (%s) put away%s\n", i, a.from.c_str(),
+                 mine || a.block < 0 ? "" : " (its block not its own now: its buffers only)");
+    std::fflush(stderr);
+    a.from.clear();
+    a.pack.clear();
+    a.textures.clear();
+    a.block = -1;
+    a.drawn = false;
+}
+
+// Slot i made as the other's was, from this copy's own read of the same pack, as _LOAD_CHARA makes it.
+void ActorLoad(int i, const std::string &pack, const char *cfg) {
+    Actor &a = g_actors[i];
+
+    ActorUnload(i, true);
+    a.from = pack + "|" + cfg; // (not asked again if it cannot be made)
+
+    int block = -1;
+
+    for (int b : kActorBlocks) {
+        bool taken = BlockTextures(b, nullptr) != 0;
+
+        for (const Actor &other : g_actors) {
+            taken = taken || other.block == b;
+        }
+        if (!taken) {
+            block = b;
+            break;
+        }
+    }
+    const std::uintmax_t size = dc::data::DataFileSize(pack);
+
+    if (block < 0 || size == 0 || size > (32u << 20)) {
+        std::fprintf(stderr, "worlds: scene actors: slot %d (%s) not made: %s\n", i, a.from.c_str(), block < 0 ? "no free block" : "no such pack here");
+        std::fflush(stderr);
+        return;
+    }
+    if (a.body == nullptr) {
+        a.body = new CNPCharacter();
+        a.tex_anime = new CTexAnimeData[64];
+        a.model = new (std::align_val_t{64}) u_char[static_cast<std::size_t>(coop::kModelQuads) * 16];
+    }
+    a.pack.emplace_back((std::size_t) (size / sizeof(u_long128)) + 4096 / sizeof(u_long128) + 1);
+
+    char path[64];
+    int  read = 0;
+
+    Copy(path, sizeof path, pack.c_str());
+    if (LoadFile2(path, a.pack[0].data(), &read, 0) == 0 || read <= 0) {
+        a.pack.clear();
+        return;
+    }
+    TexManager.DeleteTextureBlock(block);
+    TexManager.CleanUpBuffer();
+    TexManager.CleanUpTextureList();
+    a.arena.base = a.model;
+    a.arena.buffer = a.model;
+    a.arena.used = 0;
+    a.arena.limit = coop::kModelQuads;
+
+    CNPCharacter *body = a.body;
+    char          name[sizeof(SceneActor::cfg) + 1];
+
+    Copy(name, sizeof name, cfg);
+    body->Initialize();
+    for (int t = 0; t < 64; t++) {
+        a.tex_anime[t].Initialize();
+    }
+    body->InitializeTexAnime(a.tex_anime, 64);
+    body->LoadPackData2((unsigned int *) a.pack[0].data(), name, &a.arena, block, &a.arena, 0);
+    if (body->frame == nullptr) {
+        std::fprintf(stderr, "worlds: scene actors: slot %d (%s) not made: no model\n", i, a.from.c_str());
+        std::fflush(stderr);
+        TexManager.DeleteTextureBlock(block);
+        TexManager.CleanUpTextureList();
+        a.pack.clear();
+        return;
+    }
+    // (as _LOAD_CHARA sets an event NPC up; no motion camera: its motions never move this copy's camera)
+    body->texture_block = block;
+    body->initialized = 1;
+    body->draw_enabled = 1;
+    body->near_camera = 1;
+    body->ambient_offset[3] = 128.0f;
+
+    CFrameAttr attr;
+
+    attr.clip_enable = false;
+    attr.fog_enable = true;
+    body->frame->SetAttr(attr, 1, 4);
+    body->FootSoundEnable(0);
+    body->EventEnable(0);
+    a.block = block;
+    BlockTextures(block, &a.textures);
+    std::fprintf(stderr, "worlds: scene actors: slot %d made from %s in block %d (%zu textures)\n", i, a.from.c_str(), block, a.textures.size());
+    std::fflush(stderr);
+}
+
+// Posed as the other's stands this tick: place, turn, size, fade and motion clock, then one step of its motion as the game's.
+void ActorPose(Actor &a, const SceneActor &s) {
+    CNPCharacter *body = a.body;
+
+    body->SetPosition(s.pos[0], s.pos[1], s.pos[2]);
+    body->SetRotation(s.rot[0], s.rot[1], s.rot[2]);
+    body->SetScale(s.scale[0], s.scale[1], s.scale[2]);
+    for (int k = 0; k < 4; k++) {
+        body->ambient_offset[k] = s.ambient[k];
+    }
+
+    MOTION_STATE &state = body->motion_type.state;
+
+    body->motion_no = s.motion_no;
+    body->motion_flags = s.motion_flags;
+    body->motion_speed = s.motion_speed;
+    state.time = s.time;
+    state.blend = s.blend;
+    state.blend_step = s.blend_step;
+    state.frame = s.frame;
+    state.next_frame = s.next_frame;
+    state.motion_no = s.asked;
+    state.playing_no = s.playing;
+    state.blending = s.blending;
+    body->CCharacter::Step(); // (the motion's pose; not CNPCharacter's, which would move its fade and sequences)
+    body->ShadowStep();
+    body->ClothStep(0);
+}
+
+} // namespace
+
+void CoopWorldsSceneNpcLoaded(int index, int file, const char *cfg) {
+    if (index < 0 || index >= kActors) {
+        return;
+    }
+    g_npc_pack[index] = file >= 0 && file < 16 ? g_chr_path[file] : "";
+    g_npc_cfg[index] = cfg != nullptr ? cfg : "";
+}
+
+// The playing copy: each drawn NPC of its scene, with the view (CoopWorldsScenePicturesSend).
+static void SendActors(std::uint32_t magic, int player, std::uint32_t seq, int map, int floor) {
+    SceneActors msg{magic, (std::uint32_t) player, kSceneActors, seq, map, floor};
+    unsigned    sent = 0;
+
+    for (int i = 0; i < kActors; i++) {
+        SceneActor &s = msg.actors[i];
+
+        s.pack = -1;
+        if (EdEventInfo.npcs == nullptr || i >= EdEventInfo.npc_count || EdEventInfo.npc_draw[i] == 0 || g_npc_cfg[i].empty()) {
+            continue;
+        }
+        CNPCharacter &npc = EdEventInfo.npcs[i];
+        const auto    at = std::find(g_scene_packs.begin(), g_scene_packs.end(), g_npc_pack[i]);
+
+        if (npc.frame == nullptr || npc.initialized == 0 || at == g_scene_packs.end()) {
+            continue;
+        }
+        s.on = (std::uint8_t) (1 | (EdEventInfo.npc_shadow_draw[i] != 0 ? 2 : 0));
+        s.pack = (std::int8_t) (at - g_scene_packs.begin());
+        Copy(s.cfg, sizeof s.cfg, g_npc_cfg[i].c_str());
+
+        float v[4];
+
+        npc.GetPosition(v);
+        std::memcpy(s.pos, v, sizeof s.pos);
+        npc.frame->GetRotation(v);
+        std::memcpy(s.rot, v, sizeof s.rot);
+        std::memcpy(s.scale, npc.frame->scale, sizeof s.scale);
+        std::memcpy(s.ambient, npc.ambient_offset, sizeof s.ambient);
+
+        const MOTION_STATE &state = npc.motion_type.state;
+
+        s.motion_no = npc.motion_no;
+        s.motion_flags = npc.motion_flags;
+        s.motion_speed = npc.motion_speed;
+        s.time = state.time;
+        s.blend = state.blend;
+        s.blend_step = state.blend_step;
+        s.frame = state.frame;
+        s.next_frame = state.next_frame;
+        s.asked = state.motion_no;
+        s.playing = state.playing_no;
+        s.blending = state.blending;
+        sent++;
+    }
+    NetSocketSend(&msg, sizeof msg);
+    // (Tests: the actors of each 5th view sent, as the showing copy's drawn lines say what it drew of them.)
+    if (CoopDebug() && seq % 5 == 0) {
+        std::fprintf(stderr, "worlds: scene actors sent %u: %u\n", seq, sent);
+    }
+}
+
+static bool ReceiveActors(const void *data, int size, int other) {
+    if (size != (int) sizeof(SceneActors)) {
+        return false;
+    }
+    SceneActors msg;
+
+    std::memcpy(&msg, data, sizeof msg);
+    if (msg.kind != kSceneActors) {
+        return false;
+    }
+    if (msg.player == (std::uint32_t) other) {
+        g_heard_actors.set = true;
+        g_heard_actors.msg = msg;
+        g_heard_actors.at = std::chrono::steady_clock::now();
+    }
+    return true;
+}
+
+// The showing copy, each tick: its actors made, posed or put away as the other's are.
+static void ActorsTick(bool apart, int map, int floor) {
+    const bool showing = apart && CoopWorldsSceneView(nullptr, nullptr, nullptr) && !NoActors() && ActorsFresh() &&
+                         g_heard_actors.msg.map == map && g_heard_actors.msg.floor == floor;
+
+    for (int i = 0; i < kActors; i++) {
+        const SceneActor &s = g_heard_actors.msg.actors[i];
+        const bool        wanted = showing && (s.on & 1) != 0 && s.pack >= 0 && s.pack < (int) g_heard_packs.size();
+        Actor            &a = g_actors[i];
+
+        a.drawn = false;
+        if (!wanted) {
+            ActorUnload(i, apart);
+            continue;
+        }
+        char cfg[sizeof s.cfg + 1];
+
+        Copy(cfg, sizeof cfg, s.cfg);
+        if (a.from != g_heard_packs[s.pack] + "|" + cfg) {
+            ActorLoad(i, g_heard_packs[s.pack], cfg);
+        }
+        if (a.block >= 0 && a.body != nullptr && a.body->frame != nullptr) {
+            ActorPose(a, s);
+            a.drawn = true;
+        }
+    }
+}
+
+// In the view's draw (CoopDraw): each actor's shadow, then its body, as the game draws an event NPC.
+void CoopWorldsSceneActorsDraw() {
+    if (!CoopWorldsSceneView(nullptr, nullptr, nullptr)) {
+        return;
+    }
+    unsigned drawn = 0;
+
+    for (int i = 0; i < kActors; i++) {
+        Actor &a = g_actors[i];
+
+        if (!a.drawn || NoActors()) {
+            continue;
+        }
+        if ((g_heard_actors.msg.actors[i].on & 2) != 0) {
+            float light[4][4];
+            float colour[4][4];
+            float saved[4][4];
+
+            MGGetPLight(light, colour);
+            sceVu0CopyMatrix(saved, light);
+            light[0][0] *= 0.2f;
+            light[2][0] *= 0.2f;
+            MGSetPLight(light, colour);
+            TexManager.ReloadTexture(GetVif1Packet(), 15);
+            MGBeginDrawShadow(*(sceGsTex0 *) &TexManager.GetTexture((char *) "shadow_buf", -1)->tex0);
+            a.body->DrawShadow();
+            MGEndDrawShadow(0x40);
+            sceVu0CopyMatrix(light, saved);
+            MGSetPLight(light, colour);
+        }
+        TexManager.ReloadTexture(GetVif1Packet(), a.block);
+        a.body->TextureAnime(a.block);
+        a.body->Draw();
+        drawn++;
+    }
+    // (Tests: what this copy drew of each 5th view, as the other's sent lines say; 0 under the twin.)
+    static std::uint32_t logged = 0;
+    const std::uint32_t  seq = g_heard_actors.msg.seq;
+
+    if (CoopDebug() && seq % 5 == 0 && seq != logged) {
+        logged = seq;
+        std::fprintf(stderr, "worlds: scene actors drawn %u: %u\n", seq, drawn);
     }
 }

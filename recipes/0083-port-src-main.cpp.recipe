@@ -1,0 +1,48 @@
+# port/src/main.cpp from Chronicle's port/src/main.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/main.cpp
+base port/src/main.cpp
+from 43dfe76a4fec03953fbf1ec52ff489711db1f538
+to 53a9670de58eede73811e379fe15fa08f2d5dc14
+@@ -65,0 +66,6
++#include "coop/coop_boot.hpp"     // coop-boot
++#include "coop/coop_perf.hpp"     // coop-simslow (CoopTestRenderAsync)
++#include "coop/coop_mouse.hpp"    // coop: mouse
++#include "coop/input_anchors.hpp" // coop-anchors
++#include "coop/netplay.hpp"       // coop: netplay (the pad hints)
++
+@@ -148,1 +154,2
+- b76c65807d1479d2
++                 "  --jump MODE[:MAP]  start in edit:<map>, e01/e03/e04 (populated presets), town:<0-4>,\n"
++                 "                     dungeon:<0-6>[:<floor>], title, rush, opening, menu or pick (the debug start picker),\n"
+@@ -358,1 +365,1
+- 73f5fdc6d2971619
++    InputScriptApply(NetplayTestInputFrame(GameFrameCount())); // coop: netplay (a test's presses from the link)
+@@ -380,1 +387,1
+- 84a50dc47014acb6
++    if (!CoopInputScriptLoad(PathsFromUtf8(path), script, error)) { // coop-anchors: @tick and @event lines
+@@ -383,0 +391,1
++    CoopBootKeepScript(script); // coop-boot: the script's keys are the keyboard's
+@@ -448,0 +457,1
++    CoopMouseApply(); // coop: mouse
+@@ -613,0 +623,1
++    CoopMouseBeforeInput(); // coop: mouse
+@@ -614,0 +625,1
++    CoopMouseApply(); // coop: mouse
+@@ -638,1 +649,4
+- b5d2cdd6de0d57b9
++    if (options.headless && options.screenshot == nullptr && CoopTestRenderAsync()) {
++        renderer.render_thread = gfx::RenderThreadMode::Async; // coop-simslow: a test's headless copy keeps a player's render thread
++        SDL_setenv_unsafe("KZ_RENDER_THREAD", "async", 1);
++    } else if (options.headless || options.screenshot != nullptr) {
+@@ -671,1 +685,6
+- 99819046e6524f53
++    // coop: DC_HEADLESS_PACED=1 (tests), the co-op harness's name for upstream's DC_HEADLESS_BOUNDED=1: a headless copy
++    // keeps the game's own pace, as one on screen does (netplay's catch-up joins, where the host plays in real time and
++    // the joiner must catch it up).
++    const char *paced = std::getenv("DC_HEADLESS_PACED");
++    ClockSetUnbounded(options.headless && (bounded_headless == nullptr || std::string_view(bounded_headless) != "1") &&
++                      !(paced != nullptr && paced[0] == '1'));
+@@ -690,0 +710,1
++    NetplayStopThreads(); // coop: netplay's own threads stopped and joined before the teardown below (coop-cand58)
+@@ -720,0 +741,1
++    NetplayPadHints(); // coop: netplay (before SDL starts)

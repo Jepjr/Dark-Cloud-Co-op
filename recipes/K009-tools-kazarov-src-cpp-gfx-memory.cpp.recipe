@@ -1,11 +1,26 @@
-# tools/kazarov/src/cpp/gfx/memory.cpp from Kazarov b619d1aa (coop-gfxleak, train 56's K009 ported to b619d1aa's chunk lists at the repin's rebase; by hand with build\Recipe.psm1). Kazarov's lines appear only as hashes.
+# tools/kazarov/src/cpp/gfx/memory.cpp from Kazarov b619d1aa (coop-gfxleak, train 56's K009 ported to b619d1aa's chunk lists at the repin's rebase; coop-gatelost: transient chunks in host memory unless KZ_TRANSIENT_MEMORY=device; by hand with build\Recipe.psm1). Kazarov's lines appear only as hashes.
 target tools/kazarov/src/cpp/gfx/memory.cpp
 base tools/kazarov/src/cpp/gfx/memory.cpp
 from ab953cfd59094d80ff253c2dc6f2d6fdaff9be3d
-to dffd99b3b10d1fe787853406e1561001fe251e70
+to 83e208afb4c4f994b34a114a7259d0056f394da6
 @@ -1,0 +2,1
 +#include <cstdio>
-@@ -322,0 +324,50
+@@ -68,1 +69,6
+- 3257e8ce93e7f231
++// coop-gatelost (Jep): transient chunks (each frame slot's vertices, indices and constant records, written by the CPU) use
++// host memory unless KZ_TRANSIENT_MEMORY is "device" (device-local host-visible memory, Kazarov's own default). On PC-01's
++// RTX 4070 Ti (ReBAR: a 11994 MiB device-local host-visible heap) x-dungeon-prompt-gatestays lost the device after the exit
++// gate's split (vkQueueSubmit2 -4) in 2 of 5 runs on the device path and 0 of 10 in host memory; no misuse was found
++// (validation with GPU-AV 0, every immediate mesh's indices inside its vertices). PC-02's GTX 1080 (no ReBAR: a 214 MiB
++// heap) never lost it either way. Which memory the chunks take is said once, at the first chunk.
+@@ -72,1 +78,5
+- 5a2ceddfc2b21ac0
++        const bool  device = setting && std::strcmp(setting, "device") == 0;
++        kz::Log(kz::LogLevel::Info, "gfx",
++                device ? "transient chunks: device-local memory asked (KZ_TRANSIENT_MEMORY=device)"
++                       : "transient chunks in host memory (KZ_TRANSIENT_MEMORY=device for device-local)");
++        return device;
+@@ -322,0 +333,50
 +// coop-gfxleak (Jep), ported to Kazarov b619d1aa's chunk lists: the chunks every frame slot holds, transient and staging. A
 +// new peak past the ring's bound is said on stderr, so a test can read that the slots' chunks (and the constant records'
 +// descriptor sets among them) stay flat over thousands of ticks.
@@ -56,15 +71,15 @@ to dffd99b3b10d1fe787853406e1561001fe251e70
 +    SubmitUploadsAndWait();
 +    return true;
 +}
-@@ -394,0 +446,1
+@@ -394,0 +455,1
 +    CountChunks(1);
-@@ -399,0 +452,1
+@@ -399,0 +461,1
 +    CountChunks(-1);
-@@ -428,0 +482,3
+@@ -428,0 +491,3
 +    if (FlushOutsideFrame(frame.chunks, frame.chunk, kKeptChunks, size, alignment)) {
 +        return AllocateTransient(size, alignment);
 +    }
-@@ -450,0 +507,3
+@@ -450,0 +516,3
 +    if (FlushOutsideFrame(frame.staging_chunks, frame.staging_chunk, kKeptStagingChunks, size, 16)) {
 +        return AllocateStaging(size);
 +    }

@@ -1,0 +1,12 @@
+# port/src/ui/menu_pointer.hpp from Chronicle's port/src/ui/menu_pointer.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/ui/menu_pointer.hpp
+base port/src/ui/menu_pointer.hpp
+from 4ada6b60dd9216e85f8e275a0eccbb66661c9cfa
+to f629e8430a8439c8e7aa578146b78f84387f62a0
+@@ -94,0 +95,6
++/**
++ * Jep (co-op): where the system cursor is, in 640x480 units, while the mouse is not captured; false when captured
++ * (or no window): a screen with a pointer of its own (the Options screen) then counts the motion as before.
++ */
++bool MenuPointerCursorUnits(float &x, float &y);
++

@@ -27,6 +27,7 @@ void          SteamCorePump();
 int           SteamCoreSend(std::uint64_t to, const void *data, std::size_t size);
 int           SteamCoreReceive(void *data, std::size_t size, std::uint64_t &from);
 bool          SteamCoreQueue(std::uint64_t to, int &pending_bytes, int &rate);
+int           SteamCoreSessionState(std::uint64_t to); // coop-hostquit
 bool          SteamCorePaced();
 bool          SteamCoreLine(std::uint64_t to, char *line, std::size_t size);
 std::uint64_t SteamCoreSelf();

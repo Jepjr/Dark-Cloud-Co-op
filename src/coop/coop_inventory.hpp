@@ -2,7 +2,7 @@
 
 #include "coop/game_ns.hpp"
 
-// Per-player inventories (game.coop_own_bags, or DC_COOP_OWN_BAGS=1 for one launch; off by default; needs game.coop): player 2 carries an
+// Per-player inventories (always in co-op since coopoptions retired game.coop_own_bags): player 2 carries an
 // item bag and a purse of gilda of their own. Player 1 keeps the game's own (UserStatus's item pack and
 // money), untouched; storage, weapons, attachments, Atla and story progress stay the party's.
 //
@@ -12,9 +12,8 @@
 // the slot (saves/<N>/coop-p2.dat), never inside the game's save, so every save still loads in a game
 // without co-op.
 //
-// Story items (the gate keys and the dungeons' key and quest items) are the world's, not a player's: with separate bags
-// they live in the party's key ring (coop-worldkeys, RingOn), outside both bags, and cannot be sent. Without separate
-// bags they go to player 1's pack as retail's.
+// Story items (the gate keys and the dungeons' key and quest items) are the world's, not a player's: they live in the
+// party's key ring (coop-worldkeys, RingOn), outside both bags, and cannot be sent.
 //
 // Sending an item to the other player: one copy of the item leaves the sender's bag and enters the
 // receiver's, or nothing happens when the receiver's bag is full (checked before anything is taken).
@@ -52,6 +51,10 @@ struct P2Bag {
     std::uint16_t gilda = 0;
     std::int32_t  selected = 1;   // the quick-use slot (1 to 3) pad 2's D-pad Left and Right have picked
     bool          seeded = false; // pack.num is set; false until the first use after a new game
+    // coop-bagoverflow: retail's CUserStatus::overflow_flag for this bag: set by a give past the room (CDngStatusData::GetItem,
+    // the item in the three slots past pack.num), it opens its player's menu on the throw-away page as retail's walk loop opens
+    // his (movechara); her menu has it in the status while her bag is there (MenuSwapP2Bag), where the menu writes it.
+    std::int32_t  overflow = 0;
 };
 
 // coop-bags: each tick (the dungeon's and the town's step): the party's bag size to both bags, and the bag-size test hooks.
@@ -60,21 +63,60 @@ void BagSizeRaised(int size); // EdAddMaxItem's upgrade (the global CoopBagSizeR
 void BagSizeNow();             // after a change made elsewhere (apart header apply, a load, a join's bag): the largest size to every bag
 void BagSizesSay(const char *label);
 
-// Whether the players have a bag each: game.coop and game.coop_own_bags.
+// Whether the players have a bag each: co-op on (game.coop).
 bool OwnBags();
 // coop-eventslots: the player (1 up) whose own bag P2Bag keeps (the game's pack is player 1's); one more bag a player is later work.
 int OwnBagPlayer();
 
-// coop-eventslots (Jep 11-11, FP and the fishing log: game.coop_fishing_shared, default shared): each player's own fishing record when
-// they are each player's (FishingPerPlayer: the config off, with own bags; DC_COOP_FISHING_PER_PLAYER=1 for the rows). The game's
-// player's record is the save's own (SaveData); every other player's is kept here by actor index, with their profile in
-// coop-bags.json beside their bag, and exchanged with the save's around what reads or writes it (their fishing, their own events,
-// their menus' writes). A switch of the setting on a save keeps every point (FishModeSwitch).
-bool FishingPerPlayer();
-void FishRecordSwap(int index);        // the save's fishing record and player index's (index > 0), exchanged (twice puts back)
-int  FishPointsOf(int index);          // player index's points as they stand (the save's for the game's player, or the party's)
-void FishTestSeed();                   // DC_COOP_TEST_FISHING_POINTS_P2=N: player 2's own points (per-player rows)
-void FishSwitchSelfTest(const char *directory); // DC_COOP_TEST_FISH_SWITCH=<a scratch folder>: the switch both ways and the profile file, checked
+// coop-eventslots (Jep 11-11), coop-fishpools (Jep 11-17): each player's own fishing record always (the points, the log, Mardan
+// Garayan's count), kept with their profile in coop-bags.json; game.coop_fishing_shared picks what the save's record (the one the
+// game's fishing, exchange and log use) shows: the total of every player in the game (on, the default: a spend comes off every
+// player equally, a catch is the catcher's own), or each player's own (off, with own bags; DC_COOP_FISHING_PER_PLAYER=1 for the
+// tests). See coop_inventory.cpp's coop-fishpools block.
+bool          FishingPerPlayer();
+bool          FishPoolsOn();                 // the records are the players' (game.coop and own bags)
+std::string   FishLogWho(int rank);          // coop-fishing3: the shown fishing log's entry's catcher, by profile name ("" none)
+void          FishLogNamesDraw(int board_x, int board_y, int alpha, int top, int cursor); // the log board's names and fish (shop.cpp)
+bool          FishLogColumnsOn();            // the log board is RANK | NAME | FISH | SIZE of FISH (the records are the players')
+// coop-fishing3: the fishing log board's columns (Jep 11-18: RANK | NAME | FISH | SIZE of FISH), from the board's left edge, in the
+// game's 640 x 448 screen; the board's own art (FishMenuTex) for every header: RANK, NAME, and FISH made of the SIZE of FISH button's
+// left cap and its FISH end.
+namespace fishlog {
+constexpr int kBoardW = 0x160, kBoardH = 0xD0;
+constexpr int kHeadW = 0x44, kSizeHeadW = 0x74;                         // the RANK and NAME buttons' width; SIZE of FISH's
+constexpr int kHeadRankX = 0x0C, kHeadNameX = 0x52, kHeadFishX = 0x98, kHeadSizeX = 0xDC;
+constexpr int kFishCapW = 6, kFishWordX = 64, kFishWordW = 52;          // in the SIZE of FISH art: its left cap; its "FISH" and right cap
+constexpr int kNameX = 0x46, kNameW = 0x52;                             // the player names' column
+constexpr int kFishX = 0xA0;                                            // the fish names' column (up to the size number)
+constexpr int kSizeX = 0x118, kDigitW = 0xE, kGap = 4;                  // the size's "cm" (its number right-aligned before it)
+constexpr int kRowTop = 6 + 0x16, kRowStep = 0x22;                      // a row's text top from the board's top
+} // namespace fishlog
+void          FishPoolsStep();               // every tick (the town's and a room's step): the save's record made again for now
+void          FishPoolsReset();              // a new game or a slot's load: no records yet
+void          FishRecordSwap(int index);     // around player index's activity (in, then out): the save's record theirs, what changed theirs
+int           FishPointsOf(int index);       // player index's own points
+std::uint32_t FishPoolsHash();               // the records and the view, for the sync check
+void          FishPoolsTake(std::vector<unsigned char> &out);       // ... and carried by a resync (netplay.cpp kCarried)
+void          FishPoolsPut(const unsigned char *data, std::size_t size);
+void          FishExchangeOpens(int point);  // the exchange's open (shop.cpp): the points it shows
+int           FishExchangeOpenPoint();       // ... and at its close, what it showed
+bool          FishBuyByCommand();            // coop-fishpools2: the exchange's buys go by lockstep claims (linked, together)
+void          FishBuyClaim(int item, int price);
+bool          FishBuyWaiting();              // this copy's claim not landed yet
+int           FishBuyLanded(int *item);      // once: 1 granted, -1 refused, 0 nothing
+void          FishExchangeLive(int *point);  // the exchange's shown points as they stand (claims spend them)
+void          FishBuyCommandHandler();       // kCmdFishBuy
+int           FishSlotRead(int which, int index, std::uint8_t *out); // the apart sync's fishing slots (coop_worlds.cpp)
+void          FishSlotWrite(int which, int index, const std::uint8_t *in);
+void          FishTestSeed();                // DC_COOP_TEST_FISHING_POINTS_P2=N: player 2's own points
+void ProfileBagsFileSelfTest(const char *directory); // DC_COOP_TEST_BAGS_FILE=<a scratch folder>: the bags' file by player (candreds2)
+// save6 (Jep 11-12: the co-op save holds 6 players now). A slot's co-op files written by an older release (v0.1.0/v0.1.1: no
+// players' section) are copied once beside them as <file>.v0.1.1-backup before this release's first write into the slot
+// (CoopInventorySave, CoopPartySave); a backup already there is never written over. Rename one back to restore it by hand.
+constexpr const char *kSlotBackupSuffix = ".v0.1.1-backup";
+bool CoopSlotOldLayout(const std::filesystem::path &save_directory);
+void CoopSlotKeepOldLayout(const std::filesystem::path &save_directory);
+void Save6SelfTest(const char *directory); // DC_COOP_TEST_SAVE6=<a scratch folder>: the slot's files for 6 players (x-eventslots save6)
 
 // The pack player 2's items come from and go to: its own while the bags are separate, else the party's.
 ITEM_PACK &PartnerPack();
@@ -100,6 +142,11 @@ bool PartnerKeeps(int item);
 // As CDngStatusData::CheckItemGet, for an item player 2 takes: 0 when it fits, 1 when the bag it
 // goes into is full, 2 when the attachments are.
 int PartnerCheckItemGet(int item);
+// coop-bagoverflow: a player's own bag's overflow flag (player 2 up; player 1's is the party status's own): set after a give
+// past its room, pending until that player's menu opens (taken there, as movechara takes player 1's).
+void PartnerOverflowSet(int player);
+bool PartnerOverflowPending(int player);
+void PartnerOverflowTake(int player);
 
 // Puts an item player 2 takes into its bag (with volume uses, -1 for the item's own), and with message
 // shows the item's get message and sound. False when the item is not one PartnerKeeps or the bag is
@@ -126,6 +173,9 @@ int RingAdopt(ITEM_PACK &pack, const char *from);
 int RingCount(int item);
 // Where the keys are now, on stderr ("coop-inv: keys now (why): ring R, P1's bag K, P2's bag J ...").
 void RingSay(const char *why);
+// Around a resync's state take: before (true) keeps this copy's ring for the twin; after (false) says the ring under the
+// test seed (coop-ringguard).
+void RingStateTake(bool before);
 // After a slot's load (CoopInventoryLoad): the seated players' bags, then the bags' keys into the ring.
 void RingAfterLoad();
 
@@ -158,6 +208,20 @@ Send SendItem(int from, int item);
 // DC_COOP_MUTATE=bagsend: Select does nothing (twin).
 bool BagScreenSendOn();
 bool BagScreenSend(ITEM_PACK *pack, int slot);
+// coop-sendtarget: with three players or more BagScreenSend opens the send list (the other players by profile name, a full bag
+// greyed) in the Items page's help box instead of sending. While it is open the item menu's idle step hands its presses here
+// first: BagScreenTargetsStep(pressed, &sound) gives 0 when no list is open (retail's keys run), 1 when it took the press, 2 when
+// the press sent the item; sound is the menu sound to play (-1 none). BagScreenTargetsOpen: the help box shows the list (the draw
+// marks its choice rows). BagScreenTargetsClose: a menu starting shuts any list left open. Logs "coop-inv: send list ...".
+// DC_COOP_MUTATE=sendtarget_first (twin): no list; sent at once to the first other player.
+constexpr int kTargetsUp = 1, kTargetsDown = 2, kTargetsPick = 4, kTargetsCancel = 8;
+int  BagScreenTargetsStep(int pressed, int *sound);
+bool BagScreenTargetsOpen();
+// The help text's left edge for retail's (the draw's 0x4A): kTargetsTextShift right while the list shows, so retail's hand at its
+// rows stands inside the help box. DC_COOP_MUTATE=sendtarget_hand (twin): retail's edge, the hand left of the box.
+constexpr int kTargetsTextShift = 22;
+int BagScreenHelpTextX(int retail_x);
+void BagScreenTargetsClose(const char *why);
 // coop-bagsendlocal: from a local menu (its owner's copy alone) the item goes to the other bag as a command (kCmdGive), which
 // this applies on every copy on its tick; it logs "coop-inv: player N's send of item ... at link tick T". DC_COOP_MUTATE=
 // bagsend_here (twin): the owner's copy puts it at once, alone (Jep's 11-04 pack 8 desync).
@@ -191,12 +255,13 @@ void InventoryTestSeed();
 void InventoryTestSend(ITEM_PACK &pack, int item);
 
 // Player 2's quick-use slots, as player 1's (the pack's quick_item_slot/qty, the uses left beside
-// them, and a selection of its own). While the bags are separate, pad 2's D-pad Left and Right move
+// them, and a selection of its own). Pad 2's D-pad Left and Right move
 // the selection and Square uses the selected slot's item (CombatInput calls PartnerSlotItem with the
 // buttons pressed this tick; it gives the item, or -1 for an empty slot). SpendFromSlot spends one
 // from the selected slot when it holds the item. PartnerSlotAssign (the panel's Bag page, Square) puts
 // every copy of an item into the selected slot, what was there going back into the bag.
 int  PartnerSlotItem(std::uint16_t pressed);
+void InventoryTestQuick();  // coop-p2controls: DC_COOP_TEST_QUICK (the party's quick-use slots)
 bool SpendFromSlot(int item);
 
 // coop-p2feather: one frame of her Dran's Feather's run boost from her selected quick-use slot; false when it holds none.
@@ -219,7 +284,10 @@ bool SpendRevivePowder(int player);
 // bag has no room for it). Logs "coop-inv: dranscheat P<n> at link tick T: P1 slot 1 item I x Q, P2 slot 1 item I x Q".
 // DC_COOP_MUTATE=dranscheat: the press is logged and nothing is given (twin); =dranscheat_mask: Select, Triangle and Start not
 // taken off (twin).
+// coop-debuggate: also on while game.debug_mode is, the session's value (the host's for a joiner; DransCheatNoteOwnDebug is NetplayHelloAdopt's
+// note of the joiner's own, for the twin DC_COOP_MUTATE=dranscheat_own that reads each copy's own file).
 bool DransCheatOn();
+void DransCheatNoteOwnDebug(bool on);
 void DransCheatGive(int index);
 
 // Player 2's slots as a short line for its HUD row: the selected one in brackets.
@@ -273,7 +341,8 @@ bool InventoryRead(const unsigned char *data, std::size_t size);
 // coop_lobby's fade out, after the picks) player 1 takes p1's profile's bag and player 2 p2's ("" none), an empty one for
 // a profile with none; a bag nobody takes is kept. Story items and gate keys stay in player 1's pack. new_game: both
 // bags are empty, the owners are named. Logs "coop-inv: profile bags: ...". Separate bags only (OwnBags).
-void ProfileBagsStart(const std::string &p1, const std::string &p2, bool new_game);
+// candreds2: players by player index (players[0] is player 1's profile), not a fixed pair.
+void ProfileBagsStart(const std::vector<std::string> &players, bool new_game);
 // From then on every slot load gives the seated players their profiles' bags again (the loaded slot's owners may be others);
 // a new lobby forgets the seats.
 void ProfileBagsSeatsClear();
@@ -281,9 +350,10 @@ void ProfileBagsSeatsClear();
 // coop-worldkeys: and where the keys are ("coop-inv: keys now (why): ring R, P1's bag K, P2's bag J, the game finds I: yes").
 void ProfileBagsSay(const char *why);
 // coop-joinlobby: a joiner's profile bag at a join into a game in progress: the host reads it as the catch-up's last blob is
-// made (false: bags off), both copies give it to player 2 at the lockstep (the host files the old one: never dropped).
-bool ProfileBagsJoinBag(const std::string &name, std::vector<unsigned char> &out);
-void ProfileBagsJoinTake(const std::string &name, const std::vector<unsigned char> &bytes, bool host);
+// made (false: bags off), both copies give it to the joiner's seat at the lockstep (the host files the old one: never
+// dropped). player: the joiner's player number (1-based; candreds2: by player, not a fixed player 2).
+bool ProfileBagsJoinBag(int player, const std::string &name, std::vector<unsigned char> &out);
+void ProfileBagsJoinTake(int player, const std::string &name, const std::vector<unsigned char> &bytes, bool host);
 
 extern P2Bag     g_bag;
 extern ITEM_PACK g_key_ring; // coop-worldkeys: the party's key ring (103 slots, num 103)

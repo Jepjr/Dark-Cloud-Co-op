@@ -39,8 +39,11 @@
 #include "coop/coop_combat.hpp"
 #include "coop/coop_core.hpp"
 #include "coop/coop_actor.hpp" // coop-actorswap
+#include "coop/coop_audio.hpp" // coop-comboaudio: KeySoundsRead
 #include "coop/coop_party.hpp"
 #include "coop/coop_wheel.hpp"
+#include "coop/coop_prompt.hpp"   // coop-swapcombo
+#include "coop/coop_fullmenu.hpp" // coop-swapcombo
 #include "coop/netplay.hpp"
 
 namespace dc::game {
@@ -91,6 +94,9 @@ struct Bot {
     std::uint16_t live = 0;
     std::uint16_t live_was = 0;
     bool          opened_charging = false;
+
+    // coop-comboaudio: pad 1's buttons the bot presses (CombatTestP1Buttons, through the pad's read; 0 none).
+    std::uint16_t p1_buttons = 0;
 };
 
 Bot g_bot;
@@ -267,6 +273,390 @@ void Charge() {
                 Finish(true, "");
             } else if (g_bot.t > 240) {
                 Fail("no blow and wave after the level-2 release");
+            }
+            break;
+    }
+}
+
+// coop-comboaudio: one player's combo and charged attack by numbers, for P2's against P1's own with the same member and weapon:
+// the key sounds in order, the gauge at the combo's end, at the release, at the charged attack's end and 20 ticks on, and the
+// height over the release's spot each tick of the charged attack (its peak and its ticks above 0.5).
+struct ComboTrace {
+    bool  done = false;
+    int   sounds[64] = {};
+    int   sound_count = 0;
+    float gauge_combo = 0.0f;
+    float gauge_release = 0.0f;
+    float gauge_end = 0.0f;
+    float gauge_after = 0.0f;
+    float y0 = 0.0f;
+    float peak = 0.0f;
+    int   air = 0;
+};
+
+ComboTrace g_trace[2];
+
+void TraceSounds(int player) {
+    const int *list = nullptr;
+    int        n = KeySoundsRead(player, &list);
+
+    g_trace[player - 1].sound_count = n;
+    std::copy(list, list + n, g_trace[player - 1].sounds);
+}
+
+void TraceRise(int player, float y) {
+    ComboTrace &trace = g_trace[player - 1];
+    float       rise = y - trace.y0;
+
+    trace.peak = std::max(trace.peak, rise);
+    trace.air += rise > 0.5f ? 1 : 0;
+}
+
+std::string SoundList(const ComboTrace &trace) {
+    std::string out;
+
+    for (int i = 0; i < trace.sound_count; i++) {
+        out += (i ? " " : "") + std::to_string(trace.sounds[i]);
+    }
+
+    return out;
+}
+
+// P2's against P1's: the three lines the rows read, and the first way they differ (nullptr: alike).
+const char *CompareTraces(int member) {
+    const ComboTrace &a = g_trace[0];
+    const ComboTrace &b = g_trace[1];
+    bool sounds = a.sound_count == b.sound_count && std::equal(a.sounds, a.sounds + a.sound_count, b.sounds);
+    auto near = [](float x, float y) { return std::fabs(x - y) <= 1.5f; };
+    bool gauge = near(a.gauge_combo, b.gauge_combo) && near(a.gauge_release, b.gauge_release) && near(a.gauge_end, b.gauge_end) && near(a.gauge_after, b.gauge_after);
+    bool leap = std::fabs(a.peak - b.peak) <= 1.0f && std::abs(a.air - b.air) <= 2;
+
+    std::printf("coop-test: combo vs P1 member %d: sounds %s, P1 [%s] P2 [%s]\n", member, sounds ? "alike" : "differ", SoundList(a).c_str(), SoundList(b).c_str());
+    std::printf("coop-test: combo vs P1 member %d: gauge %s, P1 %.2f/%.2f/%.2f/%.2f P2 %.2f/%.2f/%.2f/%.2f (combo end/release/attack end/20 on)\n", member,
+                gauge ? "alike" : "differs", a.gauge_combo, a.gauge_release, a.gauge_end, a.gauge_after, b.gauge_combo, b.gauge_release, b.gauge_end,
+                b.gauge_after);
+    std::printf("coop-test: combo vs P1 member %d: leap %s, P1 peak %.2f air %d P2 peak %.2f air %d\n", member, leap ? "alike" : "differs", a.peak, a.air, b.peak, b.air);
+    return !sounds ? "her key's sounds are not P1's" : !gauge ? "her gauge is not P1's" : !leap ? "her leap does not rise as P1's" : nullptr;
+}
+
+// P1 at his member's charge level 1 (ToanKey_Play: charge_level; GoroKey_Play: 45 ticks into his pose 13; UngagaKey_Play keeps no
+// level: his held pose 14, after 13, is the charge, charakey.cpp:844-849).
+bool P1ChargeLevel1(int member) {
+    return member == CHARA_GORO     ? BtActStatus.action_no == 13 && BtActStatus.action_step >= 45
+           : member == CHARA_UNGAGA ? BtActStatus.action_no == 14
+                                    : BtActStatus.charge_level >= 1;
+}
+
+// --- combo (coop-swapcombo; DC_COOP_TEST_COMBO=<member>:<trade|pick>): player 2 becomes the member, by a trade as the
+// last move (player 1 plays it first, then they trade: Jep's rc1 playtest) or by her own pick with player 1 on another;
+// then, from a full gauge, taps of Cross every 10 ticks make one attack whose blows are the member's retail chain (Toan
+// five, ToanKey_Play's 0x24 to 0x28; Ungaga three; Goro, Xiao, Ruby, Osmond one), and a held Cross charges to the first
+// level (the gauge rising) and lets go into a charged blow of base x1.5 that lands in retail's release motion (Toan's
+// strike 3 of his leap, Goro's smash 14, Ungaga's 0xF; a ranged member's shot in any).
+void Combo() {
+    static const int kChain[6] = {5, 1, 1, 1, 3, 1};
+    static const int kReleaseMotion[6] = {3, -1, 14, -1, 0xF, -1};
+    static const int kStarter[6] = {ITEM_WEAPON_DAGGER,    ITEM_WEAPON_WOODEN_SLINGSHOT, ITEM_WEAPON_MALLET,
+                                    ITEM_WEAPON_GOLD_RING, ITEM_WEAPON_FIGHTING_STICK,   ITEM_WEAPON_MACHINE_GUN};
+    static int  member = -1;
+    static bool trade = true;
+    static bool traded = false;
+    int         chara = g_partner.loaded_chara;
+
+    switch (g_bot.step) {
+        case 0: {
+            if (g_bot.t < 30 || !Idle()) {
+                break;
+            }
+
+            const char *spec = TestEnvOr("DC_COOP_TEST_COMBO", "0:trade");
+
+            member = std::clamp(std::atoi(spec), 0, 5);
+            trade = std::strstr(spec, "pick") == nullptr;
+
+            // Setup: every member joined with its starting weapon, as the party hook gives them (the solo fixture's party is two).
+            if (UserStatus->party_size < 6) {
+                UserStatus->party_size = 6;
+
+                for (int i = 0; i < 6; i++) {
+                    if (UserStatus->equipped_weapon_slot[i] < 0) {
+                        ((CDngStatusData *) UserStatus)->GetItem(kStarter[i], 0);
+                        UserStatus->equipped_weapon_slot[i] = 0;
+                    }
+                }
+            }
+
+            std::printf("coop-test: combo setup: member %d by %s; P1 member %d, P2 member %d\n", member, trade ? "trade" : "pick",
+                        (int) UserStatus->cur_chara, chara);
+            Next();
+            break;
+        }
+        case 1: {
+            // One move a time, each waited out in case 2.
+            const int p1 = UserStatus->cur_chara;
+
+            if (++g_bot.tries > 8) {
+                Fail("setup: the members never came to the case's");
+                return;
+            }
+
+            if (trade) {
+                if (traded && chara == member) {
+                    g_bot.step = 3;
+                    g_bot.t = 0;
+                    return;
+                }
+
+                // coop-comboaudio: a melee member's own combo and charge played by P1 first, by numbers (steps 20 to 25).
+                if (p1 == member && (member == CHARA_TOAN || member == CHARA_GORO || member == CHARA_UNGAGA) && !g_trace[0].done) {
+                    g_bot.step = 20;
+                    g_bot.t = 0;
+                    g_bot.tries--;
+                    return;
+                }
+
+                if (p1 == member) {
+                    traded = PromptTradeForTest();
+                    std::printf("coop-test: combo trade: player 1 member %d gives it to player 2 (%s)\n", member, traded ? "traded" : "refused");
+                } else if (chara == member) {
+                    PromptTradeForTest();
+                    std::printf("coop-test: combo first trade: player 1 takes member %d\n", member);
+                } else {
+                    PromptChangePlayer(member);
+                    std::printf("coop-test: combo: player 1 becomes member %d\n", member);
+                }
+            } else {
+                if (chara == member) {
+                    g_bot.step = 3;
+                    g_bot.t = 0;
+                    return;
+                }
+
+                if (p1 == member) {
+                    int other = 0;
+
+                    while (other == member || other == chara) {
+                        other++;
+                    }
+
+                    PromptChangePlayer(other);
+                    std::printf("coop-test: combo: player 1 becomes member %d\n", other);
+                } else {
+                    FullMenuApplyPickForTest(2, member);
+                    std::printf("coop-test: combo pick: player 2 picks member %d\n", member);
+                }
+            }
+
+            Next();
+            break;
+        }
+        case 2:
+            if (g_bot.t >= 60 && Idle() && g_partner.visible) {
+                g_bot.step = 1;
+                g_bot.t = 0;
+            } else if (g_bot.t > 900) {
+                Fail("setup: the members' models never settled");
+            }
+            break;
+        case 3:
+            if (g_bot.t >= 30 && Idle() && PartnerGauge() == 100) {
+                std::printf("coop-test: combo play: P1 member %d, P2 member %d (%s)\n", (int) UserStatus->cur_chara, chara,
+                            trade ? "after a trade" : "her pick");
+
+                if (chara != member) {
+                    Fail("setup: player 2 is not the case's member");
+                    return;
+                }
+
+                g_bot.count0 = g_combat.blows;
+                g_bot.seen = 0;
+                KeySoundsClear(2); // coop-comboaudio
+                g_trace[1] = ComboTrace{};
+                Next();
+            } else if (g_bot.t > 900) {
+                Fail("setup: player 2's gauge never filled");
+            }
+            break;
+        case 4: {
+            if (g_partner.attacking) {
+                g_bot.seen = 1;
+            }
+
+            bool over = g_bot.seen != 0 && !g_partner.attacking;
+
+            g_bot.buttons = !over && g_bot.t % 10 < 4 ? kInputCross : 0;
+
+            if (over) {
+                int hits = g_combat.blows - g_bot.count0;
+
+                std::printf("coop-test: combo member %d: %d hits in one attack (expect %d)\n", chara, hits, kChain[chara]);
+
+                if (hits != kChain[chara]) {
+                    Fail("the combo's hit count is not the member's chain length");
+                    return;
+                }
+
+                g_trace[1].gauge_combo = g_combat.gauge; // coop-comboaudio
+                Next();
+            } else if (g_bot.t > 900) {
+                Fail("the combo never ended");
+            }
+            break;
+        }
+        case 5:
+            if (g_bot.t >= 30 && Idle() && PartnerGauge() == 100) {
+                g_bot.expect = (int) ((float) ExpectedAttack(chara) * 1.5f);
+                g_bot.value0 = 0;
+                g_bot.last = -1;
+                Next();
+            } else if (g_bot.t > 900) {
+                Fail("setup: player 2's gauge never filled after the combo");
+            }
+            break;
+        case 6:
+            g_bot.buttons = kInputCross;
+
+            if (g_combat.charging) {
+                g_bot.value0 = std::max(g_bot.value0, PartnerGauge());
+            }
+
+            if (g_combat.charging && g_combat.charge_level >= 1) {
+                if (g_bot.last < 0) {
+                    g_bot.last = g_bot.t;
+                } else if (g_bot.t >= g_bot.last + 5) {
+                    g_bot.buttons = 0;
+                    g_bot.count0 = g_combat.blows;
+                    std::printf("coop-test: combo charge member %d: level %d, gauge %d\n", chara, g_combat.charge_level, g_bot.value0);
+                    g_trace[1].gauge_release = g_combat.gauge; // coop-comboaudio
+                    g_trace[1].y0 = g_partner.pos[1];
+                    Next();
+                }
+            } else if (g_bot.t > 600) {
+                Fail("the charge never reached level 1");
+            }
+            break;
+        case 7:
+            TraceRise(2, g_partner.pos[1]); // coop-comboaudio
+
+            if (g_combat.blows > g_bot.count0 && !g_partner.attacking) {
+                std::printf("coop-test: combo charged blow member %d: %d damage (expect %d), motion %d (expect %d)\n", chara,
+                            g_combat.last_blow_damage, g_bot.expect, g_combat.release_blow_motion, kReleaseMotion[chara]);
+
+                if (g_combat.last_blow_damage != g_bot.expect) {
+                    Fail("the charged blow is not base x1.5");
+                    return;
+                }
+
+                if (kReleaseMotion[chara] >= 0 && g_combat.release_blow_motion != kReleaseMotion[chara]) {
+                    Fail("the charged blow is not in retail's release motion");
+                    return;
+                }
+
+                if (!g_trace[0].done) {
+                    Finish(true, "");
+                    return;
+                }
+
+                g_trace[1].gauge_end = g_combat.gauge; // coop-comboaudio: on to P2's against P1's
+                Next();
+            } else if (g_bot.t > 600) {
+                Fail("no charged blow after the release");
+            }
+            break;
+        case 8:
+            if (g_bot.t >= 20) {
+                g_trace[1].gauge_after = g_combat.gauge;
+                TraceSounds(2);
+
+                const char *why = CompareTraces(chara);
+
+                Finish(why == nullptr, why != nullptr ? why : "");
+            }
+            break;
+
+        // coop-comboaudio: P1's own, with the member before he gives it to her (pad 1's presses from the bot: CombatTestP1Buttons).
+        case 20:
+            g_bot.p1_buttons = 0;
+
+            if (g_bot.t >= 30 && BtActStatus.action_on == 0) {
+                BtActStatus.action_gauge = 100.0f; // (the setup's: the row starts his attack full, as hers)
+                KeySoundsClear(1);
+                g_trace[0] = ComboTrace{};
+                g_bot.seen = 0;
+                g_bot.step = 21;
+                g_bot.t = 0;
+            } else if (g_bot.t > 900) {
+                Fail("setup: player 1 never stood still");
+            }
+            break;
+        case 21: {
+            if (BtActStatus.action_on != 0) {
+                g_bot.seen = 1;
+            }
+
+            bool over = g_bot.seen != 0 && BtActStatus.action_on == 0;
+
+            g_bot.p1_buttons = !over && g_bot.t % 10 < 4 ? kInputCross : 0;
+
+            if (over) {
+                g_trace[0].gauge_combo = BtActStatus.action_gauge;
+                std::printf("coop-test: combo P1 member %d: combo over, gauge %.2f\n", member, BtActStatus.action_gauge);
+                g_bot.step = 22;
+                g_bot.t = 0;
+            } else if (g_bot.t > 900) {
+                Fail("player 1's combo never ended");
+            }
+            break;
+        }
+        case 22:
+            g_bot.p1_buttons = 0;
+
+            if (g_bot.t >= 10 && BtActStatus.action_on == 0) {
+                BtActStatus.action_gauge = 100.0f; // (the setup's, as her row waits hers full)
+                g_bot.last = -1;
+                g_bot.step = 23;
+                g_bot.t = 0;
+            }
+            break;
+        case 23:
+            g_bot.p1_buttons = kInputCross;
+
+            if (P1ChargeLevel1(member)) {
+                if (g_bot.last < 0) {
+                    g_bot.last = g_bot.t;
+                } else if (g_bot.t >= g_bot.last + 5) {
+                    g_bot.p1_buttons = 0;
+                    g_trace[0].gauge_release = BtActStatus.action_gauge;
+                    g_trace[0].y0 = CharaMain.pos[1];
+                    g_bot.step = 24;
+                    g_bot.t = 0;
+                }
+            } else if (g_bot.t > 600) {
+                Fail("player 1's charge never reached level 1");
+            }
+            break;
+        case 24:
+            g_bot.p1_buttons = 0;
+            TraceRise(1, CharaMain.pos[1]);
+
+            if (g_bot.t >= 2 && BtActStatus.action_on == 0) {
+                g_trace[0].gauge_end = BtActStatus.action_gauge;
+                g_bot.step = 25;
+                g_bot.t = 0;
+            } else if (g_bot.t > 600) {
+                Fail("player 1's charged attack never ended");
+            }
+            break;
+        case 25:
+            if (g_bot.t >= 20) {
+                g_trace[0].gauge_after = BtActStatus.action_gauge;
+                TraceSounds(1);
+                g_trace[0].done = true;
+                std::printf("coop-test: combo P1 member %d: %d key sounds, gauge %.2f/%.2f/%.2f/%.2f, leap peak %.2f air %d\n", member,
+                            g_trace[0].sound_count, g_trace[0].gauge_combo, g_trace[0].gauge_release, g_trace[0].gauge_end, g_trace[0].gauge_after,
+                            g_trace[0].peak, g_trace[0].air);
+                g_bot.step = 1; // on to the trade
+                g_bot.t = 0;
             }
             break;
     }
@@ -763,7 +1153,7 @@ void Panel() {
                 std::printf("coop-test: panel open 120 ticks: P1 moved %.1f, P2 moved %.1f, task %d, page %d\n", p1_moved, p2_moved,
                             (int) gameTask, g_combat.page);
 
-                if (gameTask != GAME_TASK_PLAY || p1_moved < 8.0f) {
+                if (!CoopPlainPlay() || p1_moved < 8.0f) {
                     Fail("the game did not keep going while the panel was open");
                     return;
                 }
@@ -1342,7 +1732,7 @@ void SwapSpeed() {
             }
 
             // From play on (the bot starts under the floor's arrival scene, which takes no swing).
-            if (gameTask != GAME_TASK_PLAY) {
+            if (!CoopPlainPlay()) {
                 g_bot.t = 0;
             }
 
@@ -1430,7 +1820,7 @@ void P2Guard() {
 
     switch (g_bot.step) {
         case 0:
-            if (gameTask != GAME_TASK_PLAY) {
+            if (!CoopPlainPlay()) {
                 g_bot.t = 0;
             }
 
@@ -2344,7 +2734,7 @@ void P1Down() {
             }
             break;
         case 1:
-            if (gameTask != GAME_TASK_PLAY) {
+            if (!CoopPlainPlay()) {
                 std::printf("coop-test: task %#x with P2 up\n", (int) gameTask);
                 Fail("the player's death ended the run while P2 was up");
                 return;
@@ -2410,7 +2800,7 @@ void P1Fall() {
             }
             break;
         case 1: {
-            if (gameTask != GAME_TASK_PLAY) {
+            if (!CoopPlainPlay()) {
                 std::printf("coop-test: task %#x with P2 up\n", (int) gameTask);
                 Fail("the player's death ended the run while P2 was up");
                 return;
@@ -2760,7 +3150,7 @@ void CombatTestTick() {
     // task the test itself starts (a menu, a death) no longer holds it. DC_COOP_MUTATE=bot_in_scene: the steps start
     // under the scene, as before (twin).
     if (!g_bot.playing) {
-        if (gameTask != GAME_TASK_PLAY && !Mutated("bot_in_scene")) {
+        if (!CoopPlainPlay() && !Mutated("bot_in_scene")) {
             return;
         }
 
@@ -2789,7 +3179,9 @@ void CombatTestTick() {
         g_partner.invincible = std::max(g_partner.invincible, 2);
     }
 
-    if (std::strcmp(test, "charge") == 0) {
+    if (std::strcmp(test, "combo") == 0) { // coop-swapcombo
+        Combo();
+    } else if (std::strcmp(test, "charge") == 0) {
         Charge();
     } else if (std::strcmp(test, "lock") == 0) {
         Lock();
@@ -2856,6 +3248,10 @@ void CombatTestTick() {
     } else {
         Fail("unknown test");
     }
+}
+
+std::uint16_t CombatTestP1Buttons() {
+    return g_bot.test != nullptr && g_bot.mode && !g_bot.done ? g_bot.p1_buttons : 0;
 }
 
 bool CombatTestPad(InputPadState &pad) {

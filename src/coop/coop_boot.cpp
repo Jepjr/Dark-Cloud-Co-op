@@ -82,8 +82,8 @@ CoopAreaCardPlan CoopAreaCard() {
     if (coop::Mutated("area_card_ignored") || config.area_card == "retail" || config.area_card.empty()) {
         return plan;
     }
-    if (config.area_card_coop_only && !config.coop && config.netplay == 0) {
-        plan.kind = "retail (single player: area_card_coop_only)";
+    if (!config.coop && config.netplay == 0) { // (coopoptions: game.area_card_coop_only retired, always so)
+        plan.kind = "retail (single player)";
         return plan;
     }
     if (config.area_card == "short") {
@@ -193,4 +193,5 @@ void CoopAreaCardWaited(double ms) {
         g_card.waited += ms;
         g_card.yields++;
     }
+    NetplayUnderCard(); // coop-p2boot: a window that starts with this host takes its place under this card
 }

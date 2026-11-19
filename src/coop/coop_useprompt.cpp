@@ -31,11 +31,18 @@
 
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
+#include "coop/coop_lockhud.hpp" // coop-areanotice: LockHudUnderModal
 #include "coop/netplay.hpp"
+#include "coop/netplay_cmd.hpp" // coop-wave2: kCmdPrompt
+#include "coop/coop_ready.hpp" // coop-readyscreen: the ready box
+#include "coop/coop_actor.hpp" // coop-readyscreen: each row's member (ActorChara)
+#include "coop/coop_town.hpp" // coop-readyscreen: the town partner's member
+#include "coop/coop_wheel.hpp" // coop-readyscreen: each row's face (CoopDrawHudFace)
 
 #include <libvu0.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -65,11 +72,14 @@
 #include "gfx/gfx.hpp"   // coop-callanchor: UiAnchorScope
 #include "localize/localize.hpp" // coop-floorgate: the modal's YES and NO
 #include "ui/framework/dialogs.hpp" // coop-gatepopup: the asker's waiting box
+#include "ui/framework/buttons.hpp" // coop-swapbtn: the plates' style (PlateProbe)
 #include "ui/framework/text.hpp"    // coop-gatepopup: the popup's line widths
 #include "app/gameloop.hpp"
 #include "itembombeffect.hpp"
 #include "itemdata.hpp"
 #include "menu_draw.hpp"
+#include "menu_dungeon.hpp" // coop-chestrolls: GetAttachVolumeForMsg
+#include "menu_save.hpp"    // coop-chestrolls: GetAddAttachItem
 #include "mglib.hpp" // coop-gatepopup: MGFillBox, the pause's dim
 #include "rect.hpp"
 #include "runscript.hpp"
@@ -92,7 +102,20 @@
 namespace dc::game {
 extern s32 gameTask;
 extern int mode; // coop-gatepopup2 (3: a dungeon, GAME_MODE_DUNGEON)
+extern s16 *ItemSetRateTbl[7]; // coop-chestrolls: the roll's test line (dungeonparts.cpp)
+extern int  floorNum[7];
+unsigned int PortRandState();
 } // namespace dc::game
+
+// coop-swapbtn (tests): the registry's stamps (render/texture_registry.hpp) and the UI's button plates (ui/framework/buttons.cpp).
+namespace dc::render {
+enum class PortTextureOwner : std::uint8_t;
+std::uint64_t PortKeyStamp(unsigned key);
+bool          PortKeyInfo(unsigned key, PortTextureOwner *owner, unsigned *width, unsigned *height);
+} // namespace dc::render
+namespace dc::ui {
+dc::game::CTexture *TestButtonPlate(const Rect &box, const ButtonStyle &style, bool make, std::uint64_t *made_stamp);
+} // namespace dc::ui
 
 
 namespace coop {
@@ -140,6 +163,8 @@ struct Text {
     void set(int i, const std::string &text) { std::snprintf(line[i], sizeof line[0], "%s", text.c_str()); }
 };
 
+int g_script_choice[2] = {-1, -1}; // coop-choosing: each player's answer to a door script's question (-1: none yet)
+
 struct Prompt {
     Kind                     kind = Kind::None;
     Step                     step = Step::Read;
@@ -157,9 +182,32 @@ struct Prompt {
     int                      note_ticks = 0;
     int                      note_mes = -1; // coop-playfix: the note is this message in the game's window (-1: the caption)
     bool                     note_waits = false; // coop-cavehold: the door's message stays, its player held, until their Cross
+    // coop-wave2 (talks, questions and prompts local): which prompt and which of its steps this is (every copy alike: set as it opens and
+    // as each step's transition runs), and the transition its player's command brought, taken at this player's next step.
+    long long                id = -1;
+    int                      seq = 0;
+    int                      due = 0;
+    int                      due_row = 0;
 };
 
 Prompt        g_prompts[2];
+
+// coop-wave2 (localaudit 3.5, Jep-approved Wave 2: prompts local): linked together, a prompt's hand (its cursor on a choice's rows or
+// the gate's) and the press that moves it on (a read message's Cross, a row's Cross, a Circle, the gate's pick, a town door's message
+// closed) are its player's copy's own: that copy turns the press into one command (kCmdPrompt: the transition, its row, which
+// prompt and step it was made on), and every copy runs that transition (AfterRead, Chosen, the gate's ask, Close) at that player's
+// step on its tick, so the chest's, the clown's, the trap's and the gate's world effects happen on every copy alike, as before, and
+// nothing of the hand is shared. What the prompt shows (its step, its text) changes only by those transitions; the buttons held
+// (Cur().held) still follow that player's agreed pad on every copy, as the game's buttons after a close read them. Apart, alone and a
+// catch-up's replay as before. DC_COOP_MUTATE=prompt_lockstep (twin): stepped from the agreed pads on every copy, as before.
+enum PromptAct : int { kActNone = 0, kActRead = 1, kActRow = 2, kActRowCircle = 3, kActGateGo = 4, kActGateStay = 5, kActNoteClose = 6 };
+struct PromptOwn {
+    long long id = -1;
+    int       seq = -1;
+    int       cursor = 0;
+    bool      sent = false; // its command on its way: no other press till it lands
+};
+PromptOwn g_prompt_own[2]; // this copy's own, never state
 std::uint16_t g_held_after[2]; // coop-hischest: what the user held as the prompt closed, kept from the game until let go
 std::uint16_t g_note_held_after[2]; // coop-cavehold: and as a door's message closed in town
 int           g_drawn[2]; // frames each prompt was drawn on this copy (draw only, the test's line)
@@ -220,6 +268,8 @@ void Note(const char *text) {
 void Close(const char *why) {
     char line[160];
 
+    Cur().seq++; // coop-wave2
+
     std::snprintf(line, sizeof line, "closes (%s), drawn %d frames on this copy", why, g_drawn[g_who - 1]);
     Log(line);
     g_held_after[g_who - 1] = Cur().held;
@@ -232,6 +282,7 @@ void Read(int mes, Then then) {
     std::string text = Message(mes);
     char        line[256];
 
+    Cur().seq++; // coop-wave2
     Cur().step = Step::Read;
     Cur().then = then;
     Cur().mes = mes;
@@ -250,6 +301,7 @@ void Choose(int mes, int count, Then then) {
     std::vector<std::string> lines = Lines(Message(mes));
     std::string              all;
 
+    Cur().seq++; // coop-wave2
     Cur().step = Step::Choose;
     Cur().then = then;
     Cur().mes = mes;
@@ -422,10 +474,17 @@ void AfterRead() {
 
 // A row chosen.
 void Chosen(int row) {
-    char line[96];
+    char line[200];
 
     std::snprintf(line, sizeof line, "row %d of choice %d", row, Cur().mes);
     Log(line);
+
+    // coop-choosing: a door script's question (ScriptChoicePrompt): its row is the script's answer, read by the door's run.
+    if (Cur().kind == Kind::Message) {
+        g_script_choice[g_who - 1] = row;
+        Close(row == 0 ? "its question answered yes" : "its question answered no");
+        return;
+    }
 
     if (Cur().kind == Kind::Piero) {
         int item = Cur().piero[row == 1 ? 1 : 0];
@@ -437,17 +496,69 @@ void Chosen(int row) {
 
         TREASURE_BOX &box = NowDngMap->boxes[Cur().box];
 
-        if (g_who == 1 || !PartnerGetItem(item, -1, true)) {
-            if (((CDngStatusData *) UserStatus)->CheckItemGet(item) != 0) {
-                Note("There is no room for it.");
-                Close("no room");
-                return;
-            }
+        // coop-bagoverflow (Jep 11-14: match the base game): retail's script 16 gives the pick with _SITEM_GET (editloop3.cpp) =
+        // EdGetItem = CDngStatusData::GetItem, which never refuses: a full bag puts it in the three slots past the bag's size and
+        // sets overflow_flag, the chest opens (one roll ever) and the player's menu then opens on its throw-away page (movechara:
+        // the flag; Btl_InitItemMode / BattleMenuInit: CheckItemThrow). So no room check: player 1's pick through the party's
+        // status, player 2's (a bag item: her own bag) through the same routine with her bag in the status, as her menu puts it
+        // there (MenuSwapP2Bag); her overflow flag is her bag's (PartnerOverflowTake), so her own menu opens on it.
+        // DC_COOP_MUTATE=clown_no_room (twin): a full bag is refused with "There is no room for it." and the chest stays shut,
+        // its next Cross a new roll, as before.
+        auto      *status = (CDngStatusData *) UserStatus;
+        const bool hers = g_who != 1 && OwnBags() && PartnerKeeps(item);
+
+        if (Mutated("clown_no_room") && (hers ? PartnerCheckItemGet(item) : status->CheckItemGet(item)) != 0) {
+            Note("There is no room for it.");
+            Close("no room");
+            return;
+        }
+
+        {
+            // coop-chestrolls (Jep 11-13: "check if big chest is handling its rolls for King Mimic and the clown event properly"):
+            // retail's script 16 gives the pick through _SITEM_GET (editloop3.cpp), which hands a stat attachment (Attack,
+            // Endurance, Speed, Magical Power: GetAddAttachItem) over at level 3 and names that in _ITEM_GET_MES; this gave
+            // level 0, which SetAttachMentValue makes +1. DC_COOP_MUTATE=piero_level1 (twin): level 0, as before.
+            const int level = GetAddAttachItem(item) != 0 && !Mutated("piero_level1") ? 3 : 0;
 
             MessageBy by(g_who); // coop-itemprompt: on the user's screen only
-            ((CDngStatusData *) UserStatus)->GetItem(item, 0);
-            ItemGetMes(item, -1, 0x96, 0);
+            // (her bag swapped in brings her overflow flag with it; a party item of hers (a weapon, an attachment) keeps the
+            // party's flag aside, so a pick of hers past the room opens her menu, not player 1's)
+            const bool swapped = hers && MenuSwapP2Bag();
+            // DC_COOP_MUTATE=shared_overflow_party_flag (twin): her pick of a party item past the room sets the party's flag, so
+            // player 1's menu opens for it.
+            const bool aside = g_who != 1 && !swapped && !Mutated("shared_overflow_party_flag");
+            const int  kept = status->overflow_flag;
+
+            if (aside) {
+                status->overflow_flag = false;
+            }
+            const int  slot = status->GetItem(item, level);
+            const bool over = status->overflow_flag != 0;
+
+            if (aside) {
+                status->overflow_flag = kept;
+            }
+            if (swapped) {
+                MenuSwapP2Bag();
+            }
+            if (g_who != 1 && over && (swapped || aside)) {
+                PartnerOverflowSet(g_who);
+            }
+            ItemGetMes(item, level > 0 ? level : -1, 0x96, 0);
             DngMessMan.hide_timer = 0x96;
+            if (GetAddAttachItem(item) != 0 && slot >= 0) {
+                std::snprintf(line, sizeof line, "the clown's attachment %d arrives at +%d (retail's script gives +3)", item,
+                              GetAttachVolumeForMsg(reinterpret_cast<ATTACH_LIST *>(&status->consumable_items[slot])));
+                Log(line);
+            }
+            if (over) {
+                const ITEM_PACK &pack = hers ? PartnerPack() : status->item_pack;
+
+                std::snprintf(line, sizeof line, "the clown's pick %d goes past the bag's room: overflow %d %d %d (bag of %d), the throw-away asked next (%s)", item,
+                              (int) pack.item[pack.num], (int) pack.item[pack.num + 1], (int) pack.item[pack.num + 2], (int) pack.num,
+                              hers ? "her own bag" : g_who == 1 ? "the party's status" : "the party's, her flag");
+                Log(line);
+            }
         }
 
         box.lid_angle = -30.0f;
@@ -500,6 +611,73 @@ void Chosen(int row) {
     }
 }
 
+bool PromptLocal() {
+    return NetplayHasPlayer() && NetplayPartnerLinked() && !CoopWorldsApart() && !NetplayReplaying() && !Mutated("prompt_lockstep");
+}
+
+// This copy's own hand on player's prompt (made afresh as the prompt or its step changes, from the step's own start).
+PromptOwn &OwnPrompt(int player) {
+    PromptOwn     &own = g_prompt_own[player - 1];
+    const Prompt  &p = g_prompts[player - 1];
+
+    if (own.id != p.id || own.seq != p.seq) {
+        own.id = p.id;
+        own.seq = p.seq;
+        own.cursor = p.cursor;
+        own.sent = false;
+    }
+    return own;
+}
+
+// The cursor a prompt shows on this copy: its player's own hand there, linked together.
+int ShownCursor(int player, const Prompt &p) {
+    return PromptLocal() && player == NetplayLocalPlayer() ? OwnPrompt(player).cursor : p.cursor;
+}
+
+void PromptSend(int player, int act, int row) {
+    NetCommand command;
+
+    command.kind = kCmdPrompt;
+    command.a = (std::uint8_t) act;
+    command.b = (std::uint16_t) row;
+    command.c = (std::uint32_t) ((g_prompts[player - 1].id & 0xFFFF) << 16 | (g_prompts[player - 1].seq & 0xFFFF));
+    NetplayQueueCommand(command);
+    g_prompt_own[player - 1].sent = true;
+    std::fprintf(stderr, "coop: player %d's prompt: its press %d (row %d) on its own copy at link tick %lld: sent\n", player, act, row, (long long) NetplayLinkTick());
+}
+
+void ApplyPromptCmd(int player, const NetCommand &command, std::int64_t tick) {
+    if (player < 1 || player > (int) std::size(g_prompts)) {
+        return;
+    }
+    Prompt         &p = g_prompts[player - 1];
+    const bool      note = command.a == kActNoteClose;
+    const unsigned  want = (unsigned) ((p.id & 0xFFFF) << 16 | (p.seq & 0xFFFF));
+
+    if ((note ? !p.note_waits : p.kind == Kind::None) || command.c != want) {
+        std::fprintf(stderr, "coop: player %d's prompt press %d at link tick %lld finds its prompt moved on: ignored\n", player, (int) command.a, (long long) tick);
+        return;
+    }
+    p.due = command.a;
+    p.due_row = command.b;
+}
+
+void PromptHandlerOnce() {
+    static bool done = false;
+
+    if (!done) {
+        done = true;
+        NetplaySetCommandHandler(kCmdPrompt, ApplyPromptCmd);
+    }
+}
+
+// A prompt opened for player (every copy alike): which one it is, for its commands.
+void Opened(int player) {
+    g_prompts[player - 1].id = NetplayLinkTick();
+    g_prompts[player - 1].due = 0;
+    PromptHandlerOnce();
+}
+
 // coop-hischest: player 1's prompt steps in MenuTick, so only with the co-op menus on (else his Cross runs the script, as
 // retail's). DC_COOP_MUTATE=chestpausep1: his Cross runs the script, as before (the twin).
 bool Usable(int player) {
@@ -507,8 +685,54 @@ bool Usable(int player) {
         return false;
     }
 
-    return gameTask == GAME_TASK_PLAY && NowDngMap != nullptr && UserStatus != nullptr && SaveData != nullptr && EdEventInfo.messages[1] != nullptr &&
+    return (player == 1 ? CoopPlainPlay() : gameTask == GAME_TASK_PLAY) && NowDngMap != nullptr && UserStatus != nullptr && SaveData != nullptr && EdEventInfo.messages[1] != nullptr &&
            EdEventInfo.messages[1]->buff != nullptr;
+}
+
+// coop-chestrolls: the clown's roll on stderr, every copy (the game's stream before and after, the two items), and under
+// DC_COOP_ROLL_LOG=1 the two lists it drew from with each item's turn-down rate, so a test can run retail's formula
+// (GetPieroItem, dungeonparts.cpp) from the state before and compare. DC_COOP_TEST_PIERO_ITEM=N (a test): the second item is N
+// after the roll (the level twin needs a stat attachment on offer).
+void RollLine(unsigned int before, int entry_no) {
+    static const bool lists = TestEnvInt("DC_COOP_ROLL_LOG", 0) != 0;
+    static const int  forced = TestEnvInt("DC_COOP_TEST_PIERO_ITEM", -1);
+    char              line[200];
+
+    std::snprintf(line, sizeof line, "the clown's roll at box %d: items %d and %d, random %08x before, %08x after, link tick %lld", entry_no,
+                  Cur().piero[0], Cur().piero[1], before, PortRandState(), (long long) NetplayLinkTick());
+    Log(line);
+
+    if (lists) {
+        const PIERO_ITEM_SET *list = PieroItemListPtr[selectMapNo + BtUraDongeon * 7];
+        const PIERO_ITEM_SET &set = UserStatus->cur_floor < floorNum[selectMapNo] ? list[0] : list[1];
+
+        for (int n = 0; n < 2; n++) {
+            std::string text = "the clown's list " + std::to_string(n) + " (item:rate):";
+
+            for (int i = 0; i < set.count[n] && i < 64; i++) {
+                text += " " + std::to_string(set.item[n][i]) + ":" + std::to_string((int) ItemSetRateTbl[selectMapNo][set.item[n][i] - 1]);
+            }
+
+            std::fprintf(stderr, "coop: %s prompt: %s\n", Who(), text.c_str());
+        }
+
+        std::fflush(stderr);
+    }
+
+    if (forced > 0) {
+        Cur().piero[1] = forced;
+        std::snprintf(line, sizeof line, "test: the clown's second item is %d", forced);
+        Log(line);
+    }
+
+    // (coop-bagoverflow, x-clown-apart -Full: DC_COOP_TEST_PIERO_FIRST=N, the first item N, the one a Cross alone takes)
+    static const int first = TestEnvInt("DC_COOP_TEST_PIERO_FIRST", -1);
+
+    if (first > 0) {
+        Cur().piero[0] = first;
+        std::snprintf(line, sizeof line, "test: the clown's first item is %d", first);
+        Log(line);
+    }
 }
 
 } // namespace
@@ -524,6 +748,23 @@ bool OpenChestPrompt(int player, int active, int entry_no) {
         return false;
     }
 
+    // coop-chestrolls: one roll per clown chest, as retail's (its Cross takes the chest's event away at once, movechara.cpp, so
+    // script 16 and its one _GET_PIERO_ITEM run once per chest). While one player's prompt is open at the chest another's Cross
+    // opened a second prompt with a roll of its own: the pair chose from four items. Now that Cross gets a note and no roll.
+    // DC_COOP_MUTATE=piero_tworolls (twin): a prompt and a roll each, as before.
+    if (box.trap_no == 5 && !Mutated("piero_tworolls")) {
+        for (int other = 1; other <= (int) std::size(g_prompts); other++) { // (every other player's)
+            const Prompt &open = g_prompts[other - 1];
+
+            if (other != player && open.kind == Kind::Piero && open.map == NowDngMap && open.box == entry_no) {
+                g_who = player;
+                Note("Someone is already opening it.");
+                Log("the clown's chest is another player's now: no prompt, no roll");
+                return true;
+            }
+        }
+    }
+
     g_who = player;
     Cur() = Prompt{};
     Cur().kind = box.trap_no == 5 ? Kind::Piero : Kind::Chest;
@@ -532,6 +773,7 @@ bool OpenChestPrompt(int player, int active, int entry_no) {
     Cur().map = NowDngMap;
     Cur().held = kInputCross;
     g_drawn[player - 1] = 0;
+    Opened(player); // coop-wave2
 
     char line[160];
 
@@ -541,7 +783,14 @@ bool OpenChestPrompt(int player, int active, int entry_no) {
     SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
 
     if (Cur().kind == Kind::Piero) {
+        const unsigned int before = PortRandState();
+
+        if (Mutated("piero_extradraw")) { // (twin: a draw that is not retail's shifts the roll off its formula)
+            rand();
+        }
+
         GetPieroItem(selectMapNo, BtUraDongeon, &Cur().piero[0], &Cur().piero[1]);
+        RollLine(before, entry_no);
         Read(50, Then::PieroChoice);
     } else {
         Read(30, Then::MainChoice);
@@ -568,6 +817,7 @@ bool OpenGatePrompt(int player, CDungeonEventData *gate) {
     Cur().held = kInputCross;
     Cur().step = Step::Choose;
     g_drawn[player - 1] = 0;
+    Opened(player); // coop-wave2
     Cur().head.push_back("Leave this floor?");
     Cur().rows.push_back("Go to the next floor");
     Cur().rows.push_back("Go back to town");
@@ -614,6 +864,7 @@ bool CrossMessagePrompt(int player, int script_no) {
         Cur().map = NowDngMap;
         Cur().held = kInputCross; // (the Cross that opened it, let go first)
         g_drawn[player - 1] = 0;
+        Opened(player); // coop-wave2
         Read(mes, Then::Close);
     } else {
         Note(text.empty() ? "Nothing happens." : text.c_str());
@@ -623,6 +874,71 @@ bool CrossMessagePrompt(int player, int script_no) {
     SoundOwner sound(player);
     SndSePlay(MENU_SOUND_CURSOR, -1, 0);
     return true;
+}
+
+// coop-choosing (Jep 11-12: a door's script runs for its user beside the game): a message a door's script shows as it runs beside
+// the game (coop_interact's door interpreter, _MES_MAKE: Moon Sea's plank, "ita"), in the game's own message window on that
+// player's screen only, as CrossMessagePrompt's, up until that player's Cross; the others play on. False when that player has a
+// prompt up already or none can open (then the message is not shown; the door's steps go on).
+bool ScriptMessagePrompt(int player, int mes) {
+    if (!Usable(player) || g_prompts[player - 1].kind != Kind::None || mes < 0 || Message(mes).empty()) {
+        return false;
+    }
+
+    g_script_choice[player - 1] = -1;
+
+    g_who = player;
+    Cur() = Prompt{};
+    Cur().kind = Kind::Message;
+    Cur().map = NowDngMap;
+    Cur().held = kInputCross; // (the Cross of the pick that started the door, let go first)
+    g_drawn[player - 1] = 0;
+    Opened(player); // coop-wave2
+    Read(mes, Then::Close);
+
+    char line[96];
+
+    std::snprintf(line, sizeof line, "a door's script beside the game shows message %d, on this player's screen only", mes);
+    Log(line);
+    return true;
+}
+
+// coop-choosing (ura): the script's message up as this player's prompt turns into its question (the script set the window's cursor:
+// retail's choice helper, event.stb's function at 16820): its rows the message's last two lines, row 0 retail's default. The
+// answer (ScriptPromptChoice) is read back by the door's run. False when no such message is up.
+bool ScriptChoicePrompt(int player) {
+    g_who = player;
+
+    if (player < 1 || player > 2 || Cur().kind != Kind::Message || Cur().step != Step::Read) {
+        return false;
+    }
+
+    g_script_choice[player - 1] = -1;
+    Choose(Cur().mes, 2, Then::Close);
+    g_drawn[player - 1] = 0;
+    Log("the door's message is its question: a choice on this player's screen only");
+    return true;
+}
+
+// Test hook (x-back-half -Leave): the player's door question answered with row at once, on every linked copy alike.
+bool ScriptPromptTestAnswer(int player, int row) {
+    g_who = player;
+    if (player < 1 || player > 2 || Cur().kind != Kind::Message) {
+        return false;
+    }
+    if (Cur().step == Step::Read) { // (a message read: closed as its player's Cross closes it)
+        AfterRead();
+        return true;
+    }
+    if (Cur().step != Step::Choose) {
+        return false;
+    }
+    Chosen(row);
+    return true;
+}
+
+int ScriptPromptChoice(int player) {
+    return player >= 1 && player <= 2 ? g_script_choice[player - 1] : -1;
 }
 
 // coop-menucross: a town door's message for the player's Cross while the door is shut, as that player's own note (drawn on
@@ -655,6 +971,8 @@ bool TownNotePrompt(int player, int mes) {
     if (Cur().note_mes >= 0 && !Mutated("doornote_timed")) {
         Cur().note_waits = true;
         Cur().held = kInputCross; // (the Cross that opened it, let go first)
+        Opened(player); // coop-wave2
+        Cur().seq++;
     }
     std::snprintf(line, sizeof line, "the town door's message %d, on this player's screen only%s%s: %s", mes, Cur().note_mes >= 0 ? " (the game's window)" : "",
                   Cur().note_waits ? ", holds this player until their Cross" : "", text.c_str());
@@ -685,12 +1003,22 @@ bool StepTownNote(int player, const InputPadState &pad, bool in_town) {
     }
 
     const std::uint16_t pressed = pad.buttons & ~Cur().held;
-    const char         *why = !in_town || !CoopWorldsLinkedTogether() ? "the town left or the pair apart" : (pressed & kInputCross) != 0 ? "their Cross" : nullptr;
+    const bool          local = PromptLocal(); // coop-wave2: the Cross that closes it is its player's copy's, a command
+    const bool          due = Cur().due == kActNoteClose;
+    const char         *why = !in_town || !CoopWorldsLinkedTogether() ? "the town left or the pair apart"
+                              : local                                ? (due ? "their Cross (its command)" : nullptr)
+                              : (pressed & kInputCross) != 0         ? "their Cross"
+                                                                     : nullptr;
 
     Cur().held = pad.buttons;
+    Cur().due = 0;
+    if (local && why == nullptr && (pressed & kInputCross) != 0 && player == NetplayLocalPlayer() && !OwnPrompt(player).sent) {
+        PromptSend(player, kActNoteClose, 0);
+    }
     if (why == nullptr) {
         return true;
     }
+    Cur().seq++;
 
     char line[160];
 
@@ -769,6 +1097,21 @@ bool StepUsePrompt(int player, const InputPadState &pad) {
 
     SoundOwner sound(player);
 
+    // coop-wave2: linked together, the press is this player's copy's: its command's transition runs here on every copy alike, and the hand
+    // is that copy's own (the others take no press of it).
+    const bool local = PromptLocal();
+    int        act = kActNone, row = 0;
+
+    if (local) {
+        act = Cur().due;
+        row = Cur().due_row;
+        Cur().due = 0;
+        if (act == kActNone && (player != NetplayLocalPlayer() || OwnPrompt(player).sent)) {
+            pressed = 0;
+        }
+    }
+    int &cursor = local ? OwnPrompt(player).cursor : Cur().cursor;
+
     if (Cur().kind == Kind::Gate) {
         if (Cur().step == Step::Waiting) {
             if (!CoopWorldsGateAsking()) {
@@ -780,16 +1123,29 @@ bool StepUsePrompt(int player, const InputPadState &pad) {
         }
 
         if ((pressed & kInputDown) != 0) {
-            Cur().cursor = (Cur().cursor + 1) % 3;
+            cursor = (cursor + 1) % 3;
             SndSePlay(MENU_SOUND_CURSOR, -1, 0);
         } else if ((pressed & kInputUp) != 0) {
-            Cur().cursor = (Cur().cursor + 2) % 3;
+            cursor = (cursor + 2) % 3;
             SndSePlay(MENU_SOUND_CURSOR, -1, 0);
         }
 
-        bool yes = (pressed & kInputCross) != 0 && Cur().cursor < 2; // the escape window's rows: 1 the next floor, 2 back to town
+        bool yes = (pressed & kInputCross) != 0 && cursor < 2; // the escape window's rows: 1 the next floor, 2 back to town
 
-        if ((pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && !yes)) {
+        if (local && act == kActNone) { // (this copy's player's press, a command)
+            if ((pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && !yes)) {
+                PromptSend(player, kActGateStay, cursor);
+            } else if (yes) {
+                PromptSend(player, kActGateGo, cursor);
+            }
+            return true;
+        }
+        if (local) {
+            Cur().cursor = row;
+            yes = act == kActGateGo;
+        }
+
+        if ((!local && ((pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && !yes))) || act == kActGateStay) {
             SndSePlay(MENU_SOUND_REFUSE, -1, 0);
             Close("stays");
             return true;
@@ -813,7 +1169,13 @@ bool StepUsePrompt(int player, const InputPadState &pad) {
     }
 
     if (Cur().step == Step::Read) {
-        if ((pressed & (kInputCross | kInputCircle)) != 0) {
+        if (local && act == kActNone) {
+            if ((pressed & (kInputCross | kInputCircle)) != 0) {
+                PromptSend(player, kActRead, 0);
+            }
+            return true;
+        }
+        if ((!local && (pressed & (kInputCross | kInputCircle)) != 0) || act == kActRead) {
             SndSePlay(MENU_SOUND_CURSOR, -1, 0);
             AfterRead();
         }
@@ -824,16 +1186,42 @@ bool StepUsePrompt(int player, const InputPadState &pad) {
     const int count = (int) Cur().rows.size();
 
     if ((pressed & kInputDown) != 0) {
-        Cur().cursor = (Cur().cursor + 1) % count;
+        cursor = (cursor + 1) % count;
         SndSePlay(MENU_SOUND_CURSOR, -1, 0);
     } else if ((pressed & kInputUp) != 0) {
-        Cur().cursor = (Cur().cursor + count - 1) % count;
+        cursor = (cursor + count - 1) % count;
         SndSePlay(MENU_SOUND_CURSOR, -1, 0);
+    }
+
+    if (local && act == kActNone) { // (this copy's player's press, a command)
+        if ((pressed & kInputCross) != 0) {
+            PromptSend(player, kActRow, cursor);
+        } else if ((pressed & kInputCircle) != 0 && Cur().kind == Kind::Message) {
+            PromptSend(player, kActRowCircle, 1);
+        } else if ((pressed & kInputCircle) != 0 && Cur().kind == Kind::Chest) {
+            PromptSend(player, kActRowCircle, 0);
+        }
+        return true;
+    }
+    if (local) { // the command's row, on every copy alike
+        Cur().cursor = row;
+        if (act == kActRow) {
+            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
+        } else if (act == kActRowCircle) {
+            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        }
+        if (act == kActRow || act == kActRowCircle) {
+            Chosen(row);
+        }
+        return true;
     }
 
     if ((pressed & kInputCross) != 0) {
         SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
         Chosen(Cur().cursor);
+    } else if ((pressed & kInputCircle) != 0 && Cur().kind == Kind::Message) {
+        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
+        Chosen(1); // coop-choosing: Circle at a door's question is its No (row 1)
     } else if ((pressed & kInputCircle) != 0 && Cur().kind == Kind::Chest) {
         SndSePlay(MENU_SOUND_REFUSE, -1, 0);
         Chosen(0); // row 0 leaves
@@ -866,6 +1254,82 @@ bool EscapeWindowAnswer(int *answer) {
 
 void SetEscapeWindowAnswer(int answer) {
     g_escape_answer = answer;
+}
+
+// coop-dungeonreds (x-dungeon-descent-menu-p2: OUT OF SYNC at tick 540, melt 20 0 1 against 0 0 1, heal 192 against 169): her gate's
+// prompt waits (Step::Waiting) while he is asked; his yes splits the pair for their floor menus on that tick, so the floor is gone
+// before her step's "the vote is over" can close it, and NowDngMap (one object for every floor) never told a new floor either. Her
+// copy kept it open across the floor menu; player 1's copy lost it in his leave checkpoint's session reset (netplay Checkpoint), and
+// the prompts are no part of the state set, so the next floor's merge left it on her copy alone. There, with his menu open, the
+// pause rule read her as in her prompt and held the world (coop_pause PauseZoneHeld) while his copy ran it: the floor's step
+// (motionDrive's heal counter, the bag's melt timer) went on one copy only. A player leaving the floor closes their prompt on every
+// copy at the split. DC_WORLDS_MUTATE=split_prompt_kept (twin): kept, as before.
+void UsePromptEndForLeaver(int player) {
+    if (player < 1 || player > (int) std::size(g_prompts) || g_prompts[player - 1].kind == Kind::None) {
+        return;
+    }
+    if (CoopWorldsMutated("split_prompt_kept")) { // (the twin's own line: its stop line)
+        std::fprintf(stderr, "coop: test: player %d's prompt kept at the split (split_prompt_kept)\n", player);
+        std::fflush(stderr);
+        return;
+    }
+    const int was = g_who;
+
+    g_who = player;
+    Close("its player left the floor");
+    g_who = was;
+}
+
+// coop-clownchest (rc4 owed: a clown chest opened apart reaching the other copy at the merge; x-clown-apart -Case open): apart on a
+// floor her copy's game player is her member, so a chest, gate or message she opens there is player 1's prompt on her copy (its
+// own pad, its own give). At her floor merge her member becomes the partner (CoopWorldsFloorBecomePartner) but the prompt stayed
+// in player 1's slot: her Cross after the merge found "another player's" prompt at her own clown chest, and the arriving copy,
+// which took her state without the prompts at all (not in the state set), opened a new one and rolled again: OUT OF SYNC, the
+// resync left the floor and her pick was never given. The prompts are in the state set now (build\snapshot-allow.txt) and her
+// prompt moves to player 2's slot here, before the set is taken. DC_COOP_MUTATE=useprompt_slot_kept (twin): left in player 1's
+// slot, as before.
+void UsePromptToPartner() {
+    if (g_prompts[0].kind == Kind::None || Mutated("useprompt_slot_kept")) {
+        return;
+    }
+
+    g_prompts[1] = g_prompts[0];
+    g_prompts[0] = Prompt{};
+    g_held_after[1] = g_held_after[0];
+    g_held_after[0] = 0;
+    g_note_held_after[1] = g_note_held_after[0];
+    g_note_held_after[0] = 0;
+    g_drawn[1] = g_drawn[0];
+    g_drawn[0] = 0;
+    g_who = 2;
+    Log("goes on as player 2's (her floor merge: her member becomes the partner)");
+}
+
+// coop-clownchest: DC_COOP_MUTATE=useprompt_not_carried (twin): a state set's apply leaves this copy's own prompts, as when they
+// were outside the set (StateSetApplyCore calls these around the apply).
+namespace {
+Prompt        g_kept_prompts[2];
+std::uint16_t g_kept_held[2], g_kept_note_held[2];
+bool          g_kept = false;
+} // namespace
+
+void UsePromptApplyBefore() {
+    g_kept = Mutated("useprompt_not_carried");
+    if (g_kept) {
+        std::copy(std::begin(g_prompts), std::end(g_prompts), std::begin(g_kept_prompts));
+        std::copy(std::begin(g_held_after), std::end(g_held_after), std::begin(g_kept_held));
+        std::copy(std::begin(g_note_held_after), std::end(g_note_held_after), std::begin(g_kept_note_held));
+    }
+}
+
+void UsePromptApplyAfter() {
+    if (g_kept) {
+        std::copy(std::begin(g_kept_prompts), std::end(g_kept_prompts), std::begin(g_prompts));
+        std::copy(std::begin(g_kept_held), std::end(g_kept_held), std::begin(g_held_after));
+        std::copy(std::begin(g_kept_note_held), std::end(g_kept_note_held), std::begin(g_note_held_after));
+        g_kept = false;
+        std::fprintf(stderr, "coop: test: the state set's prompts not taken (useprompt_not_carried): this copy keeps its own\n");
+    }
 }
 
 void UsePromptResetForSession() {
@@ -1070,6 +1534,11 @@ struct Window {
 
 Window g_windows[2];
 
+// coop-keylook: the game's window for the mod's own text (DrawTextInGameWindow); DC_COOP_MUTATE=keylook_box (twin): our navy boxes.
+Window                 g_text_windows[4];
+dc::text::GameTextFile g_text_files[4];
+std::string            g_text_laid[4];
+
 void PutWindow(Window &w, const Prompt &p, int player, int local) {
     if (w.made != p.mes) {
         DrawRngEnter(); // coop-drawrng: the draw stream
@@ -1091,7 +1560,7 @@ void PutWindow(Window &w, const Prompt &p, int player, int local) {
         w.made = p.mes;
     }
 
-    w.mes.cursor_row = p.step == Step::Choose ? p.cursor : -1;
+    w.mes.cursor_row = p.step == Step::Choose ? ShownCursor(player, p) : -1; // coop-wave2: its player's own hand
 }
 
 void DrawWindow(Window &w) {
@@ -1100,7 +1569,64 @@ void DrawWindow(Window &w) {
     w.mes.Step();
     w.mes.DrawMesWin();
     DrawRngLeave();
+    if (static const bool trace = TestEnvOn("DC_COOP_TEXTWIN_TRACE"); trace) { // coop-keylook: where each game window is drawn
+        std::fprintf(stderr, "coop: game window drawn at %d,%d (%s) window %d,%d %dx%d place %d bubble %d%c", (int) w.mes.text_x, (int) w.mes.text_y,
+                     w.made >= 0 ? "a game message" : "our text", (int) w.mes.win_x, (int) w.mes.win_y, (int) w.mes.win_width, (int) w.mes.win_height,
+                     (int) w.mes.auto_pos, (int) w.mes.fukidashi, 10);
+    }
 }
+
+} // namespace
+
+bool DrawTextInGameWindow(int slot, int player, int local, const std::string &text, int head, int cursor) {
+    if (Mutated("keylook_box") || slot < 0 || slot >= 4 || text.empty() || EdEventInfo.messages[1] == nullptr) {
+        return false;
+    }
+
+    Window     &w = g_text_windows[slot];
+    const bool  rows = cursor >= 0;
+
+    if (g_text_laid[slot] != text) {
+        DrawRngEnter(); // coop-drawrng: the draw stream
+        int at[4] = {0, 0, 0, 0};
+
+        g_text_files[slot].Set(0, text.c_str());
+        w.mes = *EdEventInfo.messages[1];
+        w.mes.tex_buff = w.tex;
+        w.mes.SetBuff(g_text_files[slot].Data());
+        w.mes.mes_made = -1;
+        w.mes.wait = 0;
+        w.mes.tail_on = 0;
+        w.mes.cursor_row = -1;
+        w.mes.cursor_y = 0;
+        w.mes.text_rate = rows ? 0.0f : w.mes.text_rate_set;
+        w.mes.MakeMesWin(0);
+        // Couch: his on the left, hers on the right (as PutWindow's).
+        w.mes.auto_pos = local != 0 ? MES_POS_BOTTOM : player == 1 ? MES_POS_BOTTOM_LEFT : MES_POS_BOTTOM_RIGHT;
+        w.mes.AutoSet(at);
+        DrawRngLeave();
+        g_text_laid[slot] = text;
+        if (static const bool trace = TestEnvOn("DC_COOP_TEXTWIN_TRACE"); trace) {
+            std::fprintf(stderr, "coop: text window %d (player %d) in the game's window: \"%s\" at %d,%d, %d head line(s)\n", slot, player, text.c_str(),
+                         (int) w.mes.text_x, (int) w.mes.text_y, head);
+        }
+    }
+
+    w.mes.cursor_row = rows ? head + cursor : -1;
+    if (rows) {
+        ClsMesSetChoiceRows(&w.mes, head);
+    }
+    DrawWindow(w);
+    if (rows) {
+        ClsMesSetChoiceRows(nullptr, 0);
+    }
+    if (static const bool trace = TestEnvOn("DC_COOP_TEXTWIN_TRACE"); trace) {
+        std::fprintf(stderr, "coop: text window %d drawn: at %d,%d row %d\n", slot, (int) w.mes.text_x, (int) w.mes.text_y, (int) w.mes.cursor_row);
+    }
+    return true;
+}
+
+namespace {
 
 // coop-floorgate (Jep, 2026-10-28: "use the in game UI ... just text and a yes no option you can pick with the hand cursor
 // pointing at the option", then "a popup in the middle of the screen with two button looking options for yes and no", the
@@ -1137,6 +1663,7 @@ void DimForQuestion() {
     fade.width = 0x2800;
     fade.height = SCREEN_HALF_HEIGHT << 4;
     MGFillBox(fade, 0, 0, 0, 0x40);
+    coop::LockHudUnderModal(); // coop-areanotice: no lock marker over the box
     if (dimmed++ % 600 == 0) {
         std::fprintf(stderr, "coop: question dims the screen (the pause's fill), %d frames\n", dimmed);
         std::fflush(stderr);
@@ -1177,6 +1704,90 @@ int PopupFit(const char *question) {
 
 } // namespace
 
+namespace {
+
+// The popup's title (the question's first line) and description (the other lines).
+void PopupParts(const char *question, std::string &title, std::string &description) {
+    for (const std::string &line : Lines(question)) {
+        if (title.empty()) {
+            title = line;
+        } else {
+            description += (description.empty() ? "" : "\n") + line;
+        }
+    }
+}
+
+// coop-swapbtn (Jep's 11-16 playtest: the swap question's YES plate drew a sheet of a font's glyphs; test hook
+// DC_COOP_TEST_PLATE_LOG=1): each drawn frame (the first 10, then one in 60), the key each plate of the popup is drawn from and
+// whether that key still holds the plate's own picture (the stamp it was made with) or what lives there now.
+void PlateProbe(const std::string &title, const std::string &description) {
+    static const bool on = TestEnv("DC_COOP_TEST_PLATE_LOG") != nullptr;
+    static int        frames = 0;
+
+    if (!on) {
+        return;
+    }
+    frames++;
+    if (frames > 10 && frames % 60 != 0) {
+        return;
+    }
+    for (int b = 0; b < 2; b++) {
+        std::uint64_t   made = 0;
+        const CTexture *plate = dc::ui::TestButtonPlate(dc::ui::ConfirmModal::ButtonRect(title, description, b),
+                                                        dc::ui::ButtonStyle::Thin(dc::ui::ButtonPreset::Terracotta), false, &made);
+        const char     *name = b == 0 ? "YES" : "NO";
+
+        if (plate == nullptr) {
+            std::fprintf(stderr, "coop-test: popup plate %s: none made (frame %d)\n", name, frames);
+            continue;
+        }
+        const unsigned      key = static_cast<unsigned>(plate->tex0 & 0x3FFF);
+        const std::uint64_t now = dc::render::PortKeyStamp(key);
+
+        if (now != 0 && now == made) {
+            std::fprintf(stderr, "coop-test: popup plate %s at key %u: its own picture (stamp %llu), frame %d\n", name, key,
+                         static_cast<unsigned long long>(made), frames);
+            continue;
+        }
+        std::string held = now == 0 ? "nothing" : "another entry";
+
+        for (int i = 0; i < kTextureCount; i++) {
+            const CTexture &t = TexManager.textures[i];
+
+            if (t.name[0] != 0 && static_cast<unsigned>(t.tex0 & 0x3FFF) == key) {
+                held = "texture slot " + std::to_string(i) + " \"" + std::string(t.name, strnlen(t.name, sizeof t.name)) + "\"";
+                break;
+            }
+        }
+        dc::render::PortTextureOwner owner{};
+        unsigned                     w = 0, h = 0;
+        const bool                   live = dc::render::PortKeyInfo(key, &owner, &w, &h);
+
+        std::fprintf(stderr,
+                     "coop-test: popup plate %s at key %u: NOT its own picture: the key holds %s (owner %d, %ux%u; made with stamp %llu, now %llu), frame %d\n",
+                     name, key, held.c_str(), live ? static_cast<int>(owner) : -1, w, h, static_cast<unsigned long long>(made),
+                     static_cast<unsigned long long>(now), frames);
+    }
+}
+
+} // namespace
+
+// coop-swapbtn (test hook DC_COOP_TEST_PLATE_PLANT=<the question, '|' between lines>, on the swap row's asked copy; called by the
+// state set's texture rebuild, game/texture.cpp, once it has freed a key the table gives a sheet): that question's YES plate made
+// now, at the key the registry hands out next. Returns its key (0: none made).
+unsigned PlatePlantMake() {
+    std::string question = TestEnv("DC_COOP_TEST_PLATE_PLANT") != nullptr ? TestEnv("DC_COOP_TEST_PLATE_PLANT") : "";
+    std::string title, description;
+
+    std::replace(question.begin(), question.end(), '|', '\n');
+    PopupParts(question.c_str(), title, description);
+    std::uint64_t   made = 0;
+    const CTexture *plate = dc::ui::TestButtonPlate(dc::ui::ConfirmModal::ButtonRect(title, description, 0),
+                                                    dc::ui::ButtonStyle::Thin(dc::ui::ButtonPreset::Terracotta), true, &made);
+
+    return plate != nullptr ? static_cast<unsigned>(plate->tex0 & 0x3FFF) : 0;
+}
+
 // The popup, as the menu's Go Outside question: its first line (or two) the title, the rest the description, YES and NO,
 // the hand on cursor (0 Yes, 1 No).
 bool DrawYesNoPopup(const char *question, bool changed, int cursor) {
@@ -1209,6 +1820,7 @@ bool DrawYesNoPopup(const char *question, bool changed, int cursor) {
     DimForQuestion();
     dc::ui::ConfirmModal::Draw(title, description, dc::localize::LocalizeText("battlemenu.quit.yes", "YES"), dc::localize::LocalizeText("battlemenu.quit.no", "NO"), cursor,
                            g_popup_cursor, 0x80);
+    PlateProbe(title, description); // coop-swapbtn
     return true;
 }
 
@@ -1219,34 +1831,45 @@ namespace {
 // the bubble twin's two rows. The gathered gate's (together) and the call's (apart).
 void GatherText(char *text, int size, int asker, int gather, int to) {
     // pt1111c: an item used at a spot starts a story scene that needs every player (coop_worlds' kGatherItem).
+    // coop-readyscreen (Jep 11-13): the ready check's one question, the story door's too (CoopWorldsReadyQuestionText).
     if (gather == 3) {
-        std::snprintf(text, size, "Player %d is starting\na story scene here.\nGo there now?\nGo now\nNot now", asker);
+        CoopWorldsReadyQuestionText(asker, text, size);
         return;
     }
-    std::snprintf(text, size, "Player %d is heading to\nFloor %d's %s.\nGo down together?\nGo together\nNot yet", asker, to + 1,
+    std::snprintf(text, size, "%s is heading to\nFloor %d's %s.\nGo down together?\nGo together\nNot yet", NetplayShownName((int) asker).c_str(), to + 1,
                   gather == 2 ? "boss fight" : "story scene");
 }
 
 // coop-gatevote: a gate's question that needs no gathering (stage 1: go too; 2: the asker asked to leave alone), in the same window.
 void VoteText(char *text, int size, int asker, int stage, int where, int to) {
     if (stage == 2) {
-        std::snprintf(text, size, "Player %d isn't coming.\nLeave the floor\nwithout them?\nLeave alone\nStay", 3 - asker);
+        std::snprintf(text, size, "%s isn't coming.\nLeave the floor\nwithout them?\nLeave alone\nStay", NetplayShownName((int) (3 - asker)).c_str());
     } else if (where == 2) {
-        std::snprintf(text, size, "Player %d is heading\nback to town.\nGo with them?\nGo together\nNot now", asker);
+        std::snprintf(text, size, "%s is heading\nback to town.\nGo with them?\nGo together\nNot now", NetplayShownName((int) asker).c_str());
     } else if (where == 1) {
-        std::snprintf(text, size, "Player %d is heading\ndown to Floor %d.\nGo with them?\nGo together\nNot now", asker, to + 1);
+        std::snprintf(text, size, "%s is heading\ndown to Floor %d.\nGo with them?\nGo together\nNot now", NetplayShownName((int) asker).c_str(), to + 1);
     } else {
-        std::snprintf(text, size, "Player %d is leaving\nthe floor.\nLeave too?\nGo together\nNot now", asker);
+        std::snprintf(text, size, "%s is leaving\nthe floor.\nLeave too?\nGo together\nNot now", NetplayShownName((int) asker).c_str());
     }
 }
 
 void CallText(char *text, int size, int asker, int to) {
-    // coop-gateflow: the go-along question of a gate taken to the floor menu (coop_worlds' AskAlong: to -3).
-    if (to == -3) {
-        std::snprintf(text, size, "Player %d left the floor\nfor the floor menu.\nGo with them?\nGo now\nStay here", asker);
+    // coop-firstvisit: a town's story arrival (coop_worlds' kTownStoryTo, -5): the ready check's one question, as a story door's.
+    if (to == -5) {
+        CoopWorldsReadyQuestionText(asker, text, size);
         return;
     }
-    std::snprintf(text, size, "Player %d is heading\ndown to Floor %d.\nJoin them there?\nGo now\nNot now", asker, to + 1);
+    // coop-gateflow: the go-along question of a gate taken to the floor menu (coop_worlds' AskAlong: to -3).
+    if (to == -3) {
+        std::snprintf(text, size, "%s left the floor\nfor the floor menu.\nGo with them?\nGo now\nStay here", NetplayShownName((int) asker).c_str());
+        return;
+    }
+    // coop-choosing: a floor's back half (AskAlongBack: to -4).
+    if (to == -4) {
+        std::snprintf(text, size, "%s went through\nthe back half's door.\nGo with them?\nGo now\nStay here", NetplayShownName((int) asker).c_str());
+        return;
+    }
+    std::snprintf(text, size, "%s is heading\ndown to Floor %d.\nJoin them there?\nGo now\nNot now", NetplayShownName((int) asker).c_str(), to + 1);
 }
 
 // The first kGatherHead lines of a question's text (the popup's; the rows after are the bubble twin's).
@@ -1257,6 +1880,54 @@ void QuestionHead(char *question, int size, const char *text) {
             question[i] = 0;
             break;
         }
+    }
+}
+
+// coop-forcefloor (Jep 11-14): the call for a floor fenced to the member this copy's player plays: the game UI's option box
+// (dc::ui::DialogBox, as the gate's waiting box) with three rows, GO TO FLOOR, SWAP, CANCEL, the hand on the call's cursor.
+// Drawn only (CallTick steps its keys); asked only while this player is free (CallFree: no menu, scene or talk under it).
+dc::ui::DialogBox g_force_box;
+std::string       g_force_text;
+int               g_force_drawn = 0;
+
+void DrawForceQuestion(int asker, int to, int chara, int theirs, int cursor) {
+    static const char *const kNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
+    const char *const        floor_member = chara >= 0 && chara < 6 ? kNames[chara] : "?";
+    const char *const        offer = theirs >= 0 && theirs < 6 ? kNames[theirs] : "?";
+    char                     title[96];
+    char                     lines[200];
+
+    std::snprintf(title, sizeof title, "%s is heading to Floor %d", NetplayShownName((int) asker).c_str(), to + 1);
+    std::snprintf(lines, sizeof lines, "Only %s can go there,\nand you play %s.\nA swap makes you %s.", floor_member, floor_member, offer);
+
+    const std::string text = std::string(title) + "\n" + lines;
+
+    DrawRngEnter(); // coop-drawrng: the draw stream
+    if (text != g_force_text) {
+        dc::ui::DialogStyle style;
+
+        style.button_width = 128;
+        g_force_box.Configure(title, lines, {dc::ui::DialogOption{"GO TO FLOOR"}, dc::ui::DialogOption{"SWAP"}, dc::ui::DialogOption{"CANCEL"}}, {}, style);
+        g_force_box.Open(cursor);
+        g_force_text = text;
+        g_force_drawn = 0;
+
+        std::string line = text; // (one log line)
+
+        std::replace(line.begin(), line.end(), '\n', '/');
+        std::fprintf(stderr, "coop: forcefloor question laid out on this copy (player %d's screen): %s; GO TO FLOOR / SWAP / CANCEL\n", 3 - asker,
+                     line.c_str());
+        PopupFit(text.c_str());
+    }
+    g_force_box.SetSelectedIndex(cursor);
+    DimForQuestion();
+    g_force_box.Draw(0x80);
+    DrawRngLeave();
+    if (g_force_drawn++ % 60 == 0) {
+        static const char *const kRows[3] = {"GO TO FLOOR", "SWAP", "CANCEL"};
+
+        std::fprintf(stderr, "coop: forcefloor question drawn on this copy, hand on %s, %d frames\n", cursor >= 0 && cursor < 3 ? kRows[cursor] : "?",
+                     g_force_drawn);
     }
 }
 
@@ -1287,6 +1958,10 @@ void DrawGatherQuestion(int local, bool call) {
     } else if (call && EdEventInfo.messages[1] != nullptr && CoopWorldsCallQuestion(&asker, &map, &to, &floor, &cursor)) {
         asked = local != 0 ? local : 3 - asker;
         key = 0x100000 + ((asker * 8 + map) * 128 + to) * 128 + floor;
+        if (int chara = -1, theirs = -1; CoopWorldsCallForce(&chara, &theirs)) { // coop-forcefloor
+            DrawForceQuestion(asker, to, chara, theirs, cursor);
+            return;
+        }
         CallText(text, sizeof text, asker, to);
     } else if (call == CoopWorldsApart() && CoopWorldsDoorQuestion(&asked, text, sizeof text, &cursor, &key)) {
         // coop-doorgate: a shut door's call, on the asked player's copy (together both copies step it; apart it came here and
@@ -1299,6 +1974,7 @@ void DrawGatherQuestion(int local, bool call) {
     if (key < 0) {
         g_gather_key = -1;
         g_gather_drawn = 0;
+        g_force_text.clear(); // coop-forcefloor
         return;
     }
 
@@ -1323,6 +1999,15 @@ void DrawGatherQuestion(int local, bool call) {
         if (g_gather_drawn++ % 60 == 0) {
             std::fprintf(stderr, "coop: %s drawn on this copy (player %d's screen) in the game's popup, hand on %s, %d frames\n",
                          key >= 0x100000 ? "call question" : "gate question", local, cursor == 0 ? "Yes" : "No", g_gather_drawn);
+        }
+
+        // Test hook (coop-readyscreen, DC_COOP_TEST_READY_SHOT=DIR): a ready check's question, its 30th frame on the asked copy, to
+        // DIR/ready-question.png (in-process), once.
+        if (static const char *const ready_shot = TestEnv("DC_COOP_TEST_READY_SHOT"); ready_shot != nullptr && coop::ready::IsOpen() && g_gather_drawn == 30) {
+            static char path[512];
+
+            std::snprintf(path, sizeof path, "%s/ready-question.png", ready_shot);
+            NetplayTestShot(path);
         }
 
         // Test hook (coop-callanchor, DC_COOP_TEST_CALL_SHOT=DIR): a call question's 20th frame written to DIR/call.png
@@ -1389,7 +2074,7 @@ int           g_wait_for = 0; // the player the box names, 0 none
 void WaitText(char *text, int size, int asked) {
     // (Jep: "show the button prompt like it does in the inventory": GameText's {circle} token, drawn as the active controller's
     // own button, as the journal's "{circle} Return")
-    std::snprintf(text, size, "Waiting for Player %d\nto answer the invite.\n{circle} Cancel", asked);
+    std::snprintf(text, size, "Waiting for %s\nto answer the invite.\n{circle} Cancel", NetplayShownName((int) asked).c_str());
 }
 
 // coop-gatevote (Jep, 2026-11-02): a gate's asker waits in the same box with a ready line for every player and two buttons, LEAVE
@@ -1421,7 +2106,7 @@ bool DrawGateWaitingBox() {
     } else {
         std::snprintf(title, sizeof title, "Leaving the floor");
     }
-    std::snprintf(lines, sizeof lines, "Player %d: %s\nPlayer %d: %s", 1, on == 1 ? (state == 2 ? "Not coming" : "Waiting...") : "Ready", 2,
+    std::snprintf(lines, sizeof lines, "%s: %s\n%s: %s", NetplayShownName((int) 1).c_str(), on == 1 ? (state == 2 ? "Not coming" : "Waiting...") : "Ready", NetplayShownName((int) 2).c_str(),
                   on == 2 ? (state == 2 ? "Not coming" : "Waiting...") : "Ready");
 
     const std::string text = std::string(title) + "\n" + lines + (can_leave ? "" : " (needs both)");
@@ -1461,9 +2146,161 @@ bool DrawGateWaitingBox() {
     return true;
 }
 
+// coop-readyscreen (Jep 11-13: "the initiating player sees a waiting screen: one row per other player with their portrait and a status
+// indicator ... updating live; and two buttons: CANCEL and START NOW"): the ready check's box on its initiator's copy, the same game
+// UI box as the gate's (dc::ui::DialogBox, the pause's dim under it, centred: never over the HUD's own pieces, which it dims as the
+// pause does). A row per other player: their member's face (the game's own 48 by 48 wheel picture, quickchr.img: CoopDrawHudFace;
+// none drawn where the sheet will not load, the member's name stays), "Player N", the member and the status. START NOW and CANCEL,
+// the hand stepped with the check (coop_worlds ReadyBoxKeys). Laid out again when a row changes. Rows for every linked player:
+// three and more get a row each (design for three).
+std::string g_ready_text;
+
+const char *const kMemberNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
+
+constexpr int kReadyFace = 18; // a face per row, the modal's line spacing less a little
+constexpr int kReadyBoxMax = 440; // the box's widest (the screen is 640; a row up to 392 on one line)
+
+bool DrawReadyBox() {
+    namespace ready = coop::ready;
+
+    if (!CoopWorldsReadyBox()) {
+        if (!g_ready_text.empty()) {
+            g_wait_box.Close();
+            g_ready_text.clear();
+        }
+        return false;
+    }
+
+    const ready::Session &session = ready::Get();
+    int                   players[coop::kMaxPlayers];
+    const int             rows = ready::Rows(players);
+    int                   members[coop::kMaxPlayers];
+    std::string           lines;
+
+    for (int i = 0; i < rows; i++) {
+        // (each player's member from the player table; in town player 2's is the town's partner member, which the table has not)
+        int member = coop::ActorChara(players[i] - 1);
+
+        if (member < 0 && mode == 2 && players[i] == 2) { // (2: a town, as DrawEntranceOverlays reads 3 a floor)
+            member = CoopTownPartnerMember();
+        } else if (member < 0 && players[i] == 1) {
+            member = mode == 2 || UserStatus == nullptr ? 0 : UserStatus->cur_chara; // (a town's walker is Toan)
+        }
+
+        members[i] = member;
+        lines += std::string(i != 0 ? "\n" : "") + NetplayShownName(players[i]) + " (" +
+                 (member >= 0 && member < 6 ? kMemberNames[member] : "?") + "): " + ready::StatusText(session.status[players[i]]);
+    }
+
+    const std::string title = "Starting a story scene";
+    const std::string text = title + "\n" + lines;
+    // coop-firstvisit: a story arrival's box has no CANCEL (the arrival cannot be undone), and START NOW only while it is offered
+    // (a box waiting on player 1 shows WAITING FOR PLAYER 1 instead, a button that takes nothing).
+    // coop-areanotice: the player waited on by the name the rows show, in the buttons' capitals.
+    std::string waiting = "WAITING FOR " + NetplayShownName(1);
+
+    std::transform(waiting.begin(), waiting.end(), waiting.begin(), [](unsigned char c) { return (char) std::toupper(c); });
+
+    const std::string buttons = session.start_now && session.cancel ? "START NOW / CANCEL"
+                                : session.start_now                 ? "START NOW"
+                                : session.cancel                    ? waiting + " / CANCEL"
+                                                                    : waiting;
+
+    DrawRngEnter(); // coop-drawrng: the draw stream
+    if (text + "\n" + buttons != g_ready_text) {
+        dc::ui::DialogStyle  style;
+        dc::ui::DialogOption start{session.start_now ? std::string("START NOW") : waiting};
+        dc::ui::DialogOption cancel{"CANCEL"};
+
+        style.button_width = 128;
+        style.max_width = kReadyBoxMax; // (a row's face, name, member and status: wider than a question's modal)
+        if (session.cancel) {
+            g_wait_box.Configure(title, lines, {start, cancel}, {}, style);
+        } else {
+            g_wait_box.Configure(title, lines, {start}, {}, style);
+        }
+        g_wait_box.Open(session.cancel ? session.cursor : 0);
+        g_ready_text = text + "\n" + buttons;
+        g_wait_for = 0;
+
+        std::string line = text;
+
+        std::replace(line.begin(), line.end(), '\n', '/');
+        std::fprintf(stderr, "coop: ready box laid out on this copy (player %d): %s; %s\n", NetplayLocalPlayer(), line.c_str(), buttons.c_str());
+
+        // Its fit, against its own wrap (the modal wraps at its widest less 48): each row on one line, so each face sits beside its row.
+        int widest_row = 0;
+
+        for (const std::string &row : Lines(text)) {
+            dc::ui::Label label;
+
+            label.KeepGameRandom(true);
+            label.SetText(row);
+            widest_row = std::max(widest_row, label.GetWidth());
+        }
+        std::fprintf(stderr, "coop: ready box fit: widest %d of %d (%s)\n", widest_row, kReadyBoxMax - 48, widest_row <= kReadyBoxMax - 48 ? "fits" : "WRAPPED");
+    }
+    g_wait_box.SetSelectedIndex(session.cancel ? session.cursor : 0);
+    DimForQuestion();
+    g_wait_box.Draw(0x80);
+
+    // The faces, each in the box's left margin beside its row (the modal draws its text 22 in, so a face fits in the margin; it trims a
+    // row's leading spaces, so none can make room. The modal draws line i of n at box.y + 12 + 20 i, the box ending 10 above its first
+    // button and 38 + 20 (n - 1) high; centred, as wide as its widest line and 48, 260 to kReadyBoxMax).
+    int widest = 0;
+
+    for (const std::string &row : Lines(text.c_str())) {
+        dc::ui::Label label;
+
+        label.KeepGameRandom(true);
+        label.SetText(row);
+        widest = std::max(widest, label.GetWidth());
+    }
+
+    const int  n = 1 + rows;
+    const auto button = g_wait_box.GetButtonRect(0);
+    const int  box_w = std::clamp(widest + 48, 260, kReadyBoxMax);
+    const int  box_x = (640 - box_w) / 2;
+    int        faces = 0;
+
+    for (int i = 0; i < rows; i++) {
+        const int line_y = (int) button.y - 36 - (n - 1 - (i + 1)) * 20;
+
+        faces += CoopDrawHudFace(members[i], box_x + 3, line_y - 1, kReadyFace) ? 1 : 0;
+    }
+    DrawRngLeave();
+
+    static int drawn = 0;
+    // (coop-warmreset, WS7: put back at each warm-pair job as a fresh copy has it; trace_once_kept twin: kept)
+    COOP_TEST_TRACE_RESET(drawn, 0);
+
+    if (drawn++ % 60 == 0) {
+        std::fprintf(stderr, "coop: ready box drawn on this copy, %d rows, %d faces drawn, hand on %s, %d frames\n", rows, faces,
+                     session.cursor == ready::kButtonStartNow ? "START NOW" : "CANCEL", drawn);
+    }
+    // Test hook (DC_COOP_TEST_READY_SHOT=DIR): the box's 30th frame written to DIR/ready-box.png (in-process), once; and as the
+    // waiting box's (DC_COOP_TEST_WAIT_SHOT=DIR: DIR/waiting.png, x-door-gate refuse and cancel).
+    if (static const char *const shot = TestEnv("DC_COOP_TEST_READY_SHOT"); shot != nullptr && drawn == 30) {
+        static char path[512];
+
+        std::snprintf(path, sizeof path, "%s/ready-box.png", shot);
+        NetplayTestShot(path);
+    }
+    if (static const char *const wait_shot = TestEnv("DC_COOP_TEST_WAIT_SHOT"); wait_shot != nullptr && drawn == 30) {
+        static char path[512];
+
+        std::snprintf(path, sizeof path, "%s/waiting.png", wait_shot);
+        NetplayTestShot(path);
+    }
+    return true;
+}
+
 bool DrawWaitingBox() {
     int asked = 0;
 
+    if (DrawReadyBox()) {
+        return true;
+    }
     if (DrawGateWaitingBox()) {
         return true;
     }
@@ -1613,11 +2450,11 @@ void SwapQuestionText(const PromptView &v, char *text, int size) {
     static const char *const kNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
 
     if (v.revive) {
-        std::snprintf(text, size, "Use Revive Powder?\nYou carry %d.", v.carried);
+        std::snprintf(text, size, "Use a Revive Powder?\nYou carry %d.", v.carried);
     } else if (v.spot >= 0) {
         std::snprintf(text, size, "This is %s's spot.\nSwap to %s?", kNames[v.spot], kNames[v.spot]);
     } else {
-        std::snprintf(text, size, "Player %d wants %s.\nSwap %s for %s?", v.asker, kNames[v.wanted], kNames[v.wanted], kNames[v.own]);
+        std::snprintf(text, size, "%s wants %s.\nSwap %s for %s?", NetplayShownName((int) v.asker).c_str(), kNames[v.wanted], kNames[v.wanted], kNames[v.own]);
     }
 }
 
@@ -1630,9 +2467,68 @@ void CloseSwapBox() {
 
 } // namespace
 
+// coop-swapcombo part 4 (DC_COOP_TEST_SWAP_SHOT=<path prefix>, tests): the popup's and the waiting box's 10th drawn frame to
+// <prefix>-question.png and <prefix>-box.png, once each, to compare the trade's look together and apart.
+void SwapShot(int drawn, const char *what) {
+    static const char *prefix = TestEnv("DC_COOP_TEST_SWAP_SHOT");
+    static bool        taken[2] = {};
+    const int          k = what[0] == 'q' ? 0 : 1;
+
+    if (prefix == nullptr || taken[k] || drawn != 10) {
+        return;
+    }
+    taken[k] = true;
+    static std::string path[2];
+
+    path[k] = std::string(prefix) + "-" + what + ".png";
+    NetplayTestShotRequest(path[k].c_str());
+    std::fprintf(stderr, "coop-test: swap %s frame asked for %s\n", what, path[k].c_str());
+}
+
+// coop-revive2: a reviver's Cross with no Revive Powder in its bag: "You have no Revive Powder." in the game's box on that player's
+// screen alone (couch: the one screen) for a few seconds, gone by itself. Draw only (coop_prompt's frames, presentation).
+namespace {
+dc::ui::DialogBox g_revive_none_box;
+bool              g_revive_none_open = false;
+int               g_revive_none_drawn = 0;
+
+void DrawReviveNone() {
+    const int local = CoopWorldsApart() ? CoopWorldsSelf() : NetplayLocalPlayer();
+    bool      show = false;
+
+    for (int p = 1; p <= kMaxPlayers; p++) {
+        show = show || (ReviveNoneFrames(p) > 0 && (local == 0 || local == p));
+    }
+    ReviveNoneTick();
+    if (!show) {
+        if (g_revive_none_open) {
+            g_revive_none_box.Close();
+            g_revive_none_open = false;
+        }
+        return;
+    }
+    if (!g_revive_none_open) {
+        g_revive_none_box.Configure("You have no Revive Powder.", "", {});
+        g_revive_none_box.Open(0);
+        g_revive_none_open = true;
+        g_revive_none_drawn = 0;
+        std::fprintf(stderr, "coop-revive: no-powder box laid out on P%d's screen\n", local);
+    }
+    DrawRngEnter(); // coop-drawrng: the draw stream
+    g_revive_none_box.Draw(0x80);
+    DrawRngLeave();
+    if (g_revive_none_drawn++ % 60 == 0) {
+        std::fprintf(stderr, "coop-revive: no-powder box drawn on P%d's screen, %d frames\n", local, g_revive_none_drawn);
+    }
+}
+} // namespace
+
 void DrawSwapQuestion() {
     PromptView v;
-    const int  local = NetplayLocalPlayer();
+
+    DrawReviveNone(); // coop-revive2
+    // (coop-swapcombo: apart each copy is its own player's, the trade across zones' popup or box)
+    const int  local = CoopWorldsApart() ? CoopWorldsSelf() : NetplayLocalPlayer();
 
     if (!PromptQuestion(&v)) {
         CloseSwapBox();
@@ -1673,6 +2569,7 @@ void DrawSwapQuestion() {
             std::replace(line.begin(), line.end(), '\n', '/');
             std::fprintf(stderr, "coop: swap question laid out for player %d's screen (the popup): %s\n", v.asked, line.c_str());
         }
+        SwapShot(g_swap_drawn, "question"); // coop-swapcombo part 4
         if (g_swap_drawn++ % 60 == 0) {
             std::fprintf(stderr, "coop: swap question drawn on this copy (player %d's screen) %s, hand on %s, %d frames\n", local,
                          drawn ? "in the game's popup" : "NOT DRAWN (no popup pictures)", v.cursor == 0 ? "Yes" : "No", g_swap_drawn);
@@ -1690,7 +2587,7 @@ void DrawSwapQuestion() {
     if (g_swap_waiting != v.asked) {
         char wait[160];
 
-        std::snprintf(wait, sizeof wait, "Waiting for Player %d\nto answer the swap.\n{circle} Cancel", v.asked);
+        std::snprintf(wait, sizeof wait, "Waiting for %s\nto answer the swap.\n{circle} Cancel", NetplayShownName((int) v.asked).c_str());
 
         const std::vector<std::string> lines = Lines(wait);
         std::string                    description;
@@ -1706,6 +2603,7 @@ void DrawSwapQuestion() {
     DimForQuestion();
     g_swap_box.Draw(0x80);
     DrawRngLeave();
+    SwapShot(g_swap_drawn, "box"); // coop-swapcombo part 4
     if (g_swap_drawn++ % 60 == 0) {
         std::fprintf(stderr, "coop: swap waiting box drawn on this copy (player %d), %d frames\n", local, g_swap_drawn);
     }
@@ -1730,6 +2628,7 @@ void DrawCallQuestion() {
 
         DrawWaitingBox(); // coop-gatepopup: the asker's box (apart)
         DrawGatherQuestion(NetplayLocalPlayer(), true);
+        DrawSwapQuestion(); // coop-swapcombo part 2: a trade across zones, as together's
     }
 }
 
@@ -1810,6 +2709,23 @@ void DrawUsePrompts() {
             continue;
         }
 
+        if (p.kind == Kind::None && DrawTextInGameWindow(player - 1, player, local, p.note, 1, -1)) {
+            continue;
+        }
+        if (p.kind != Kind::None) {
+            std::string text;
+
+            for (int i = 0; i < p.head.size(); i++) {
+                text += std::string(text.empty() ? "" : "\n") + p.head[i];
+            }
+            for (int i = 0; i < p.rows.size(); i++) {
+                text += std::string(text.empty() ? "" : "\n") + p.rows[i];
+            }
+            if (DrawTextInGameWindow(player - 1, player, local, text, (int) p.head.size(), p.step == Step::Read ? -1 : ShownCursor(player, p))) {
+                continue;
+            }
+        }
+
         if (p.kind == Kind::None) {
             set2DSpriteC4(Vif1Packet, CRect_i_(left, kTop - 4, kWidth, 20), (spRGBA *) &kBack, (spRGBA *) &kBack, (spRGBA *) &kBack, (spRGBA *) &kBack);
             dc::text::caption::DrawLine(p.note, centre, (float) kTop, 8.0f, 1.0f, kWidth - 10.0f, style, 1.0f, 1.0f, nullptr);
@@ -1834,7 +2750,7 @@ void DrawUsePrompts() {
 
         for (int row = 0; row < (int) p.rows.size(); row++) {
             dc::text::caption::LineStyle row_style = style;
-            const bool         current = row == p.cursor;
+            const bool         current = row == ShownCursor(player, p);
 
             if (current) {
                 row_style.fill[2] = 120;

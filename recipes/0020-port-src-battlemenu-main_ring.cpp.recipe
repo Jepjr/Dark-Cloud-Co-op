@@ -1,0 +1,80 @@
+# port/src/battlemenu/main_ring.cpp from Chronicle's port/src/battlemenu/main_ring.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/battlemenu/main_ring.cpp
+base port/src/battlemenu/main_ring.cpp
+from 2f2fa1cc40dd15c8d5d154ff7224322113519a9c
+to 5c01cbe691324782c609ab5e163c1645e6c53065
+@@ -5,0 +6,4
++#include "coop/coop_menu.hpp" // coop-menus
++#include "coop/coop_fullmenu.hpp" // coop-fullmenu
++#include "coop/coop_townmenu.hpp" // coop-saveload
++#include "coop/coop_zonechara.hpp" // coop-pt1111k
+@@ -360,0 +365,1
++            CoopMenuLoaded(); // coop-saveload: a load in a linked town is a resync
+@@ -379,0 +385,13
++// coop-saveload: the ring's choosers (save or load, quit) and the load under way, which coop_fullmenu keeps per menu
++// with the menu's other globals, so a menu open beside another neither steps nor draws the other's. The load's request
++// to the game loop (ingame_load_pending) stays one.
++void BattleMenuRingRegions(void (*add)(void *at, std::size_t size)) {
++    add(&quit_confirm_active, sizeof quit_confirm_active);
++    add(&quit_confirm_choice, sizeof quit_confirm_choice);
++    add(&quit_cursor, sizeof quit_cursor);
++    add(&saveload_modal_active, sizeof saveload_modal_active);
++    add(&saveload_modal_choice, sizeof saveload_modal_choice);
++    add(&saveload_cursor, sizeof saveload_cursor);
++    add(&ingame_load_active, sizeof ingame_load_active);
++}
++
+@@ -434,1 +452,6
+- aa5bdd9ef66485e2
++    // coop-fullmenu: beside the running world the menu draws over the live scene, not the still frame.
++    if (!coop::FullMenuLiveScene()) {
+~434 aa5bdd9ef66485e2|        |
++    }
++    // coop-swapmenulook: the live scene at this same brightness (its opening and closing fade with it), as the still is drawn.
++    coop::MenuBackdrop(bright, coop::FullMenuLiveScene());
+@@ -522,0 +546,1
++    game_help = game_help && coop::MenuGameHelp(BattleMenuFlag); // coop-attachhelp: off for its twin (menuhelp_off)
+@@ -547,0 +572,1
++            coop::MenuGameHelpDrawn(BattleMenuFlag, CommonMenuMes2.mes_made);
+@@ -584,0 +610,3
++    // coop-menus: on the linked copy whose player did not open the menu, a cover over it. The menu still
++    // draws underneath, since its draw steps state (help alpha, level-up effect) both copies must share.
++    coop::MenuDrawGameMenuCover();
+@@ -599,0 +628,5
++        } else if (GamePad.Down(PAD_CROSS) && saveload_modal_choice != static_cast<int>(SaveLoadChoice::Save) &&
++                   !CoopMenuLoadAllowed()) {
++            // coop-saveload: player 2's Load in a linked town is refused (the host's game is both copies').
+=601 088fba33bd661f5a
+=619 64e44ce1aa5f8f52
+@@ -630,1 +663,5
+- 964606f6a105d771
++            // coop-quitown: on linked copies, only the copy of the player whose menu this is quits (coop-quittitle: sends the
++            // quit to every copy, below); a copy stepping another player's menu closes the chooser.
++            if (quit_confirm_choice == static_cast<int>(QuitChoice::Yes) && !coop::FullMenuQuitHere()) {
+=634 00428eb72c33e8d3
++            } else if (quit_confirm_choice == static_cast<int>(QuitChoice::Yes)) {
+@@ -635,1 +672,3
+- cb4a2dc53630f71c
++                // coop-quittitle: in a netplay session the quit goes to every copy as a command, and the main loop leaves
++                // for the title on the tick it applies (NetplayTakeQuitToTitle): the host's takes every player there.
++                quit_to_title_pending = !coop::FullMenuQuitSent();
+@@ -671,0 +711,6
++        // coop-downmenu: a downed player's menu opens its Move page alone (the dungeon's way out); the rest are refused.
++        if (coop::FullMenuDownOnly() && MenuSelect[0] != BTLMENU_PAGE_MOVE) {
++            std::printf("coop-downmenu: page %d refused: its player is down (the Move page alone)\n", MenuSelect[0]);
+=619 64e44ce1aa5f8f52
++            return 1;
++        }
+@@ -678,0 +724,2
++                // Jep (co-op), coop-pt1111k: with other players on the floor the page opens; each pick is checked as it is
++                // taken (the floor's member must stay played: coop_zonechara.cpp). Alone, retail's refusal.
+@@ -680,1 +727,1
+- 83bf8663afc6a976
++                    status->res_limit_zone_current >= 0 && status->res_limit_zone_current < 6 && !coop::ZoneMenuPicksOpen()) {
+@@ -758,0 +806,6
++// coop-pt1109d: a new menu starts with its choosers shut (BattleMenuInit). See coop::FullMenuStartsClean.
++void BattleMenuRingChoosersOff() {
+~634 00428eb72c33e8d3|    |
+~601 088fba33bd661f5a|    |
++}
++

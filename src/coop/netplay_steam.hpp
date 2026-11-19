@@ -52,6 +52,10 @@ int  NetSteamReceive(void *data, std::size_t size, std::uint64_t &from);
 // sends at (bytes a second). False when Steam is out, the DLL lacks the call, or there is no session yet.
 bool NetSteamQueue(std::uint64_t to, int &pending_bytes, int &rate);
 
+// coop-hostquit: Steam's state of the session to a SteamID (0 none, 1-3 connecting to connected, 4 closed by the peer, 5 a
+// problem detected locally); -1 unknown (Steam out, or the helper not yet watching that session).
+int NetSteamSessionState(std::uint64_t to);
+
 // coop-steamrate: whether the host paces a join's pieces itself by what reaches the other copy (game.netplay_steam_rate
 // 0, the default), Steam's rate its ceiling; false with a fixed rate (Steam's pace alone) or DC_NETPLAY_MUTATE=steam_pace_off.
 bool NetSteamPaced();

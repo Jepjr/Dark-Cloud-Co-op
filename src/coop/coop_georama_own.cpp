@@ -18,6 +18,7 @@
 #include "camerafollow.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_actor.hpp" // coop-stage4 4d: PlayerInMenu
+#include "coop/coop_wheel.hpp" // coop-georamaring: RingHold
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -39,6 +40,8 @@
 #include "editloop.hpp"
 #include "editmapscript.hpp"
 #include "editmenu.hpp"
+#include "menuitemstep.hpp" // coop-016: the bag's melt timer (CoopP1PartsMenuOpenElsewhere)
+#include "dun/gameloop.hpp"  // coop-016: ItemVolumeStep
 #include "editloop3.hpp"
 #include "editpartsinfo.hpp"
 #include "npcharacter.hpp"
@@ -288,6 +291,7 @@ bool          HisPartsLocal() {
 bool g_his_parts_sent = false; // his copy: shut here, its close command sent
 bool g_his_parts_shut = false; // every copy: its close command came, retail's close runs on this step
 int  g_his_parts_ticks = 0;
+bool g_his_parts_elsewhere = false; // coop-soakapart: his local parts menu open here, never made on this copy (not his)
 
 // His parts menu run in the lockstep (its fix-off twin p1parts_menu_lockstep) shares her copy's one engine with hers (its buffer and texture
 // blocks), so hers waits; local, its engine is never on her copy (DC_COOP_MUTATE=p1parts_one_at_a_time, twin: it waits, as before).
@@ -609,6 +613,35 @@ bool CoopP2Building() {
     return g_own.on;
 }
 
+// coop-daytrans2 (design for three): whether walker n (1 up, beside the game's player) has their own Georama open, every copy alike (the game's
+// player's is retail's mode; walkers past the second have none of their own yet).
+bool CoopGeoramaWalkerBuilds(int player) {
+    const bool builds[coop::kMaxPlayers] = {false, g_own.on};
+
+    return player >= 1 && player <= coop::kMaxPlayers && builds[player - 1];
+}
+
+// coop-integrate1118 (coop_georama.hpp): her editor's port while it steps; her view's angle, from the globals while swapped in, else
+// from her kept editor (its camera bytes over a copy of EditCamera, as CameraLoad puts them).
+int CoopGeoramaStepPort() {
+    return g_own.swapped && !Mutated("georama_steer_port1") ? 1 : 0;
+}
+
+bool CoopP2GeoramaCameraAngle(float *angle) {
+    if (!g_own.on || Mutated("georama_steer_port1")) {
+        return false;
+    }
+    if (g_own.swapped || SharedEditor() || CameraOperator()) {
+        *angle = EditCamera.GetAngle();
+        return true;
+    }
+    CCameraFollow camera = EditCamera;
+
+    std::memcpy(reinterpret_cast<unsigned char *>(&camera) + kCameraFrom, g_own.editor.camera + kCameraFrom, sizeof(CCameraFollow) - kCameraFrom);
+    *angle = camera.GetAngle();
+    return true;
+}
+
 bool CoopP2HelpLeftFrame() {
     if (g_own.on || g_help_left <= 0) {
         return false;
@@ -668,11 +701,11 @@ void CoopP2DrawEditorBegin() {
 
     // coop-pt1111d (DC_COOP_DEBUG): the name label this copy's frame draws (made 1: a text; -1: none), and its own editor's focus, on each change.
     if (CoopDebug() && building && ECursorFrame != nullptr) {
-        static int said = -2;
+        static int said = -2, calls = 0;
         const int  focus = NowFocusParts != nullptr ? NowFocusParts->parts_no : -1;
         const int  now = EditNameMes.mes_made * 1000 + focus;
 
-        if (now != said) {
+        if (now != said || ++calls % 60 == 0) { // (on each change, and once a second for the tests that read what stays)
             said = now;
             std::fprintf(stderr, "coop-georama: p%d draws name label %d (%d columns), its own focus part %d, link tick %lld\n", NetplayLocalPlayer(),
                          EditNameMes.mes_made, EditNameMes.text_columns, focus, (long long) NetplayLinkTick());
@@ -1027,18 +1060,36 @@ void CoopPartsWritesEnd() {
 // same spot is inside one a tick later. Comparing one spot across a tick is what tells a part going down on a villager from a villager walking onto
 // a part, and it sees any builder and any way a part arrives. As a Georama ends: the blocked go where retail's placement sends a walker (GetRandomPlanePos near their
 // part, widening; clear of the players and other walkers, 200 away; failing that their people spot); one whose people spot moved with its part follows it;
-// one a part brought in or took away shows or hides by retail's rule. Alone, retail's own call. DC_COOP_MUTATE=villagers_all_move (twin): retail's call, all placed
-// again; villagers_never_move (twin): the blocked stay inside.
+// one a part brought in or took away shows or hides by retail's rule. Alone (no co-op session), retail's own call. DC_COOP_MUTATE=villagers_all_move (twin): retail's
+// call, all placed again; villagers_never_move (twin): the blocked stay inside.
+// coop-georama2 (Jep's rc3 playtest 11-13: "when P2 goes into the Georama and leaves, all of the characters' positions warp"): apart counts as co-op, not
+// alone. With player 1 on a floor her copy's link is down, NetplayHasPlayer() is false, and her Georama's end took retail's call: every villager placed
+// again at random (her log: "retail's placement, all of them" at each end). Apart the same rule runs as linked, on that copy alone (its villagers are
+// its own till the merge sends the stayer's). DC_COOP_MUTATE=villagers_apart_retail (twin): retail's call apart, as before. The look 120 ticks on
+// counts town ticks (the link tick stands still apart).
+// coop-georamavillagers (the developer 11-18: "since characters in the town don't randomize locations when you go into Georama mode, you should be able
+// to see them walking around. Putting something where they're standing should randomize their location somewhere else, but only their own"):
+// a villager a part went down on moves at once, on the tick after (VillagersMoveBlocked), not at the Georama's end: to where retail's
+// placement sends a walker (VillagerWalkerSpot: GetRandomPlanePos clear of parts, near its own part, widening), drawn from the town's one
+// random stream in the step, so every copy picks the same spot. A walker whose step's end (its sequence's MOVE destination, retail's
+// EdSetVillagerNextPos only picks one clear of non-road parts) a part went down on gives that step up and picks its next as retail does: it
+// was not stood on, so it is not placed anew. A villager someone talks with (any player's talk slot) or under a scene (the town's event mode,
+// a player's own town event, the time of day's scene) waits till it is free; if it is no longer inside a part then, it stays. Every other
+// villager is left alone. DC_COOP_MUTATE=villagers_move_at_end (twin): the blocked move only as the Georama ends, as before.
 namespace {
 struct VillagersWatch {
     std::uint32_t blocked;
     int           valid;
     float         at[10][3];
     int           clear[10];
+    std::uint32_t path;         // coop-georamavillagers: walkers whose step's end a part went down on (their step given up when free)
+    float         to[10][3];    // each walker's step's end, the tick before
+    int           to_clear[10]; // it was clear of parts then
 };
+void VillagersMoveBlocked();
 VillagersWatch g_villagers_watch{}; // (state set: a resync with a Georama open keeps it)
 std::uint32_t  g_villagers_test_drawn = 0; // DC_COOP_TEST_VILLAGERS_BLOCK's villagers drawn for the test (no house up in a fixture's Norune)
-long long      g_villagers_said_at = -1;   // the test's look 120 ticks after a Georama's end
+int            g_villagers_say_in = -1;    // the test's look 120 town ticks after a Georama's end (coop-georama2: not the link tick, which stands apart)
 
 bool VillagerOnShow(int i) {
     return EdVillager[i].initialized != 0 && EdVillager[i].draw_enabled != 0;
@@ -1058,25 +1109,33 @@ void VillagersSay(const char *when) {
 }
 
 void VillagersWatchStep() {
-    if (g_villagers_said_at >= 0 && NetplayLinkTick() >= g_villagers_said_at) {
-        g_villagers_said_at = -1;
+    if (g_villagers_say_in > 0 && --g_villagers_say_in == 0) {
+        g_villagers_say_in = -1;
         VillagersSay("120 ticks on");
     }
     if (pEditGround == nullptr) {
         return;
     }
-    if (!TownBuilds() && !g_own.on) {
+
+    const bool builds = TownBuilds() || g_own.on;
+
+    for (int i = 0; builds && g_villagers_watch.valid != 0 && i < 10; i++) {
+        if (g_villagers_watch.clear[i] != 0 && (g_villagers_watch.blocked & (1u << i)) == 0 && VillagerOnShow(i) && InsidePart(g_villagers_watch.at[i])) {
+            g_villagers_watch.blocked |= 1u << i;
+            std::fprintf(stderr, "coop-georama: a part went down on villager %d at (%.2f %.2f), link tick %lld\n", i, g_villagers_watch.at[i][0], g_villagers_watch.at[i][2],
+                         (long long) NetplayLinkTick());
+        } else if (g_villagers_watch.to_clear[i] != 0 && (g_villagers_watch.path & (1u << i)) == 0 && VillagerOnShow(i) && InsidePart(g_villagers_watch.to[i])) {
+            g_villagers_watch.path |= 1u << i;
+            std::fprintf(stderr, "coop-georama: a part went down on villager %d's way at (%.2f %.2f), link tick %lld\n", i, g_villagers_watch.to[i][0],
+                         g_villagers_watch.to[i][2], (long long) NetplayLinkTick());
+        }
+    }
+    VillagersMoveBlocked(); // coop-georamavillagers: at once (and those a talk or a scene held, once free)
+    if (!builds) {
         g_villagers_watch.valid = 0;
         return;
     }
     for (int i = 0; i < 10; i++) {
-        if (g_villagers_watch.valid != 0 && g_villagers_watch.clear[i] != 0 && (g_villagers_watch.blocked & (1u << i)) == 0 && VillagerOnShow(i) &&
-            InsidePart(g_villagers_watch.at[i])) {
-            g_villagers_watch.blocked |= 1u << i;
-            std::fprintf(stderr, "coop-georama: a part went down on villager %d at (%.2f %.2f), link tick %lld\n", i, g_villagers_watch.at[i][0], g_villagers_watch.at[i][2],
-                         (long long) NetplayLinkTick());
-        }
-
         sceVu0FVECTOR at = {0.0f, 0.0f, 0.0f, 1.0f};
 
         if (VillagerOnShow(i)) {
@@ -1086,6 +1145,17 @@ void VillagersWatchStep() {
         g_villagers_watch.at[i][1] = at[1];
         g_villagers_watch.at[i][2] = at[2];
         g_villagers_watch.clear[i] = VillagerOnShow(i) && !InsidePart(at);
+
+        // (a walker's step under way: its sequence's MOVE, retail's EdSetVillagerNextPos's 100 ahead)
+        const NP_SEQUENCE *step = VillagerOnShow(i) && EdVillager[i].CheckSeq() != 0 ? EdVillager[i].GetNowSeq() : nullptr;
+
+        g_villagers_watch.to_clear[i] = 0;
+        if (step != nullptr && step->operation == NP_SEQUENCE_OPERATION::MOVE) {
+            g_villagers_watch.to[i][0] = step->destination[0];
+            g_villagers_watch.to[i][1] = step->destination[1];
+            g_villagers_watch.to[i][2] = step->destination[2];
+            g_villagers_watch.to_clear[i] = !InsidePart(step->destination);
+        }
     }
     g_villagers_watch.valid = 1;
 }
@@ -1159,18 +1229,20 @@ bool VillagerShows(const VILLAGER_INFO &entry, int i) {
 }
 
 // Retail's walker placement for one villager (EdInitVilagerPosition's moving loop).
+// toan: the spot a player leaving their Georama comes out at (retail's), or null. coop-georamavillagers: clear of every player's body standing
+// in the town (CoopTownBodyStands: every present player, not Toan and one partner; not a builder's hidden body, which is not where they are).
 bool VillagerWalkerSpot(int selected, const float *toan, float *out) {
-    sceVu0FVECTOR avoid[12];
+    sceVu0FVECTOR avoid[1 + coop::kMaxPlayers + 10];
     int           count = 0;
 
-    sceVu0CopyVector(avoid[count], (float *) toan);
-    count++;
-
-    sceVu0FVECTOR her = {0.0f, 0.0f, 0.0f, 1.0f};
-
-    if (coop::TownPartnerShown(her, nullptr)) {
-        sceVu0CopyVector(avoid[count], her);
+    if (toan != nullptr) {
+        sceVu0CopyVector(avoid[count], (float *) toan);
         count++;
+    }
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        if (CoopTownBodyStands(player, avoid[count])) {
+            count++;
+        }
     }
     for (int i = 0; i < 10; i++) {
         if (i != selected && VillagerOnShow(i) && EdVillager[i].event_status != 0) {
@@ -1222,15 +1294,114 @@ void VillagerPut(int i, const float *position, const float *rotation, int walks,
     EdVillager[i].draw_enabled = draw;
     EdVillager[i].SetMotion(0, 0);
 }
+
+// A blocked villager's new place: retail's walker placement, else its people spot, else where it is, hidden (as retail's EdInitVilagerPosition).
+void VillagerPlaceAnew(int i, const float *toan) {
+    VILLAGER_INFO &entry = EdVillagerInfo[i];
+    sceVu0FVECTOR  people = {0.0f, 0.0f, 0.0f, 1.0f};
+    sceVu0FVECTOR  now = {0.0f, 0.0f, 0.0f, 1.0f};
+    const bool     has_spot = pEditGround->GetPeoplePos(entry.index, people) != nullptr;
+    const sceVu0FVECTOR turn = {0.0f, has_spot ? people[3] : entry.rotation[1], 0.0f, 0.0f};
+    float          to[4];
+
+    people[3] = 1.0f;
+    EdVillager[i].GetPosition(now);
+    if (VillagerWalkerSpot(i, toan, to)) {
+        VillagerPut(i, to, entry.rotation, 1, true);
+    } else if (has_spot) {
+        VillagerPut(i, people, turn, 0, true);
+    } else {
+        VillagerPut(i, now, entry.rotation, 0, false);
+    }
+}
+
+// coop-georamavillagers: this villager is someone's to leave be for now: in a player's talk (each present player's talk slot, every copy
+// alike), or the town is under a scene (retail's event mode: a story scene's script may hold its villagers; a player's own town event; the
+// time of day's scene, whose change loads the period's villagers).
+bool VillagerHeld(int i) {
+    if (GameMode == ED_MODE_EVENT || GameMode == ED_MODE_TIME_CHANGE || CoopTownOwnTownEvent() != 0 || CoopDayTransOn()) {
+        return true;
+    }
+    for (int k = 0; k < coop::kMaxPlayers; k++) {
+        if (CoopTalkVillager(k) == i) {
+            return true;
+        }
+    }
+    return GameMode == ED_MODE_TALK && EdNowTalkChara() == &EdVillager[i]; // (apart: retail's talk mode, the copy's one player)
+}
+
+void VillagersMoveBlocked() {
+    if ((g_villagers_watch.blocked | g_villagers_watch.path) == 0 || Mutated("villagers_move_at_end")) {
+        return;
+    }
+    const bool coop = NetplayHasPlayer() || CoopWorldsApart();
+
+    if (!coop || Chara == nullptr) {
+        return; // (alone: retail's call at the Georama's end, every villager)
+    }
+
+    int           random_state = -1; // (as retail's placement: its draws put back; drawn only when one moves)
+
+    for (int i = 0; i < 10; i++) {
+        const std::uint32_t bit = 1u << i;
+
+        if (((g_villagers_watch.blocked | g_villagers_watch.path) & bit) == 0 || VillagerHeld(i)) {
+            continue;
+        }
+
+        sceVu0FVECTOR now;
+
+        EdVillager[i].GetPosition(now);
+        if ((g_villagers_watch.blocked & bit) != 0) {
+            g_villagers_watch.blocked &= ~bit;
+            g_villagers_watch.path &= ~bit;
+            if (!VillagerOnShow(i) || !InsidePart(now)) {
+                std::fprintf(stderr, "coop-georama: villager %d stays: no longer inside a part, link tick %lld\n", i, (long long) NetplayLinkTick());
+                continue;
+            }
+            if (random_state < 0) {
+                random_state = rand();
+            }
+            VillagerPlaceAnew(i, nullptr); // (clear of every player standing in the town: nobody is leaving a Georama here)
+
+            sceVu0FVECTOR after;
+
+            EdVillager[i].GetPosition(after);
+            std::fprintf(stderr, "coop-georama: villager %d moved at once (a new part blocked it) from (%.2f %.2f) to (%.2f %.2f), %s, link tick %lld\n", i, now[0], now[2],
+                         after[0], after[2], InsidePart(after) ? "inside a part" : "clear of parts", (long long) NetplayLinkTick());
+        } else {
+            g_villagers_watch.path &= ~bit;
+            if (VillagerOnShow(i) && EdVillager[i].CheckSeq() != 0) {
+                EdVillager[i].ClearSeq(); // (its next step picked by retail's EdSetVillagerNextPos, clear of parts)
+                std::fprintf(stderr, "coop-georama: villager %d gives up its step into a new part at (%.2f %.2f), link tick %lld\n", i, now[0], now[2],
+                             (long long) NetplayLinkTick());
+            }
+        }
+    }
+    if (random_state >= 0) {
+        srand(random_state);
+    }
+}
 } // namespace
 
 void CoopGeoramaLeaveVillagers(float (*at)[4]) {
     VillagersWatchStep(); // (a part down on this very tick)
 
-    if (!NetplayHasPlayer() || MapNo > 10 || Mutated("villagers_all_move")) {
+    const bool coop = NetplayHasPlayer() || (CoopWorldsApart() && !Mutated("villagers_apart_retail")); // coop-georama2: apart is co-op too
+
+    if (!coop || MapNo > 10 || Mutated("villagers_all_move")) {
+        VillagersSay("before the Georama's end"); // (coop-georama2: retail's call measured too: how far each goes)
         EdInitVilagerPosition(EdVillager, EdVillagerInfo, pEditGround, at);
+        for (int i = 0; i < 10; i++) {
+            if ((g_villagers_test_drawn & (1u << i)) != 0 && EdVillager[i].initialized != 0) {
+                EdVillager[i].draw_enabled = true; // (the test's villagers stay shown: retail's show rule hides them in a fixture's Norune with no house up; measured, not lost)
+            }
+        }
         std::fprintf(stderr, "coop-georama: villagers as the Georama ends: retail's placement, all of them, link tick %lld\n", (long long) NetplayLinkTick());
+        VillagersSay("after the Georama's end");
         g_villagers_watch.blocked = 0;
+        g_villagers_watch.path = 0;
+        g_villagers_say_in = 120;
         return;
     }
 
@@ -1251,7 +1422,8 @@ void CoopGeoramaLeaveVillagers(float (*at)[4]) {
 
     VillagersSay("before the Georama's end");
 
-    const int random_state = rand(); // (as retail: the placement's draws put back)
+    const bool at_end = Mutated("villagers_move_at_end"); // coop-georamavillagers' twin: the blocked placed here alone, as before
+    const int  random_state = rand(); // (as retail: the placement's draws put back)
     int       moved = 0;
     int       kept = 0;
 
@@ -1264,7 +1436,8 @@ void CoopGeoramaLeaveVillagers(float (*at)[4]) {
 
         const bool    shown = EdVillager[i].draw_enabled != 0;
         const bool    shows = VillagerShows(entry, i);
-        const bool    blocked = (g_villagers_watch.blocked & (1u << i)) != 0 && !Mutated("villagers_never_move");
+        // (coop-georamavillagers: one a talk or a scene holds stays blocked, moved by VillagersMoveBlocked once free)
+        const bool    blocked = (g_villagers_watch.blocked & (1u << i)) != 0 && !Mutated("villagers_never_move") && (at_end || !VillagerHeld(i));
         const bool    walks = EdVillager[i].event_status != 0;
         sceVu0FVECTOR people = {0.0f, 0.0f, 0.0f, 1.0f};
         sceVu0FVECTOR now = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1293,15 +1466,10 @@ void CoopGeoramaLeaveVillagers(float (*at)[4]) {
         if (spot_moved && !blocked) {
             VillagerPut(i, people, turn, 0, true);
         } else {
-            float to[4];
-
-            if (VillagerWalkerSpot(i, *at, to)) {
-                VillagerPut(i, to, entry.rotation, 1, true);
-            } else if (has_spot) {
-                VillagerPut(i, people, turn, 0, true);
-            } else {
-                VillagerPut(i, now, entry.rotation, 0, false);
-            }
+            VillagerPlaceAnew(i, *at);
+        }
+        if (blocked) {
+            g_villagers_watch.blocked &= ~(1u << i);
         }
         moved++;
 
@@ -1314,20 +1482,49 @@ void CoopGeoramaLeaveVillagers(float (*at)[4]) {
     }
 
     srand(random_state);
-    g_villagers_watch.blocked = 0;
+    if (at_end) {
+        g_villagers_watch.blocked = 0; // (the old way: every blocked one placed here)
+        g_villagers_watch.path = 0;
+    }
     std::fprintf(stderr, "coop-georama: villagers as the Georama ends: %d moved, %d kept walking, link tick %lld\n", moved, kept, (long long) NetplayLinkTick());
     VillagersSay("after the Georama's end");
-    g_villagers_said_at = NetplayLinkTick() + 120;
+    g_villagers_say_in = 120;
 }
 
 // Around player 1's step in his own Georama (the town's mode step): his Cross with a part held off her cell.
 void CoopGeoramaP1StepBegin() {
+    CoopDayTransTick();       // coop-daytrans: the time of day's event in its world slot, first thing each town tick
     CoopTownClockStepBegin(); // coop-pt1108c
     VillagersWatchStep();     // coop-pt1109c
     {
         static int builder_placed_a = -1;
 
         if (TownBuilds() && !g_own.on) {
+            // DC_COOP_TEST_PICK_APART=1 (coop-georama2, x-georama-villagers -Apart): a part in the hand of this copy's builder apart (no partner shown for P1_PLACE),
+            // the cursor on open ground (-400 -200), the linked row's builder spot; once the part is down, the cursor off it (-650 -200), ground Toan can stand on,
+            // so the Select that follows leaves (retail's CheckEditToWalk; the linked row's stick does it).
+            if (static const bool pick_apart = TestEnvOn("DC_COOP_TEST_PICK_APART"); pick_apart && CoopWorldsApart() && GameMode == ED_MODE_GEORAMA && ECursorFrame != nullptr) {
+                static int stage = 0;
+                static int placed_at_pick = -1;
+                const auto cursor_to = [](float x, float z) {
+                    sceVu0FVECTOR to = {x, 0.0f, z, 1.0f};
+
+                    ECursorFrame->SetPosition(to);
+                    sceVu0CopyVector(NextCursorPos, to);
+                    sceVu0CopyVector(NowCursorPos, to);
+                    std::fprintf(stderr, "coop-georama: test: the builder's cursor apart to (%.0f %.0f)\n", x, z);
+                };
+
+                if (stage == 0) {
+                    CoopGeoramaTestPickApart();
+                    cursor_to(-400.0f, -200.0f);
+                    placed_at_pick = PlacedParts();
+                    stage = 1;
+                } else if (stage == 1 && PlacedParts() > placed_at_pick) {
+                    cursor_to(-650.0f, -200.0f);
+                    stage = 2;
+                }
+            }
             builder_placed_a = builder_placed_a < 0 ? PlacedParts() : builder_placed_a;
             VillagersBlockForTest(builder_placed_a);
         }
@@ -1384,6 +1581,7 @@ void CoopGeoramaP1StepBegin() {
         g_his_parts_sent = false; // (no menu open: nothing left of a close from before a resync or a park)
         g_his_parts_shut = false;
         g_his_parts_ticks = 0;
+        g_his_parts_elsewhere = false;
     }
     if (test_chip >= 0 && pEditGround != nullptr) { // (the flow's row reads the map's parts on each copy)
         static int placed_said = -1;
@@ -1422,6 +1620,60 @@ void CoopGeoramaP1StepEnd() {
     }
 
     g_p1_placed = -1;
+
+    // coop-georamavillagers (the developer 11-18): the villagers walk on through the town's Georama. Retail steps them only in its walk (MainMode's
+    // EdMoveVillager) and its Georama frame draws no character, so they stood hidden: whoever walked beside a builder saw them stand still,
+    // and the builder saw none. In co-op (linked or apart) the town's Georama (its edit and its parts menu over it) steps them as the walk
+    // does, every copy alike, held as the walk holds them (every present player in a talk or a menu). Her own Georama already has the town
+    // walking under it. Alone, retail's: they stand. DC_COOP_MUTATE=georama_villagers_still (twin): they stand, as before.
+    const bool coop = NetplayHasPlayer() || CoopWorldsApart();
+
+    if (coop && (GameMode == ED_MODE_GEORAMA || GameMode == ED_MODE_GEORAMA_MENU) && pEditGround != nullptr && Chara != nullptr && !CoopTownVillagersHeld() &&
+        !Mutated("georama_villagers_still")) {
+        if (MapNo < 10) {
+            EdMoveVillager(EdVillagerInfo);
+        } else {
+            EdMoveVillagerSubMap(EdVillagerInfo);
+        }
+    }
+}
+
+// coop-georamavillagers: the villagers drawn in a Georama's frame (any builder's: the town's on its copies, hers on her copy), where they
+// stand in the town's step, as the walk's frame draws them (each player's own detail distance: EdDrawCharacter's CoopTownVillagerDraw*).
+// Retail's Georama frame draws none. Alone, retail's. DC_COOP_MUTATE=georama_villagers_hidden (twin): none drawn, as before.
+void CoopGeoramaDrawVillagers() {
+    const bool coop = NetplayHasPlayer() || CoopWorldsApart();
+
+    if (!coop || Chara == nullptr || Mutated("georama_villagers_hidden")) {
+        return;
+    }
+
+    int marks[10];
+    int shown = 0;
+
+    for (int i = 0; i < 10; i++) {
+        marks[i] = 3; // (body and shadow)
+        shown += VillagerOnShow(i) && EdVillager[i].CheckDraw() != 0 ? 1 : 0;
+    }
+    if (shown == 0) {
+        return;
+    }
+    EdDrawCharacter(Chara, 0, 10, EdVillager, marks, 1, nullptr); // (player mask 0: no Toan; the walker is CoopGeoramaDrawWalker's)
+
+    // DC_COOP_DEBUG: once a second, what this copy's Georama drew (the tests read the villagers' places frame by frame).
+    static int frames = 0;
+
+    if (CoopDebug() && ++frames % 30 == 1) {
+        for (int i = 0; i < 10; i++) {
+            if (VillagerOnShow(i) && EdVillager[i].CheckDraw() != 0) {
+                sceVu0FVECTOR at;
+
+                EdVillager[i].GetPosition(at);
+                std::printf("coop-georama: p%d's Georama drew villager %d at (%.1f %.1f) walks %d, link tick %lld\n", NetplayLocalPlayer(), i, at[0], at[2],
+                            (int) EdVillager[i].event_status, (long long) NetplayLinkTick());
+            }
+        }
+    }
 }
 
 bool CoopP2MenuOpen() {
@@ -1448,6 +1700,38 @@ bool CoopP1PartsMenuElsewhere() {
     return HisPartsLocal() && NetplayLocalPlayer() != kHisPlayer;
 }
 
+// coop-016 (t-p2-town-cam: OUT OF SYNC at tick 720, the carried melt timer 34 1 1 on player 2's copy against 0 0 1 on his): his parts
+// menu's opening on his copy (EdInitModeFinish -> EditMenuInit) melts the bag by the timer's counts (retail's CheckItemVolume: the ice
+// melts, the counts and the frame back to 0), but the other copies skip that opening (coop-p1parts: made on his copy alone), so the
+// timer, and a bag holding ice, parted. The melt is the world's, as the walk's timer is: every other copy does it on the same tick.
+// DC_COOP_MUTATE=partsinit_melt_here (twin): his copy alone, as before.
+void CoopP1PartsMenuOpenElsewhere() {
+    if (coop::Mutated("partsinit_melt_here")) {
+        return;
+    }
+    ItemVolumeStep.CheckItemVolume();
+    std::printf("coop-georama: his parts menu's opening melts the bag here too (link tick %lld)\n", (long long) NetplayLinkTick());
+}
+
+// coop-tripwires: the making of his parts menu on his copy (EdInitModeFinish -> EditMenuInit), linked made there alone. The opening's
+// melt is the world's (the other copies do it on this tick, CoopP1PartsMenuOpenElsewhere), so it runs here first, as theirs, and
+// EditMenuInit's own melt then finds nothing pending (CheckItemVolume acts only on pending seconds). What is left is his copy's own
+// making, inside the write guard's scope: before, the open was the one part of his menu no scope watched, the site of DCO-115.
+// DC_COOP_MUTATE=partsinit_melt_here (twin): no melt but EditMenuInit's, his copy alone, as before coop-016.
+void CoopP1PartsMenuOpenHere(int *texture_blocks, int start_at_atora) {
+    const bool own = HisPartsLocal() && NetplayLocalPlayer() == kHisPlayer;
+
+    if (own) {
+        std::printf("coop-georama: his parts menu opens with the melt timer at %d %d %d (link tick %lld)\n", (int) ItemVolumeStep.frame,
+                    (int) ItemVolumeStep.pending_volume, (int) ItemVolumeStep.enabled, (long long) NetplayLinkTick());
+    }
+    if (own && !coop::Mutated("partsinit_melt_here")) {
+        ItemVolumeStep.CheckItemVolume();
+    }
+    WriteGuardMenu guard("his parts menu open", own); // coop-tripwires (a test's: DC_QA_WRITE_GUARD)
+    EditMenuInit(texture_blocks, start_at_atora);
+}
+
 bool CoopPartsMenuLocalOpen() {
     return (PartsMenuLocal() && g_own.on && g_own.menu == 2) || (HisPartsLocal() && (g_own.swapped ? g_own.town_mode : (int) GameMode) == ED_MODE_GEORAMA_MENU);
 }
@@ -1468,7 +1752,24 @@ bool CoopP1PartsMenuCloseFrame() {
 
 int CoopP1PartsMenuStep() {
     if (!HisPartsLocal()) {
+        // coop-soakapart (soak seed 1259's second crash, her copy's 0xC0000005 reading 0x38 in CommonIconDraw as player 1's copy left
+        // with his parts menu on its Atla page): his local parts menu was never made on this copy (its pages, its Atla board), and with
+        // the link down this step went on to retail's EditMenuLoop here. It shuts here as his close command would shut it (closed,
+        // nothing handed back), leaving his Georama as a drop in its edit leaves it. DC_COOP_MUTATE=partsdrop_stepped (twin): as before.
+        if (g_his_parts_elsewhere && !Mutated("partsdrop_stepped")) {
+            g_his_parts_elsewhere = false;
+            EditMenuStatus.mode = -1;
+            EditMenuStatus.parts = -1;
+            GamePad.AutoRepeatOff();
+            GamePad.MenuModeOff();
+            std::fprintf(stderr, "coop-georama: player 1's parts menu, never made on this copy, shuts here: the link is down (link tick %lld)\n",
+                         (long long) NetplayLinkTick());
+            return 1;
+        }
         return EditMenuLoop();
+    }
+    if (NetplayLocalPlayer() != kHisPlayer) {
+        g_his_parts_elsewhere = true;
     }
     // DC_COOP_DEBUG: where she stands under it, every copy (the tests read her walk).
     static int walk_ticks = 0;
@@ -1613,6 +1914,7 @@ static gfx::TextureHandle g_town_previous = gfx::kNullTexture;
 static bool               g_town_hiding = false;
 
 void CoopP2TownFrameBegin() {
+    CoopEventClipDrawBegin(); // coop-dayhouses: this screen's own clip point (its player's scene's), for this frame alone
     g_town_hiding = NetplayLocalPlayer() == 2 && g_own.on && g_own.menu == 2 && !g_own.menu_sent && !Mutated("p2georama_menu_town_frame");
 
     if (!g_town_hiding) {
@@ -1636,6 +1938,7 @@ void CoopP2TownFrameBegin() {
 }
 
 void CoopP2TownFrameEnd() {
+    CoopEventClipDrawEnd();
     if (g_town_hiding) {
         gfx::SetRenderTarget(g_town_previous);
         g_town_hiding = false;
@@ -1672,18 +1975,33 @@ static void PlacePartTestTick() {
         return;
     }
     done = true;
-    EDITPARTS_INFO *info = EditPartsInfo.GetPartsInfo(plot);
+    // coop-dayhouses: the loaded form takes more plots after the first, "loaded:PLOT:X:Z;PLOT:X:Z...", each put down in order (a town
+    // with houses standing away from the pond)
+    for (const char *next = spec; next != nullptr; next = on_load ? std::strchr(next + 1, ';') : nullptr) {
+        if (next != spec && std::sscanf(next + 1, "%d:%f:%f", &plot, &x, &z) != 3) {
+            break;
+        }
+        EDITPARTS_INFO *info = EditPartsInfo.GetPartsInfo(plot);
 
-    if (info == nullptr) {
-        std::fprintf(stderr, "coop-georama: test: plot %d is not in this town\n", plot);
-        return;
+        if (info == nullptr) {
+            std::fprintf(stderr, "coop-georama: test: plot %d is not in this town\n", plot);
+            continue;
+        }
+        info->obtained = 1;
+        info->stock = info->placed + 1;
+        // coop-windmill (DC_COOP_TEST_PART_COMPLETE=1): every element of the plot in place first (the Atla's windmill blades...), so the
+        // part is complete (CheckComplete) and its finished scene's map event point is live (Norune's windmill: plot 8, event 208).
+        if (static const bool complete = TestEnvOn("DC_COOP_TEST_PART_COMPLETE"); complete) {
+            for (EDITPARTS_ELEMENT &element : info->elements) {
+                element.enabled = element.id >= 0 ? 1 : element.enabled;
+            }
+        }
+        const int slot = pEditGround->SetMapParts(plot, x, 0.0f, z, 0);
+        std::fprintf(stderr, "coop-georama: test: plot %d put down at (%.0f %.0f) in slot %d, complete %d, its finished scene seen %d\n", plot, x, z, slot,
+                     EditPartsInfo.CheckComplete(plot), EditPartsInfo.GetCompEvent(plot));
+        // coop-soakfix3: and where its doors are now in the world (a row walks a player to one)
+        CoopTownPlotDoorsForTest(plot);
     }
-    info->obtained = 1;
-    info->stock = info->placed + 1;
-    const int slot = pEditGround->SetMapParts(plot, x, 0.0f, z, 0);
-    std::fprintf(stderr, "coop-georama: test: plot %d put down at (%.0f %.0f) in slot %d\n", plot, x, z, slot);
-    // coop-soakfix3: and where its doors are now in the world (a row walks a player to one)
-    CoopTownPlotDoorsForTest(plot);
 }
 
 // coop-pt1111d test hook (DC_COOP_TEST_GEO_HOVER=P, t-triangle-menu -Case townhover1/townhover2): once both players have built for 30 ticks
@@ -1770,7 +2088,8 @@ void CoopP2GeoramaTick() {
         return;
     }
 
-    std::uint16_t pressed = pad.buttons & ~g_own.prev;
+    // coop-georamaring: what her ring holds is the ring's (its Select that shut it, her presses under it), never her Georama's
+    std::uint16_t pressed = pad.buttons & ~g_own.prev & ~coop::RingHold(kOwnPlayer);
 
     g_own.prev = pad.buttons;
 
@@ -1805,7 +2124,9 @@ void CoopP2GeoramaTick() {
             End("closes (its event starts)");
         }
 
-        int taken = FadeOutToEvent(g_own.event, g_own.event_level);
+        // coop-storygaps: together her pick (or her close's scene) is a story start: her box, everyone asked (it waits, held, if not yet)
+        int taken = CoopWorldsStoryFadeHeld(g_own.event, g_own.event_level, kOwnPlayer, "her Georama's Event pick") ? 0
+                                                                                                                  : FadeOutToEvent(g_own.event, g_own.event_level);
 
         std::printf("coop-georama: player 2's Georama event %d starts (the town took it: %d)\n", g_own.event, taken);
         g_own.event = 0;
@@ -1822,7 +2143,7 @@ void CoopP2GeoramaTick() {
     if (!g_own.on) {
         // Beside player 1's Georama too (each has an editor of their own); DC_COOP_MUTATE=p2georama_one_at_a_time: not while he builds.
         if ((pressed & kInputSelect) != 0 && Allowed() && (!TownBuilds() || !Mutated("p2georama_one_at_a_time")) && !CoopP2TownMenuOn() &&
-            change_time_event == 0) { // not over her own menu
+            change_time_event == 0 && !CoopDayTransHoldsPlayer(kOwnPlayer)) { // not over her own menu (coop-daytrans: nor while she watches the time of day's scene; coop-joinload: by its player, design for three)
             Begin();
         }
 
@@ -1974,10 +2295,28 @@ void CoopP2GeoramaTick() {
 
             g_own.still_wanted = false;
 
+            // DCO-123: the bag's melt timer as her menu opens, every copy (frame, pending seconds, on)
+            std::printf("coop-georama: her parts menu opens with the melt timer at %d %d %d (link tick %lld)\n", (int) ItemVolumeStep.frame,
+                        (int) ItemVolumeStep.pending_volume, (int) ItemVolumeStep.enabled, (long long) NetplayLinkTick());
+
             // (coop-stage4: made on her copy alone when local; the other's waits for the close command)
             if (!PartsMenuLocal() || PartsMenuHere()) {
+                // coop-tripwires: made on her copy alone (local), the opening's melt runs first, as on the other copies below, and the
+                // making is inside the write guard's scope (DCO-123's site, unwatched before). The twin: EditMenuInit's melt alone, as before.
+                if (PartsMenuLocal() && !Mutated("p2partsinit_melt_here")) {
+                    ItemVolumeStep.CheckItemVolume();
+                }
+                WriteGuardMenu guard("her parts menu open", PartsMenuLocal(), &GamePad); // coop-tripwires (DC_QA_WRITE_GUARD; GamePad is her own pad here, g_own.pad)
                 GamePad.MenuModeOn(120);
                 EditMenuInit(blocks, EditMenuStatus.mode == EDIT_MENU_MODE_PLACE);
+            } else if (!Mutated("p2partsinit_melt_here")) {
+                // DCO-123 (the soak's seeds 20261116002 and 20261116005: OUT OF SYNC within a second of her menu opening, the carried
+                // melt timer 35 2 1 on her copy against 48 3 1 on his): EditMenuInit melts the bag by the timer's counts (retail's
+                // CheckItemVolume: the ice melts, the counts and the frame back to 0), and made on her copy alone (coop-stage4) it
+                // melted there alone. The melt is the world's: the other copies do it on the same tick, as his menu's (coop-016).
+                // DC_COOP_MUTATE=p2partsinit_melt_here: her copy alone, as before.
+                ItemVolumeStep.CheckItemVolume();
+                std::printf("coop-georama: her parts menu's opening melts the bag here too (link tick %lld)\n", (long long) NetplayLinkTick());
             }
             g_own.menu = 2;
             g_own.menu_sent = false;
@@ -2156,7 +2495,7 @@ bool CoopGeoramaParkedPress(int player) {
     const long long tick = NetplayLinkTick();
 
     if (g_parked && NetplayLinkUp() && !CoopWorldsApart() && !NetplayCatchUnderWay() && mode == kTownMode && EdInteriorFlag == 0 && GameMode == ED_MODE_WALK &&
-        coop::TownPartnerShown(nullptr, nullptr) && change_time_event == 0 && !coop::PlayerInMenu(player)) {
+        coop::TownPartnerShown(nullptr, nullptr) && change_time_event == 0 && !coop::PlayerInMenu(player) && !CoopDayTransHoldsPlayer(player)) { // (coop-daytrans)
         g_parked = false;
         g_press_until = tick + 4;
         std::printf("coop-georama: player %d's parked Georama opens again by its Select at link tick %lld, landed\n", player, tick);

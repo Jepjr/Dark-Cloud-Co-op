@@ -1,0 +1,24 @@
+# port/src/ui/framework/surfaces.cpp from Chronicle's port/src/ui/framework/surfaces.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/ui/framework/surfaces.cpp
+base port/src/ui/framework/surfaces.cpp
+from 5ef216793c39f8bee9aed3a0285bb458decaecb6
+to 30c5019663e83683716b72b4ecb7311d9980302e
+@@ -18,0 +19,2
++bool NetplayMutated(const char *name); // Jep (co-op), coop-swapbtn: coop/netplay_test.cpp (the twin's switch)
++
+@@ -69,2 +71,3
+- c55944f49735e64e
+- 4a3acafbdfc6619e
++    CTexture      tex{};     /**< Engine texture descriptor. */
++    unsigned      tbp = 0;   /**< Host texture key. */
++    std::uint64_t stamp = 0; /**< Jep (co-op), coop-swapbtn: the registry's stamp of the entry made at tbp. */
+@@ -383,1 +386,4
+- 221c2d77be8fc122
++    // Jep (co-op), coop-swapbtn: the window's picture while its key holds the entry it made (buttons.cpp's plates, likewise).
++    static const bool key_live = NetplayMutated("plate_key_live");
++    if (it != cache.end() && it->second.tbp != 0 &&
++        (key_live ? PortKeyLive(it->second.tbp) : PortKeyStamp(it->second.tbp) == it->second.stamp)) {
+@@ -485,1 +491,2
+- 6cc75ff7c85aa881
++    entry.tbp = tbp;
++    entry.stamp = PortKeyStamp(tbp); // coop-swapbtn

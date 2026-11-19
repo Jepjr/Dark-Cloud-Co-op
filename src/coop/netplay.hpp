@@ -9,8 +9,8 @@
 // The co-op link (game.netplay 1 or 2): two copies of the game run the same co-op game in lockstep.
 // Every tick each copy reads its own controller (player 1's copy controller 1, player 2's controller
 // 2), sends it to the other over UDP and waits for the other's for the same tick, so both copies feed
-// the game the same two pads and simulate both players alike. Inputs take effect game.netplay_delay
-// ticks after they are read. Every second the two compare a checksum of the game's state and log a
+// the game the same two pads and simulate both players alike. Inputs take effect the input delay
+// (3 ticks to start, then following the round trip) after they are read. Every second the two compare a checksum of the game's state and log a
 // warning, and show one, on the first tick they differ.
 //
 // Menus: the game's menus read controller port 1. Normally that is player 1's pad, and player 2's pad
@@ -44,13 +44,25 @@ bool NetplayPartnerLinked();
 
 // coop-worlds: whether the link is up (a catch-up's replay and the lockstep alike), not merely configured.
 bool NetplayLinkUp();
+// coop-resyncmenu: the last mode end took a resync's state whose landing is a dungeon's floor menu (no floor to go on to), not yet
+// split there (CoopWorldsEntrancePad: every player their own menu); Taken marks it done. Cleared at every mode end.
+bool NetplayResyncAtMenu();
+void NetplayResyncAtMenuTaken();
+void NetplayResyncLandedOnFloor(); // coop-harnessfix: a debug start's resync went back onto the floor (no menu split owed)
+void NetplayResyncEntranceMerge(bool merge); // coop-rc2: the link's merge at a dungeon's entrance (its resync keeps the menu shared)
+// coop-joinload: this copy joined from its title and has loaded in from the host's game (apart, no link yet).
+bool NetplayJoinLoaded();
 bool NetplayStateLoadPending(); // coop-cavedoorfix: a state file still to be put back (the test hooks wait for it)
 
 // coop-partnerlog: the player this copy linked as (1 or 2) since its link first began, linked or apart; 0 before.
 int NetplayLinkPlayer();
 
-// coop-party: which player holds the game's menus (1 or 2) while the link is up, else 1.
-int NetplayMenuOwner();
+// coop-sendtarget: the profile name a player's lobby shows, by player number (1 up), "" none (draw only).
+std::string NetplayPlayerName(int player);
+// coop-areanotice (the developer 11-18: "show the profile name instead of the player number ... like it does when a player joins the lobby"):
+// the name every box, question and notice of ours shows for player n (1 up): its profile name (NetplayPlayerName), else "Player n"
+// as the lobby says an unnamed seat. DC_NETPLAY_MUTATE=names_by_number (twin): "Player n" always, as before.
+std::string NetplayShownName(int player);
 
 // The --input script's frame for this boot frame: frames since the first link with DC_NETPLAY_TEST_INPUT_FROM_LINK=1
 // (0 before it), else the boot frame.
@@ -61,6 +73,7 @@ void         NetplayTestInputMark(const char *event);
 
 // The menu presses' test clock (DC_COOP_MENUPRESS): ticks since the pair's free play began, -1 before.
 std::int64_t NetplayTestPressClock();
+int          NetplayTestEpoch(); // coop-resyncblack (tests)
 // coop-keydoor (tests): the tick the last catch-up's lockstep began on, alike on both copies (-1 before one); and this copy's
 // frame to path at the end of the next frame (as DC_COOP_MENUSHOTS writes its frames).
 std::int64_t NetplayTestLockstepFrom();
@@ -104,15 +117,35 @@ bool NetplayConfigured();
 // A joiner catching up to the host (game.netplay_catchup) with more of the host's pads held: its ticks run as fast as
 // the game can, not waiting for the next display boundary.
 bool NetplayCatchingUp();
+// coop-firsttick: this copy holds the whole of the host's state set, its apply due at the next frame start.
+bool NetplayStateSetDue();
 // A joiner replaying the host's pads, from the replay's tick 0 to the lockstep (waits for the next blob included).
 bool NetplayReplaying();
 // coop-atlamenu: a catch-up's ticks that step alike on both copies (the sender's from its state set's take, the taker's replay).
 bool NetplayCatchupStepsAlike();
+// coop-mergeload (tests): the link tick of the catch-up's state set on this copy (the host's take, the joiner's apply), -1 none yet.
+std::int64_t NetplayCatchupStateTick();
 // coop-floorsnap: a catch-up join under way on this copy, host or joiner (from the link's start to the lockstep).
 bool NetplayCatchUnderWay();
 bool NetplayCatchWaitsToWalk();
 bool NetplayMenuPad(int player, InputPadState &out); // coop-stage4 4c
+// coop-menushut: no link up, this copy's own player's controller (its own local menu's pad alone; false for any other player or linked)
+bool NetplayAloneMenuPad(int player, InputPadState &out);
+bool NetplayCameraPad(int port, InputPadState &out); // coop-wave3 part 2: a camera's own controller (netplay.cpp)
+std::int32_t NetplaySteer(int port); // coop-wave3: the steer row the step reads on a port this tick (kInputNoSteer: none)
 int  NetplayGamePadPlayer(); // coop-scriptmenus: whose agreed pad is the game's (port 0) this tick
+// coop-settings: the per-player options as the step reads them (the game pad's player's, every copy alike while linked together)
+bool CoopQuickSelectOn();
+bool CoopSwapKeepsLockOn();
+bool CoopQteAlwaysWin();
+int  CoopOptionPlayer(); // whose they are this tick
+bool CoopQuickSelectOnFor(int player);   // coop-p2controls: that player's own (their ring's), every copy alike while linked together
+bool CoopSwapKeepsLockOnFor(int player); // coop-p2controls
+bool CoopCharaQuickSelectOn();           // coop-dpadwheel: game.chara_quick_select of the stepped player (DunMoveChara)
+bool CoopCharaQuickSelectOnFor(int player); // coop-dpadwheel: that player's own (their co-op ring's D-pad Down)
+bool CoopMessagesFastFor(int player);       // coop-wave2: game.message_speed of that player's own talks (their row while linked together)
+bool CoopSharedMessagesFast(bool own);      // coop-wave2: game.message_speed of the shared windows (player 1's while linked together)
+void NetplayOwnOptionsTick(std::int64_t tick); // (netplay.cpp's link tick: this copy's own row sent when the table's differs)
 // coop-catchupdrop: a catch-up's pieces under way now (the sender's blob not yet all held, or the taker's last piece within
 // kCatchMovingMs); false while it waits on the other copy (a page request, a landing). The partner log goes then.
 bool NetplayCatchMoving();
@@ -170,6 +203,8 @@ bool NetplayTestWritePng(const char *path, const std::uint8_t *rgba, std::uint32
 void NetplayTestSeriesMark();
 // coop-localfix: the random state this copy's floor was built from (its presence carries it while apart).
 std::uint32_t NetplayFloorBuildRand();
+// coop-floorrand: player 1's session of the last link that came up (the same word on both copies of it); false before any link.
+bool NetplayLinkFloorSeed(std::uint32_t *seed);
 // coop-localfix: the dungeon and floor (0 up) this copy built and is on (its scene included); false elsewhere.
 bool NetplayFloorBuilt(int *map, int *floor);
 // coop-cutscenejoin: how many floors this copy has built (a count, to tell a build after some moment from an older one).
@@ -209,6 +244,8 @@ struct NetplayCostTotals {
 };
 NetplayCostTotals NetplayCosts();
 std::string NetplayTickPartsSay(); // coop-small1b: the netplay tick's dearest parts and the log writes since the last call
+void NetplayTickPart(const char *name); // coop-apartfps: a part of the netplay tick from here (a string literal)
+std::string NetplayTickPartsWindow(long long ticks); // coop-apartfps: the netplay tick's parts a tick over a tick-stats window
 
 // coop-localfix2 (Jep, 2026-10-26: "the catch up time is entirely hidden by the zone transition"): this copy arrived in a
 // town where the other stayed and is to take her state: its window holds black (its door's fade) until it has caught up.
@@ -244,6 +281,10 @@ void NetplayStopThreads();
 // coop-cand58 (tests, DC_NETPLAY_TEST_EXIT_HOLD_MS): says how many sends netplay's threads made after the stop.
 void NetplayExitSaySends();
 void NetplayDrawTitleJoin();
+// coop-p2boot part 2: the host under its first place's card: hears its windows, sends a window its checkpoint (never a link).
+void NetplayUnderCard();
+// coop-p2boot: the lobby's handed window before its first link: its title held black, the join's line alone on it.
+bool NetplayHandedTitleHeld();
 // coop-natsplit: why the last join from the title was given up, for 30 s after ("" otherwise): the menu's hint line shows it.
 const char *NetplayTitleNote();
 // Where the title's notice lines go (screen rows of the 640 x 480 2D layer): line 0 and the line under it, below the
@@ -261,6 +302,13 @@ void NetplayGoApart(const char *why, int mover = 0);
 // coop-apartsync: the other copy said it was quitting (its Leave), since the link last began: a link that went down without
 // it is a drop (the network, or the other copy stopped answering), not a player leaving.
 bool NetplayPeerQuit();
+// coop-hostquit (coop_worlds.cpp): apart, another copy's leaving heard (ended: the host's Quit Game, the session over for every
+// player: this copy goes to the title as a linked copy does on its quit's tick); or that player gone (its own quit, its game
+// closed, or no answer to the check-in and its connection closed): "<name> has left" and this copy plays on alone, as a dropped
+// link does (Close). Linked, a leaving's word on the worlds channel is taken as its Leave (NetplayPeerLeftWord).
+void NetplayPeerQuitApart(int player, bool ended, const char *why);
+void NetplayPeerGoneApart(int player, const char *why);
+void NetplayPeerLeftWord(int player, bool ended);
 
 // coop-quittitle (Jep's rule, 2026-11-10): Quit Game from the in-game menu. Whether this copy is in a netplay session (a link
 // started: hosting, joining, linked, apart or dropped), where the quit goes as a command (kCmdQuit, netplay_cmd.hpp) instead
@@ -306,6 +354,8 @@ int         NetplayActivePad();
 int         NetplayOwnPad();
 // coop-lobbyleave: a guest lobby's own controller this frame (the copy's player 2 pad, as its join reads it), for its seat.
 InputPadState NetplayLobbyOwnPad();
+// coop-optionspad: the controller this copy's own screens read (Options, the menu pointer): its player's own, with this window's keys.
+InputPadState NetplayScreenPad();
 // The host's lobby keeps this copy on one controller (pad, from its open), not the one client's controller last pressed,
 // which another local seat's controller took in the lobby (LAN pack 7, 2026-11-01); -1 (the lobby closed back to the menu)
 // hands it back. A started game keeps it.
@@ -340,6 +390,8 @@ bool        NetplayQaStopSeen();
 void        NetplayLobbyLeaveJoin(const char *note);
 // coop-worlds: show text as that notice (the other player's news while apart).
 void NetplayShowNotice(const char *text);
+// coop-swapcombo part 4 (tests): this frame to path once it ends (the menu shots' writer).
+void NetplayTestShotRequest(const char *path);
 // coop-floorgate: the game flag floor `floor` (0 up) of dungeon `map` sets as its opening scene plays (MarkFloorScenesSeen's
 // list), or -1 for a floor with none.
 int NetplayFloorSceneFlag(int map, int floor);

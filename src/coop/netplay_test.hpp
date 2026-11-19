@@ -46,6 +46,8 @@
 // Set alike on both copies but for DC_NETPLAY_PERTURB and DC_NETPLAY_MUTATE. NetplayTick calls this
 // as each tick starts.
 void NetplayTestTick(std::int64_t tick);
+// coop-mergeload (tests): DC_COOP_TEST_P1_SWAP_IN_CATCHUP, at every frame's link tick, the catch-up's included.
+void NetplayTestSwapInCatchup(std::int64_t tick);
 // coop-fx51b: this copy's catch-up reached its lockstep on that link tick, and a compare of that tick was in sync
 // (DC_NETPLAY_PERTURB_FLOORSLOTS=lockstep).
 void NetplayTestLockstep(std::int64_t tick);
@@ -82,3 +84,4 @@ void NetplayUnitTick();
 // the draw code still runs; said once on stderr. Off in play.
 bool NetplayTestNoDraw();
 bool NetplayTestNoDrawUploads(); // (false under the twin DC_QA_DRAW_MUTATE=skip_nodraw_uploads)
+bool NetplayTestNoDrawHold();    // coop-owed1112: the join frame hold asked under no-draw too (false under DC_NETPLAY_MUTATE=skip_nodraw_hold)

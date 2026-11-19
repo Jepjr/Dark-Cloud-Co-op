@@ -15,8 +15,9 @@ bool Allowed(NetSession from, NetSession to) {
 
     switch (from) {
         case S::Title: return to == S::Hosting || to == S::Joining;
-        case S::Hosting: return to == S::Linked || to == S::Title;
-        case S::Joining: return to == S::Linked || to == S::Title;
+        // coop-joinload (Jep 11-11): a join loads in apart (the joiner in the town of the world's map, a save load's spot): no link first.
+        case S::Hosting: return to == S::Linked || to == S::Apart || to == S::Title;
+        case S::Joining: return to == S::Linked || to == S::Apart || to == S::Title;
         case S::Linked: return to == S::Apart || to == S::Dropped || to == S::Title;
         case S::Apart: return to == S::Linked || to == S::Dropped || to == S::Rejoining || to == S::Title;
         case S::Dropped: return to == S::Linked || to == S::Rejoining || to == S::Apart || to == S::Title;

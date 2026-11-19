@@ -1,0 +1,383 @@
+# port/src/game/fishing.cpp from Chronicle's port/src/game/fishing.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/fishing.cpp
+base port/src/game/fishing.cpp
+from 6a44be31c3cb0ccf358434ed2429aacc721678ef
+to baf7a0b284b93c6f5f86e035d064d0b9cdda7980
+@@ -30,0 +31,11
++// coop-pondfish (the developer 11-19: the fish in the pond synced): in a co-op game each town's pond is one shared pond of 6 or 7 fish, always
++// in the water, every fisher fishing it (port/src/coop/coop_eventslots.cpp, CoopPond*).
++bool CoopPondExit();                // FishingExit: the pond's fish stay (true: not cleared)
++bool CoopPondKeepsFish();           // FishingInitFish: the pond's fish swim on where they are
++bool CoopPondFishMine(int fish_no); // this fish's bite is at the running fisher's hook, or it is on their line
++bool CoopPondFishReset(int fish_no); // FishingInitFishStatus: this fish is the running fisher's to calm (on their line)
++void CoopPondOnLine(int fish_no);   // the running fisher hooked it (or holds it up): on their line till caught or gone
++void CoopPondRecord(float *hook, int food, float radius); // FishingStepFish: the running fisher's hook and bait this tick
++bool CoopPondSteps();               // FishingStepFish: the pond steps its own fish once a tick (true: not here)
++bool CoopPondDrawsFish();           // FishingDrawFish: the pond draws its own fish on every screen (true: not here)
++
+@@ -99,0 +111,1
++int           FishSlots = 6; // coop-pondfish: the fish slots of Fish (retail's 6; a co-op pond's 8)
+@@ -141,23 +153,3
+- a386b4c4ba8d1b1c
+- 4a68d5792531b03e
+- e3b0c44298fc1c14
+- f2f95471998d4500
+- e88107793307e9ae
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 8fa2581d0e715ce2
+- 67cfe729c4aa16ca
+- a585a596186d1a17
+- e3b0c44298fc1c14
+- 1aea9c309137334b
+- 68a1ab19db847b98
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 8d8ff3dc284af4ed
+- 68a1ab19db847b98
+- 28d86778615f6af4
+- e3b0c44298fc1c14
+- 318d42016b776e4a
+- 15da0eeb6b9b665b
+- 28d86778615f6af4
+- e3b0c44298fc1c14
++// coop-pondfish: retail's roll of one fish's kind for a fishing spot (FishingLoadFish's, its rand calls in its order), also a co-op
++// pond's fish rolled again in its slot.
++int FishingRollKind(int spot) {
+@@ -183,29 +175,2
+- 62b0f76066047947
+- cdadde9d83e1a657
+- e3b0c44298fc1c14
+- 11adb25796dac689
+- 1cace6518b28e53f
+- d839078236e88101
+- e3b0c44298fc1c14
+- 850071e3ab56cac4
+- 6cde8edaaebb9307
+- e91ab75adb058935
+- 19e472dffc802492
+- 36f8db7c40e62b0f
+- a0b9ed8d21b4c94b
+- 808df30b9bf503c1
+- a14f9e94a66aab8f
+- a0b9ed8d21b4c94b
+- 8de6d7e1c3ce5a24
+- 0c91b565d4ec3ed6
+- a0b9ed8d21b4c94b
+- 5383714645c6200b
+- a8e518e4d293616d
+- a0b9ed8d21b4c94b
+- 784066da4f44bf56
+- a0b9ed8d21b4c94b
+- 0bf0a088a649c22d
+- e3b0c44298fc1c14
+- 140fd7dfb9862915
+- e8e21b5b7f40e838
+- 664c7c3a6d1e0e89
++    int kind = -1;
+~188 d839078236e88101|    |
+@@ -213,1 +178,4
+- 1d46a3d93b4c7c72
+~190 850071e3ab56cac4|    |
++        case 0:
+~192 e91ab75adb058935|            |
++                case 0:
+@@ -215,7 +183,13
+- 7b29b1444d394998
+- b03f05f3815dc28f
+- 5ca11e7a958c709c
+- 05e1e666094f7aec
+- 4c1f83601ff06db2
+- f51b4e52f133323a
+- 0bf0a088a649c22d
++                    break;
++                case 1:
++                    kind = 2;
++                    break;
++                case 2:
++                    kind = 6;
++                    break;
++                case 3:
++                    kind = 7;
++                    break;
++                default:
++                    break;
++            }
+@@ -223,1 +197,12
+- 140fd7dfb9862915
++            break;
++        case 1: {
+~211 664c7c3a6d1e0e89|            |
++
+~213 1d46a3d93b4c7c72|            |
++                kind = 1;
+~215 7b29b1444d394998|            |
++                kind = 4;
+~217 5ca11e7a958c709c|            |
++                kind = 9;
+~219 4c1f83601ff06db2|            |
++                kind = 10;
+@@ -225,7 +210,7
+- 600f8fd1f1dcdc5e
+- 9e433db8ff86a691
+- b1ef57210e9a4a82
+- f573a184b81e6082
+- 1f219309856310f1
+- 7ef54c750eeb86f8
+- b8d1918176757f79
++
++            break;
++        }
++        case 2:
+~226 9e433db8ff86a691|            |
+~227 b1ef57210e9a4a82|                |
++                    kind = 17;
+@@ -233,1 +218,4
+- 59dee0c68729defd
++                    kind = 5;
++                }
++            } else {
+~233 59dee0c68729defd|                |
+@@ -235,3 +223,3
+- 19ac63a39026ee6d
+- a14f9e94a66aab8f
+- b8d1918176757f79
+~235 19ac63a39026ee6d|                |
++                    kind = 2;
++                }
+@@ -239,3 +227,3
+- ce8e89a471de11b2
+- 6d6ff38445ec8a13
+- b8d1918176757f79
+~239 ce8e89a471de11b2|                |
++                    kind = 4;
++                }
+@@ -243,3 +231,2
+- 0b8ff61d28effbc1
+- 0c91b565d4ec3ed6
+- b8d1918176757f79
+~243 0b8ff61d28effbc1|                |
++                    kind = 6;
+@@ -246,0 +234,1
++            }
+@@ -248,3 +236,15
+- 140fd7dfb9862915
+- 8d2b661aada6cb30
+- 39090b87f0b62729
++            break;
++        case 3: {
+~250 39090b87f0b62729|            |
++
+~252 decaf77beba9ef60|            |
++                kind = 0;
+~254 10c025aee222a798|            |
++                kind = 3;
+~256 1d231dbb066db39e|            |
++                kind = 11;
+~217 5ca11e7a958c709c|            |
++                kind = 12;
++            } else {
++                kind = 13;
++            }
+@@ -252,8 +252,6
+- decaf77beba9ef60
+- fc3413e32a81b9f0
+- 10c025aee222a798
+- 371a1c69b6c3760a
+- 1d231dbb066db39e
+- e951d6e32dc0c665
+- 5ca11e7a958c709c
+- cca674d04e31b513
++            break;
++        }
++        case 4:
+~226 9e433db8ff86a691|            |
+~227 b1ef57210e9a4a82|                |
++                    kind = 17;
+@@ -261,1 +259,1
+- 2dc99d92648ba029
++                    kind = 5;
+@@ -262,0 +261,2
++            } else {
+=250 39090b87f0b62729
+@@ -264,19 +264,6
+- 140fd7dfb9862915
+- 86afdf70a95436e8
+- e4fe47e218a72bac
+- 9e433db8ff86a691
+- b1ef57210e9a4a82
+- f573a184b81e6082
+- 1f219309856310f1
+- 7ef54c750eeb86f8
+- b8d1918176757f79
+- 66d7035bd9d4360f
+- 6944918f874bb7cd
+- e3b0c44298fc1c14
+- b81af47c6a4373d1
+- 21329098f002fe66
+- fc5675019037737e
+- 8e42bf85c1304718
+- f5796980e63c013b
+- 396522b855e4e9c7
+- b8d1918176757f79
+~276 b81af47c6a4373d1|                |
++                    kind = 14;
+=215 7b29b1444d394998
++                    kind = 15;
+=219 4c1f83601ff06db2
++                    kind = 16;
+@@ -283,0 +271,1
++            }
+@@ -285,4 +273,37
+- 140fd7dfb9862915
+- d1cc337d9eec6b74
+- 140fd7dfb9862915
+- 2a44168318e224e1
++            break;
++        default:
++            break;
++    }
++
++    return kind;
++}
++
+=141 a386b4c4ba8d1b1c
++    FishSlots = 6;
+=142 4a68d5792531b03e
++
+=144 f2f95471998d4500
+=145 e88107793307e9ae
++    }
++
+=148 8fa2581d0e715ce2
+=149 67cfe729c4aa16ca
++    FishNum = 5;
++
+=152 1aea9c309137334b
++        FishNum = 4;
++    }
++
+=156 8d8ff3dc284af4ed
++        FishNum = 4;
++    }
++
+=160 318d42016b776e4a
++        FishNum = 5;
++    }
++
+=183 62b0f76066047947
+=184 cdadde9d83e1a657
++
+=186 11adb25796dac689
++        int kind = FishingRollKind(spot);
+@@ -353,0 +375,1
++    FishSlots = 6; // coop-pondfish
+@@ -365,2 +387,4
+- d1a5aaa3aeeb1ee8
+- c91245b56eae9b5f
++    if (!CoopPondExit()) { // coop-pondfish: the pond's fish stay in the water
++        for (int i = 0; i < FishSlots; i++) {
+~366 c91245b56eae9b5f|            |
++        }
+@@ -448,0 +473,4
++    if (CoopPondKeepsFish()) { // coop-pondfish: the pond's fish swim on where they are
++        return;
++    }
++
+@@ -465,1 +493,1
+- d1a5aaa3aeeb1ee8
++    for (int i = 0; i < FishSlots; i++) {
+@@ -469,0 +498,4
++        if (!CoopPondFishMine(i)) { // coop-pondfish: a bite at another fisher's hook, or a fish on another's line
++            continue;
++        }
++
+@@ -491,1 +523,1
+- 1d3db4ff1bf26419
++    if (fish_no >= 0 && fish_no < FishSlots && CoopPondFishMine(fish_no)) { // coop-pondfish
+@@ -496,0 +529,1
++            CoopPondOnLine(fish_no); // coop-pondfish
+@@ -529,1 +562,1
+- 1d3db4ff1bf26419
++    if (fish_no >= 0 && fish_no < FishSlots && CoopPondFishMine(fish_no)) { // coop-pondfish
+@@ -535,0 +569,1
++            CoopPondOnLine(fish_no); // coop-pondfish
+@@ -553,1 +587,5
+- de9062d02467e6b6
++        for (int i = 0; i < FishSlots; i++) {
++            if (!CoopPondFishReset(i)) { // coop-pondfish: a fish not on this fisher's line keeps what it does
++                continue;
++            }
++
+@@ -577,0 +616,6
++    {
++        const int food = (esa_type < 0 || EsaFrame == nullptr) ? -1 : esa_type;
++
++        CoopPondRecord(hook, food, food < 0 ? 0.0f : (DebugMode ? 100000000.0f : esa_info[esa_type].radius)); // coop-pondfish
++    }
++
+@@ -583,1 +627,5
+- d1a5aaa3aeeb1ee8
++    if (CoopPondSteps()) { // coop-pondfish: the pond steps them once a tick, for every fisher's hook
++        return;
++    }
++
++    for (int i = 0; i < FishSlots; i++) {
+@@ -606,0 +655,4
++    if (AngleFish == nullptr && CoopPondDrawsFish()) { // coop-pondfish: the pond draws its fish on every screen
++        return;
++    }
++
+@@ -620,1 +672,1
+- ae330f07b19dca92
++            for (int i = 0; i < FishSlots; i++) {
+@@ -1171,0 +1224,49
++
++// coop-eventslots (Jep's 11-11 item 1: each player fishes on their own): every global of the one fishing (the line, hook and float,
++// the bait, the fish, the rod), as ranges, so each fisher's set is exchanged with the live one around their step and draw
++// (port/src/coop/coop_eventslots.cpp).
++void FishingStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++    add(static_cast<void *>(&draw_under_water), sizeof(draw_under_water), "draw_under_water", context);
++    add(static_cast<void *>(&distp), sizeof(distp), "distp", context);
++    add(static_cast<void *>(&WaterLevel), sizeof(WaterLevel), "WaterLevel", context);
++    add(static_cast<void *>(&GroundLevel), sizeof(GroundLevel), "GroundLevel", context);
++    add(static_cast<void *>(&UkiGroundLevel), sizeof(UkiGroundLevel), "UkiGroundLevel", context);
++    add(static_cast<void *>(&HookGroundLevel), sizeof(HookGroundLevel), "HookGroundLevel", context);
++    add(static_cast<void *>(&LineGroundLevel), sizeof(LineGroundLevel), "LineGroundLevel", context);
++    add(static_cast<void *>(&EsaFrame), sizeof(EsaFrame), "EsaFrame", context);
++    add(static_cast<void *>(&esa_type), sizeof(esa_type), "esa_type", context);
++    add(static_cast<void *>(&HookFrame), sizeof(HookFrame), "HookFrame", context);
++    add(static_cast<void *>(&UkiFrame), sizeof(UkiFrame), "UkiFrame", context);
++    add(static_cast<void *>(&fishing_texb), sizeof(fishing_texb), "fishing_texb", context);
++    add(static_cast<void *>(&fish_texb), sizeof(fish_texb), "fish_texb", context);
++    add(static_cast<void *>(&esa_texb), sizeof(esa_texb), "esa_texb", context);
++    add(static_cast<void *>(&Fish), sizeof(Fish), "Fish", context);
++    add(static_cast<void *>(&AngleFish), sizeof(AngleFish), "AngleFish", context);
++    add(static_cast<void *>(&BattleFish), sizeof(BattleFish), "BattleFish", context);
++    add(static_cast<void *>(&FishNum), sizeof(FishNum), "FishNum", context);
++    add(static_cast<void *>(&FishSlots), sizeof(FishSlots), "FishSlots", context); // coop-pondfish
++    add(static_cast<void *>(&cpoly), sizeof(cpoly), "cpoly", context);
++    add(static_cast<void *>(&cpoly_num), sizeof(cpoly_num), "cpoly_num", context);
++    add(static_cast<void *>(&set_hook_pos), sizeof(set_hook_pos), "set_hook_pos", context);
++    add(static_cast<void *>(&set_uki_pos), sizeof(set_uki_pos), "set_uki_pos", context);
++    add(static_cast<void *>(&pull_hook), sizeof(pull_hook), "pull_hook", context);
++    add(static_cast<void *>(&fishing_rect), sizeof(fishing_rect), "fishing_rect", context);
++    add(static_cast<void *>(&fish_rect), sizeof(fish_rect), "fish_rect", context);
++    add(static_cast<void *>(&UkiFrameTop), sizeof(UkiFrameTop), "UkiFrameTop", context);
++    add(static_cast<void *>(&Rod), sizeof(Rod), "Rod", context);
++    add(static_cast<void *>(&point), sizeof(point), "point", context);
++    add(static_cast<void *>(&old_p), sizeof(old_p), "old_p", context);
++    add(static_cast<void *>(&velo), sizeof(velo), "velo", context);
++    add(static_cast<void *>(&hookp), sizeof(hookp), "hookp", context);
++    add(static_cast<void *>(&hookop), sizeof(hookop), "hookop", context);
++    add(static_cast<void *>(&hookv), sizeof(hookv), "hookv", context);
++    add(static_cast<void *>(&hook_dist), sizeof(hook_dist), "hook_dist", context);
++    add(static_cast<void *>(&ukip), sizeof(ukip), "ukip", context);
++    add(static_cast<void *>(&ukiop), sizeof(ukiop), "ukiop", context);
++    add(static_cast<void *>(&ukiv), sizeof(ukiv), "ukiv", context);
++    add(static_cast<void *>(&uki_dist), sizeof(uki_dist), "uki_dist", context);
++    add(static_cast<void *>(&rod_top), sizeof(rod_top), "rod_top", context);
++    add(static_cast<void *>(&fishhook), sizeof(fishhook), "fishhook", context);
++    add(static_cast<void *>(&uki), sizeof(uki), "uki", context);
++}
++

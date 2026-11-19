@@ -22,6 +22,13 @@ unsigned long NetplayLocalSpawnToLobby(int player1_pad, int seat, char *why, uns
 // and as the seat's identity (DC_NETPLAY_PLAYER_ID: its profile and member, the lobby's LateJoin).
 unsigned long NetplayLocalSpawnHanded(int player1_pad, int pad, std::uint64_t identity, char *why, unsigned long why_size);
 
+// coop-rehost (Jep's rc3 playtest, 2026-11-13): every window this copy started for a player on this PC (the three above), closed
+// now if it still runs: the host's session ended (its Quit Game), and with it the seats its lobby handed out; a later lobby
+// starts its own. Without this her window stayed at its title, its join waiting for a host whose lobby was gone, holding her
+// controller. Logs each one ("netplay: local: seat window (pid N) closed: why"); returns how many it closed.
+// DC_NETPLAY_MUTATE=local_windows_kept (l-rehost's twin): left running, as before.
+int NetplayLocalCloseWindows(const char *why);
+
 // coop-lobbyslots (Jep's pack 7 playtest, 2026-11-02: P1's pad played both): a controller named by its device, which every
 // copy on this PC agrees on (netplay.cpp): pad's device ("" none known), and this copy's number for a device (-1 not open).
 // Player 2's copy is handed both (DC_NETPLAY_LOCAL_PAD_DEVICE, DC_NETPLAY_LOCAL_CLAIM_DEVICE) beside the numbers.

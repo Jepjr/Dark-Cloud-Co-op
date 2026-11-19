@@ -2,8 +2,10 @@
 
 #include "coop/game_ns.hpp"
 #include "coop/coop_pause.hpp"
+#include "coop/coop_combat.hpp" // coop-downmenu: DownTestTick
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -61,8 +63,16 @@ int   g_atla_drawn = 0;
 const char *const kNames[] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
 
 // On a floor under control (the game's menu beside the world counts: its task is play).
+// coop-menuaudit (the menu audit: Start in every task): player 1's first-person view (R2, GAME_TASK_EYE_CAMERA) is his control
+// of the floor too, and the world runs on in it for player 2 (CoopStep), but only play counted here. So there his Start reached
+// retail's own pause (movechara's eye case: GAME_TASK_PAUSE, driveStepHold and the monsters' and effects' holds), which stops
+// the world for every player: her character and the monsters stood still till his Start again. And her own pause ended as his
+// view went first-person ("pauses end"). Now the view counts: his Start is his own pause there as in play, hers goes on.
+// DC_COOP_MUTATE=eye_pause_retail (twin): play only, as before.
 bool OnFloor() {
-    return PauseOn() && mode == kDungeonMode && gameTask == GAME_TASK_PLAY && BtEventMode == 0 && UserStatus != nullptr;
+    const bool control = CoopPlainPlay() || (CoopEyePlay() && !Mutated("eye_pause_retail"));
+
+    return PauseOn() && mode == kDungeonMode && control && BtEventMode == 0 && UserStatus != nullptr;
 }
 
 bool Down(int player) {
@@ -107,8 +117,8 @@ void Hold(bool hold) {
     CEffectHold = hold ? 1 : 0;
     PlayTimeCountFlag(hold ? 0 : 1);
     std::fprintf(stderr, "coop-pause: the world %s (P1 %s, P2 %s)\n", hold ? "holds" : "runs",
-                 g_pause.paused[0] ? "paused" : PlayerPresenting(1) ? "in his chest" : InOwnPrompt(1) ? "in his prompt" : InMenu(1) ? "in his menu" : CoopWorldsQuestionHolds(0) ? "in a question" : "playing",
-                 !PartnerInZone() ? "not here" : g_pause.paused[1] ? "paused" : PlayerPresenting(2) ? "in her chest" : InOwnPrompt(2) ? "in her prompt" : InMenu(2) ? "in her menu" : CoopWorldsQuestionHolds(1) ? "in a question" : "playing");
+                 g_pause.paused[0] ? "paused" : PlayerPresenting(1) ? "in his chest" : InOwnPrompt(1) ? "in his prompt" : InMenu(1) ? "in his menu" : ElementRingOpen(1) ? "in his element ring" : CoopWorldsQuestionHolds(0) ? "in a question" : "playing",
+                 !PartnerInZone() ? "not here" : g_pause.paused[1] ? "paused" : PlayerPresenting(2) ? "in her chest" : InOwnPrompt(2) ? "in her prompt" : InMenu(2) ? "in her menu" : ElementRingOpen(2) ? "in her element ring" : CoopWorldsQuestionHolds(1) ? "in a question" : "playing");
 }
 
 // Test hook (DC_COOP_PAUSEHIT=P:T:DAMAGE): at T ticks of the menu presses' clock (netplay's test hook), a hit
@@ -229,12 +239,21 @@ void TestWake() {
         return;
     }
     const float *beside = player == 1 ? CharaMain.pos : g_partner.pos;
+    // coop-p2controls3: D ahead of the player's heading, where the game's lock-on looks (SetNearLockOnTarget takes only a monster in
+    // front), as both players' lock-on is the game's now; it was D east of them, which her own lock-on took in any direction.
+    float        rotation[4] = {};
+
+    if (player == 1) {
+        CharaMain.frame->GetRotation(rotation);
+    } else {
+        g_partner.chara->frame->GetRotation(rotation);
+    }
 
     for (int i = 0; i < 16; i++) {
         if (NowMonstorUnit->monster[i].state != 1 || NowMonstorUnit->monster[i].hp <= 0) {
             continue;
         }
-        float at[4] = {beside[0] + (float) distance, beside[1], beside[2], 1.0f};
+        float at[4] = {beside[0] + (float) distance * std::sin(rotation[1]), beside[1], beside[2] + (float) distance * std::cos(rotation[1]), 1.0f};
 
         NowMonstorUnit->chara[i][0].SetPosition(at);
         NowMonstorUnit->monster[i].state = 2;
@@ -243,6 +262,37 @@ void TestWake() {
     }
     std::printf("coop-pause: test: no sleeping monster to wake\n");
 }
+// Test hook (DC_COOP_TEST_MOTION_TRACE=1, coop-pausemotion): every 10 ticks of the press clock, each player body's motion and its time,
+// then each awake monster's (and whether the unit is paused).
+void TestMotionTrace() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_MOTION_TRACE");
+    const long        now = NetplayTestPressClock();
+
+    if (!on || NowMonstorUnit == nullptr || now < 0 || now % 10 != 0) {
+        return;
+    }
+    CCharacter *bodies[2] = {&CharaMain, g_partner.chara};
+
+    for (int p = 0; p < 2; p++) {
+        int             index = -1, set = 0;
+        tagMOTION_TYPE *motion = bodies[p] != nullptr && bodies[p]->motion_no >= 0 ? bodies[p]->GetMotionParam(bodies[p]->motion_no, &index, nullptr, nullptr, &set) : nullptr;
+
+        std::printf("coop-pausemotion: clock %ld held %d player %d motion %d time %.3f\n", now, (int) g_pause.held, p + 1,
+                    bodies[p] != nullptr ? bodies[p]->motion_no : -1, motion != nullptr ? motion->state.time : -1.0f);
+    }
+    for (int i = 0; i < 16; i++) {
+        if (NowMonstorUnit->monster[i].state != 2) {
+            continue;
+        }
+        CCharacter     &chara = NowMonstorUnit->chara[i][0];
+        int             index = -1, set = 0;
+        tagMOTION_TYPE *motion = chara.motion_no >= 0 ? chara.GetMotionParam(chara.motion_no, &index, nullptr, nullptr, &set) : nullptr;
+
+        std::printf("coop-pausemotion: clock %ld held %d unit paused %d monster %d motion %d time %.3f\n", now, (int) g_pause.held,
+                    (int) NowMonstorUnit->paused, i, chara.motion_no, motion != nullptr ? motion->state.time : -1.0f);
+    }
+}
+
 // Once per pause: which picture it drew ("coop-pause: drew the retail|caption pause").
 void LogPauseDraw(const char *kind) {
     static int last = -1;
@@ -257,7 +307,7 @@ void LogPauseDraw(const char *kind) {
 } // namespace
 
 bool PauseOn() {
-    return MenusOn() && !MenuPanelOn();
+    return MenusOn();
 }
 
 void PauseTick(const InputPadState &one_in, const InputPadState &two_in) {
@@ -309,12 +359,30 @@ void PauseTick(const InputPadState &one_in, const InputPadState &two_in) {
     TestHit();
     TestAtla();
     TestWake();
+    TestMotionTrace();
+    DownTestTick(); // coop-downmenu: its test hooks
     // coop-pt1111d: player 1 in his own prompt is out of harm as his presentation keeps him (the world's step reads it next).
     if (InOwnPrompt(1)) {
         BtActStatus.invincible_frames = std::max<int>(BtActStatus.invincible_frames, 2);
     }
     Hold(PauseZoneHeld() && !FullMenuLive());
     PresentTestTick(g_pause.held); // coop-opt7: test hook
+}
+
+// coop-pausemotion (the developer's rc4 playtest: "if both players open the menu, enemies still continue their animations even though they're
+// frozen ... one that's walking will walk in place, and one that's in the middle of an attack animation will finish it"): a monster's
+// motion steps in its draw (CMonstorUnit::DrawMonstor: CCharacter::Step), and the draw holds it only while the unit is paused
+// (SetMotion(motion_no, 1): speed 0), which the unit's own tick step sets (CMonstorUnit::Step(pause != 0)). Retail's pause ticks
+// GAME_TASK_PAUSE through MoveChara's motionDrive, whose Step(driveStepHold | CMonUnitHold) pauses the unit; the world held beside
+// local menus (coop_fullmenu's WorldStep) leaves the world's tick out and only draws, so the unit was never paused and every monster's
+// draw stepped its motion: a walk looped in place, a swing played out. Here the held world's tick gives the unit retail's paused step
+// (CheckViewLevel and the pause, nothing else), on every copy alike (the hold is the lockstep's); the first running step after it
+// restarts their motions as retail's resume does. DC_COOP_MUTATE=held_motions_run (twin): no step, as before.
+void PauseHeldWorldStep() {
+    if (mode != kDungeonMode || BtEventMode != 0 || BtAllDrawFlag == 0 || NowMonstorUnit == nullptr || Mutated("held_motions_run")) {
+        return;
+    }
+    NowMonstorUnit->Step(1);
 }
 
 bool PausePlayer(int player) {
@@ -335,14 +403,16 @@ bool PauseZoneHeld() {
     // paused in any mix holds the world (his chest and her menu hold it; his chest while she walks does not). DC_COOP_MUTATE=
     // present_runs (twin): a presentation never counts.
     const bool presents_count = !Mutated("present_runs");
-    bool       one = g_pause.paused[0] || InMenu(1) || CoopWorldsQuestionHolds(0) || (presents_count && PlayerPresenting(1)) || InOwnPrompt(1);
+    // coop-p2controls3 (Jep 11-17): a player's element ring is a menu of their own, so a pause state as their menu is.
+    bool       one = g_pause.paused[0] || InMenu(1) || CoopWorldsQuestionHolds(0) || (presents_count && PlayerPresenting(1)) || InOwnPrompt(1) ||
+               ElementRingOpen(1);
     // coop-pt1106-lockup (Jep, 2026-11-06: a joiner is never made to wait; x-fixture-join-hostmenu-hit): g_partner.visible comes from the world's own
     // step, so with a menu carried across the join the hold kept it false and the hold stood: the joiner landed in a world held till he closed
     // it, the opener out of all harm. Linked in the lockstep the partner is here, on one tick on both copies. DC_COOP_MUTATE=join_menu_holds_world (twin): as before.
     const bool joined = NetplayLinkUp() && !CoopWorldsApart() && NetplayTestLockstepFrom() >= 0 && NetplayLinkTick() >= NetplayTestLockstepFrom() &&
                         !Mutated("join_menu_holds_world");
     bool two = !(PartnerInZone() || joined) || g_pause.paused[1] || InMenu(2) || CoopWorldsQuestionHolds(1) || (presents_count && PlayerPresenting(2)) ||
-               InOwnPrompt(2);
+               InOwnPrompt(2) || ElementRingOpen(2);
 
     // coop-localfix (Jep, 2026-10-26: "both players being in the triangle menu didnt pause the game in the dungeon"):
     // every player of the zone in a menu holds it too, as one player's menu does in the game alone; a pause was needed
@@ -458,7 +528,7 @@ void PresentationWorldRuns() {
     static int said = -1;
     const bool presentation = PresentationTask();
     const bool revive = gameTask == GAME_TASK_REVIVE_WAIT || gameTask == GAME_TASK_REVIVE_DONE;
-    const bool drink = gameTask == GAME_TASK_PLAY && BtActStatus.action_on == 3;
+    const bool drink = CoopPlainPlay() && BtActStatus.action_on == 3;
 
     if (mode != kDungeonMode || BtEventMode != 0 || !(presentation || revive || drink) || !PartnerInZone() || g_pause.held ||
         Mutated("chestworld")) {

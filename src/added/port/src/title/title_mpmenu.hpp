@@ -29,6 +29,9 @@ int TitleMpRows();
 void TitleMpEnter();
 // Whether a submenu is up (it owns the pad and the pointer).
 bool TitleMpOpen();
+// coop-rehost: the title entered from the game (TitleInit): a submenu kept from the pick that started the game (Continue's,
+// for the load screen's Back) is dropped, so hosting again picks Host again and its lobby opens.
+void TitleMpTitleEntered();
 // coop-lobby: the host left the lobby the save's pick opened: the menu comes back on Host's (or Local's) Start / Continue.
 void TitleMpFromLobby();
 // The submenu a pick started the game from, closed once the title has faded out (it stays up for the pick's flash);

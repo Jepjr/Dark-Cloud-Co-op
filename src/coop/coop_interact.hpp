@@ -13,6 +13,7 @@ namespace dc::game {
 class CDungeonEventData;
 class CCameraFollow;
 class CFrame;
+class CCharacter;
 } // namespace dc::game
 
 namespace coop {
@@ -59,7 +60,10 @@ void LogFloorGateKey();
 bool OpenKeyPickFor(int player, CDungeonEventData *state);
 bool KeyPickOpenFor(int player);
 bool StepKeyPickFor(int player, const InputPadState &pad);
+// coop-p2actions: what the player held as their picker closed (the press that closed it), kept from their game input until let go.
+std::uint16_t KeyPickHeldAfter(int player);
 void KeyPickResetForSession();
+void KeyPickEndRunsForQuit(); // coop-xiaogap2: the session over (Quit Game): every run off, player 1's too
 // coop-keydoor: the key doors opened beside the game (coop_interact.cpp) step on, each tick on a floor, from CoopStep.
 void KeyDoorTick();
 // coop-skeldoor: a key door refusing player's pick plays retail's refusal on that player, who stands still meanwhile (Walk
@@ -110,6 +114,32 @@ float PartnerLightDrawn(); // her Atla's light's rate on her body as last drawn 
 bool OpenChestPrompt(int player, int active, int entry_no);
 bool OpenGatePrompt(int player, CDungeonEventData *gate);
 bool CrossMessagePrompt(int player, int script_no);
+bool ScriptMessagePrompt(int player, int mes); // coop-choosing: a door's script message beside the game, its user's screen only
+bool ScriptChoicePrompt(int player);           // coop-choosing: that message as its question (the script set its cursor)
+int  ScriptPromptChoice(int player);           // coop-choosing: the question's answer (0 yes, 1 no, -1 none yet)
+bool ScriptPromptTestAnswer(int player, int row); // a test hook's answer to it (x-back-half -Leave)
+// coop-choosing (ura, the back half of a floor): a player's use of a back-half door beside the game; the unlock table.
+bool UraDoorStart(int player, CDungeonEventData *state);
+bool CharaSpotStart(int player, CDungeonEventData *state, int member); // coop-xiaogap: a character spot's script beside the game, as its user
+bool CharaSpotHis(int script_no); // coop-xiaogap: player 1's Cross at a character spot: the gap gate, else its program beside the game
+// coop-xiaogap2: the gap's cutscene beside the game: her real jump on her body on every copy (SpotJumpPoseFor, before the body's
+// step: motiondrive.cpp for player 1, the partner's step for player 2), the camera rig on the jumper's copy for its draw alone
+// (SpotJumpCamera in CoopViewChoose; SpotJumpViewEnd puts the play projection back after the draw).
+void           SpotJumpPoseFor(int player, CCharacter *body);
+CCameraFollow *SpotJumpCamera();
+bool           SpotJumpCameraOn();
+void           SpotJumpViewEnd();
+int            SpotJumpHudY(int y, bool map_shown); // the HUD's place for this draw (coop_fullmenu.cpp FullMenuHudY)
+// coop-gapmark: whether an interaction mark ("!", which: whose, for the trace) is drawn on this copy now: none through this copy's
+// player's own scene (ViewPrivateScene). Draw only.
+bool           InteractMarkShown(const char *which);
+bool UraDoorStartHis(int script_no);
+void UraOpenTick();
+void UraOpenFromPeer(int dungeon, int floor, int script, int item);
+unsigned char *UraOpenBytes(std::size_t *size);
+bool UraEnterAgain(int script_no, int slot); // the back half's door again on this copy alone, its question answered yes
+void UraUnlocked(int script, int item);
+std::uint16_t BoneDoorTestButtons(); // coop-choosing: a test hook's presses on the game's pad (DC_COOP_BONEDOOR_LATER)     // its unlock (its door's item use) on this floor, for every player
 int  CrossMessage(int script_no);
 bool UsePromptOpen(int player);
 // coop-menucross: in a linked town, a door's message for her Cross while it is shut, as her own note (her copy alone);
@@ -128,6 +158,12 @@ int  TownDoorShutMessage(const void *program, int event_no, int *flag);
 std::uint16_t UsePromptHeldAfter(int player);
 bool StepUsePrompt(int player, const InputPadState &pad);
 void DrawUsePrompts();
+// coop-keylook (Jep's own-UI rule: our boxes never over the game's UI; a duplicate looks like the original): a line or lines of the
+// mod's own text (a note, a prompt's head and rows) in the game's own message window, the floor script's window 1 (EdEventInfo
+// .messages[1]), as a chest's message is drawn, on that player's screen: slot 0-1 the players' prompts, 2-3 their key pickers' notes.
+// head: the lines above the rows; cursor: the hand's row among the rows, -1 none. False when the game's window is not there (then
+// the caller draws as before).
+bool DrawTextInGameWindow(int slot, int player, int local, const std::string &text, int head, int cursor);
 void DrawCallQuestion(); // coop-floorgate: the other player's call, apart
 void DrawEntranceOverlays(); // coop-gatepopup2: the call's boxes and the notice over a dungeon's floor menu
 // coop-floorgate: the dungeon menu's centre Yes/No popup (its Go Outside question's look, no gilda or Escape Powder panels): the
@@ -135,9 +171,21 @@ void DrawEntranceOverlays(); // coop-gatepopup2: the call's boxes and the notice
 // copy; changed: the text is new (laid out again). False while its pictures are not loaded (or DC_COOP_MUTATE=gatherbubble):
 // draw the question another way then.
 bool DrawYesNoPopup(const char *question, bool changed, int cursor);
+// coop-swapbtn (test hook DC_COOP_TEST_PLATE_PLANT, coop_useprompt.cpp; game/texture.cpp's rebuild calls it): the popup's YES
+// plate made at the key the registry hands out next; its key.
+unsigned PlatePlantMake();
 bool EscapeWindowAnswer(int *answer);
 void SetEscapeWindowAnswer(int answer);
 void UsePromptResetForSession();
+// coop-dungeonreds: a player who leaves the floor (a floor's split, on every copy on its one tick) leaves their use prompt there:
+// it closes, a gate's waiting question with it (the vote that ended in this split is over).
+void UsePromptEndForLeaver(int player);
+// coop-clownchest: her copy's roles swap at her floor merge (CoopWorldsFloorBecomePartner): the prompt she opened apart, as her
+// copy's game player (player 1's slot there), goes on as player 2's. Said on stderr when one moves.
+void UsePromptToPartner();
+// (its twin's hooks around a state set's apply: DC_COOP_MUTATE=useprompt_not_carried keeps this copy's own prompts)
+void UsePromptApplyBefore();
+void UsePromptApplyAfter();
 // coop-doorprompt: the same picker at Norune's cave door in a linked town, either player's Square there (CoopTownStep):
 // stepped on both copies from its owner's pad (MenuTick), drawn on the owner's copy alone. The cave key picked there
 // (ITEM_CAVE_KEY, which the door's event 130 asks for) gives its player once from TownCaveKeyUsed (0: none).
@@ -152,6 +200,35 @@ bool PartnerMarkHeld();
 void DrawPartnerMarkAt(CFrame *mark, const float *at, bool drawn);
 // coop-fx51a: its log window starts again (a state file's load, coop_worlds CoopWorldsStateFileLoaded).
 void PartnerMarkLogReset();
+// coop-revive2: the red mark over a player lying down, on near alive players' screens (CoopDrawPartnerMark draws it).
+void ReviveMarksDraw(CFrame *mark);
+// coop-revivecross (the developer's rc5b playtest, 11-19: "P2 cant open chests anymore" while P1 lay down): the one rule for the revive's
+// offer, which both the red mark (ReviveMarksDraw) and the Cross (coop_party StepDown, coop_combat PlayerDownStep, her Cross
+// order) read: reviver (1 up) is up, downed lies down within kReviveDistance of it, and no retail target its Cross would act on
+// (InteractTargetDistance) is nearer than the body (retail's own Cross takes the one interaction in reach; with two, the nearer).
+// A small chest's reach is 8 and the partner keeps 10 from player 1 (KeepApart), so in practice a chest in reach wins.
+// DC_COOP_MUTATE=revive_over_target (twin): offered whenever near, a nearer chest or door ignored.
+bool  ReviveOffered(int reviver, int downed);
+const char *ReviveOfferTrace(int reviver, int downed); // the rule's parts, for a debug line
+int   ReviveOfferedAny(int reviver); // the player it is offered over, 0 none
+// Whether player's Cross this tick is the revive's (offered over someone): its Cross then starts no script, chest or swing (player 1's
+// in DunMoveChara, the others' in their Cross order). DC_COOP_MUTATE=revive_swings (twin): the Cross acts as well, as before.
+bool  ReviveTakesCross(int player);
+// One Cross, one action: the step that reads a player's Cross first (player 1's DunMoveChara, the others' Cross order) says
+// what it went to (the revive, or the game's own target or swing); the revive's question (coop_prompt ReviveAsk, later in the
+// same tick, after a chest it opened is gone) takes that word for the same press. Read once (ReviveCrossTaken: 1 the revive's,
+// 0 not, -1 no word). DC_COOP_MUTATE=cross_twice (twin): no word, the revive judged again, as before.
+void  ReviveCrossDecided(int player, bool revive);
+int   ReviveCrossTaken(int player);
+// A swing started by player's Cross (DC_COOP_DEBUG: "coop: P<n> starts a swing", the revive tests' word).
+void  NoteSwing(int player);
+// What reviver's Cross would act on where it stands, as DunMoveChara and Interact find it (an event slot whose script its Cross
+// starts, else the map event in reach): its distance from the body, -1 none.
+float InteractTargetDistance(int player);
+// coop-revivecross: player 1's action lock (BtActStatus can_act / movement_locked) as it holds player's own Cross and Square on a
+// floor. Player 1 lying down holds both every tick (PlayerGoesDown, PlayerDownStep, DunMoveChara): that is his body's, never the
+// other players'. DC_COOP_MUTATE=down_holds_her (twin): his down holds hers too, as before.
+bool  HisActionHolds(int player);
 // coop-opt7 step 3 (debug\notes\opt7-design.md): the partner's body in a presentation of her own, its world half, on every copy
 // alike (coop_opener.cpp's PresentStartFor / its tick / kCmdPresent call them; her copy alone runs retail's presentation as its
 // engine). Start: she stands at the box and plays its opening (posed false: refused, she stands where she is), or takes her
@@ -164,6 +241,10 @@ void PartnerPresentAtla(int entry, bool others, float *turn);
 // presentation's end (the world's tick steps it; draw only). DC_COOP_MUTATE=atlafx_partner_only (twin): player 2's alone.
 void OthersAtlaFxStart(int opener, int entry, float turn);
 void OthersAtlaFxStep(int opener);
+void LogAtlaFly(int opener, bool here, int tick); // coop-atlafly test hook (DC_COOP_TEST_ATLA_FLY)
+// coop-atlafly: after a step of an opener's Atla effect (retail's, or the others' draw of it), its light balls carried to come down
+// against the opener's body as retail's do against Toan's (no change under retail's own pose). opener: the player number (0 none).
+void AtlaFlyToOpener(dc::game::CCharacter *fx, int opener);
 void OthersAtlaFxEnd(int opener);
 bool PartnerPresentStep(int kind, int ticks, bool others); // true on the tick she holds the item up
 void PartnerPresentEnd(int kind, bool posed);
@@ -171,5 +252,6 @@ bool StepBusy(const InputPadState &pad);
 void PoseBusy();
 void PartnerFramePlace(float *at); // coop-openpos
 void PickUp();
+void PartnerStealArrives(); // coop-stealback: her arrived stolen items on her own step
 
 } // namespace coop

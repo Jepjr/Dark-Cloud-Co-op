@@ -1,6 +1,8 @@
+#include "coop/coop_interact.hpp" // coop-xiaogap2: SpotJumpHudY
 #include "coop/game_ns.hpp"
 #include "coop/coop_opener.hpp" // coop-opt7
 #include "coop/coop_fullmenu.hpp"
+#include "coop/coop_combat.hpp" // coop-downmenu: PlayerDown, DownPlayerLeaves
 #include "coop/coop_scriptmenu.hpp" // coop-scriptmenus
 #include "coop/coop_storage.hpp"    // coop-small2
 #include "coop/coop_writeguard.hpp" // coop-guard
@@ -17,6 +19,7 @@
 #include "coop/coop_worlds.hpp" // coop-dungeonp2: CoopWorldsExitBy
 #include "btactstatus.hpp"
 #include "dun/gameloop.hpp"
+#include "app/gameloop.hpp" // coop-triflake: the twin's stop (GameRequestStop)
 #include "camerafollow.hpp"
 #include "gamepad.hpp"
 #include "gamepad.hpp"
@@ -244,6 +247,11 @@ const std::vector<Region> &FileRegions() {
 
 } // namespace
 
+// coop-ports2 (tests): the link tick of the last menu write applied (-1 before one), alike on every copy: the host-menu close hook waits
+// on it (DC_NETPLAY_TEST_HOST_MENU_CLOSE_AFTER_WRITE), so the order "the write, then the close" is the ticks', never the clock's.
+static std::int64_t g_test_write_tick = -1;
+std::int64_t        FullMenuTestWriteTick() { return g_test_write_tick; }
+
 // coop-offthread: the battle menu's working globals (MenuRegions, SaveRegions) against the state set: how many the set holds,
 // and a hash of the bytes of the ones it does not (a copy's own menu, which a join or a state file must leave as it was).
 void MenuWorkCensus(std::size_t *held, std::size_t *total, std::uint32_t *own_hash) {
@@ -270,63 +278,15 @@ void MenuWorkCensus(std::size_t *held, std::size_t *total, std::uint32_t *own_ha
 // e57647e7; at their merge (3e1009de) the set no longer carried the menu's working globals, so the taker's world map step read
 // its own BtlMenuStatusPt, null in a copy that never opened a battle menu (the dump: SearchItemIndexNo, this null, from
 // EscapeDungeonMode in MenuMoveKey), and the copy crashed before the twin's stop. Its twin carries them too, as before.
+// coop-owed1112: and DC_COOP_MUTATE=retailmenu_lockstep (x-town-stayermenu-shop/over/indoors-shop~lockstep): his shop or overflow
+// as retail's in the lockstep through the merge, the same way; the taker's ItemShopDraw2 read its own PerBoardPt, null in a copy
+// that never opened a menu (PersonalRetMax <- ItemShopDraw2 <- ItemShopLoop2 <- CommonShopLoop <- EditLoop), and crashed.
 bool MenuRetailLockstepMutated() {
-    return Mutated("merge_menu_retail") || Mutated("scriptmenu_merge_retail");
+    return Mutated("merge_menu_retail") || Mutated("scriptmenu_merge_retail") || Mutated("retailmenu_lockstep");
 }
 
-// coop-pt1111m (found by pt1111l): with game.coop_menus off (a player's setting) every menu is retail's, stepped in the lockstep on
-// every copy, so its working globals are simulated state that every copy must hold alike, as the world's. e57647e7 took them out of
-// the state set on the rule "menu state is not world state", which holds only for local menus. A merge into a stayer in a menu
-// (his scene's world map, EscapeDungeonMode's) then had the taker step it on its own globals: BtlMenuStatusPt null in a copy that
-// never opened a battle menu, SearchItemIndexNo(this=nullptr) <- EscapeDungeonMode <- MenuMoveKey <- EdMenuMode <-
-// CoopScriptMenuStep: a crash. With the menus in the lockstep the set carries them again (as before e57647e7); with local menus
-// it does not (each copy's menu is its own). Every copy of a session plays with one setting (the checksum's MenuHash already
-// differs on every tick otherwise), so sender and taker list the same regions.
-bool MenuWorkInSet() {
-    return Enabled() && !MenusOn();
-}
-
-// DC_COOP_MUTATE=menusoff_menu_out (twin, x-town-stayermenu-*-menusoff~menuout): a link's apply leaves this copy's own menu working
-// globals as they were, as since e57647e7 (a state file's load, the row's fixture, takes them as the fix does).
-bool MenuWorkKeptMutated() {
-    return Mutated("menusoff_menu_out");
-}
-
-// coop-pt1111m: every menu working global's bytes (MenuRegions, SaveRegions): saved and put back (the twin), and their hash (the rows'
-// check: the taker's after the apply is the sender's at the take).
-void MenuWorkSave(std::vector<unsigned char> &out) {
-    out.clear();
-    for (const std::vector<Region> *list : {&MenuRegions(), &SaveRegions()}) {
-        for (const Region &region : *list) {
-            const auto *at = static_cast<const unsigned char *>(region.at);
-            out.insert(out.end(), at, at + region.size);
-        }
-    }
-}
-
-void MenuWorkRestore(const std::vector<unsigned char> &in) {
-    std::size_t at = 0;
-
-    for (const std::vector<Region> *list : {&MenuRegions(), &SaveRegions()}) {
-        for (const Region &region : *list) {
-            if (at + region.size > in.size()) {
-                return;
-            }
-            std::memcpy(region.at, in.data() + at, region.size);
-            at += region.size;
-        }
-    }
-}
-
-std::uint32_t MenuWorkHash() {
-    std::vector<unsigned char> bytes;
-    std::uint32_t              hash = 2166136261u;
-
-    MenuWorkSave(bytes);
-    for (unsigned char byte : bytes) {
-        hash = (hash ^ byte) * 16777619u;
-    }
-    return hash;
+bool WeaponPagePrefetchOn() {
+    return !Mutated("wepmenu_no_prefetch");
 }
 
 // coop-offthread (the twin's DC_SNAPSHOT_MUTATE=menu_in_set): every one of them, as at, size.
@@ -460,6 +420,8 @@ struct LocalMenu {
     CGamePad      pad{};
     InputPadState before{};
     MenuCameraOwn camera{}; // coop-stabfix2: its own menu camera (LocalPad)
+    bool          down_only = false; // coop-downmenu: opened by its player lying down: the Move page alone
+    bool          down_cursor = false; // coop-downmenu: its ring's hand put on the Move icon
 };
 
 LocalMenu g_local;
@@ -510,8 +472,8 @@ void OwnerViewEnd() {
             NetplayQueueCommand(command);
         } else if (picked == g_full.player_chara) {
             AskSwap(1, picked);
-        } else if (Pickable(picked)) {
-            g_partner.choice = picked;
+        } else if (Pickable(picked) && !SetPick(1, picked, MemberWhy::kPick)) {
+            MemberRefused(1, picked, MemberWhy::kPick);
         }
         std::printf("coop-fullmenu: player 2 picks member %d in her menu\n", picked);
     }
@@ -523,6 +485,12 @@ void OwnerViewEnd() {
 void ApplyPick(int player, const NetCommand &command, std::int64_t tick) {
     const int picked = command.a;
 
+    // coop-townally: in a town a local menu's pick is its Allies page's (TownAlliesPick), taken by the town's rules on every copy.
+    if (mode == 2) { // (GAME_MODE_EDIT)
+        TownAlliesApply(player, picked);
+        std::printf("coop-localmenu: player %d's town pick of member %d applied at link tick %lld\n", player, picked, (long long) tick);
+        return;
+    }
     if (UserStatus == nullptr) {
         return;
     }
@@ -532,8 +500,8 @@ void ApplyPick(int player, const NetCommand &command, std::int64_t tick) {
     if (player == 2 && picked != g_partner.loaded_chara) {
         if (picked == his) {
             AskSwap(1, picked);
-        } else if (Pickable(picked)) {
-            g_partner.choice = picked;
+        } else if (Pickable(picked) && !SetPick(1, picked, MemberWhy::kPick)) {
+            MemberRefused(1, picked, MemberWhy::kPick);
         }
     } else if (player == 1 && picked == g_partner.loaded_chara) {
         AskSwap(0, picked);
@@ -620,7 +588,16 @@ void SecondOut() {
 void PlayerPadIn(CGamePad &pad, int player, InputPadState &before) {
     InputPadState now{};
 
-    NetplayPlayerPad(player, now);
+    // coop-016 (option A): apart with her stay waiting (no link: no agreed pads), her menu reads this copy's own pad
+    // (her menu's own engine: apart NetplayLocalPlayer names the solo recording's player, not hers)
+    if (!NetplayPlayerPad(player, now) && CoopWorldsStayDeferred() && player == g_local.owner) {
+        now = CoopWorldsStayPad();
+    } else if (g_local.live && player == g_local.owner && !Mutated("apart_menu_pad_none") && NetplayAloneMenuPad(player, now)) {
+        // coop-menushut: any player left alone with their own local menu open (the other took a floor's gate, escaped, left or
+        // dropped: no link, no agreed pads) closes it with this copy's own pad (its engine runs only on its owner's copy). Without
+        // it the menu read an empty pad: it stayed open, the world held under it, and its player's Circle never reached it.
+        // DC_COOP_MUTATE=apart_menu_pad_none (twin): the empty pad, as before.
+    }
 
     PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&pad);
 
@@ -716,6 +693,12 @@ constexpr std::size_t kStockWords = sizeof(CStockItem) / 4 + 256;
 constexpr std::size_t kNamesAt = 0x48, kNamesWords = 6 * 32 * 2 / 4;
 constexpr std::size_t kFishAt = 0x1dc, kFishWords = 1 + 64 * 16 / 4;
 constexpr std::size_t kExtraWords = kStockWords + kNamesWords + kFishWords;
+// coop-fishpools: the fishing points' word (fishing_point, the first fishing word) goes as what a menu took or gave: a poke with
+// a = kPokeDelta and c = the word before << 16 | after (both at most 9999), applied as that change to the word as it is on the
+// poke's tick. A change another player made meanwhile (a catch landing while the exchange ran, or between its close and its tick)
+// stays; a value would have written over it. DC_COOP_MUTATE=fishpoke_absolute (twin): the value, as before.
+constexpr std::size_t   kFishPointWord = kStockWords + kNamesWords;
+constexpr std::uint8_t  kPokeDelta = 1;
 static_assert(kStatusWords + kExtraWords < 0x10000);
 
 std::uint32_t *StockWords() {
@@ -1005,6 +988,10 @@ class LocalWrites {
                 command.kind = kCmdPoke;
                 command.b = (std::uint16_t) (kStatusWords + i);
                 command.c = now;
+                if (i == kFishPointWord && now <= 0xFFFFu && extra_before_[i] <= 0xFFFFu && !Mutated("fishpoke_absolute")) { // coop-fishpools
+                    command.a = kPokeDelta;
+                    command.c = extra_before_[i] << 16 | now;
+                }
                 commands.push_back(command);
                 g_pokes.push_back(Poke{(std::uint32_t) (kStatusWords + i), now});
             }
@@ -1129,20 +1116,28 @@ void ApplyPoke(int player, const NetCommand &command, std::int64_t tick) {
                 reinterpret_cast<std::uint16_t *>(&SharedRing())[command.b - kRingFirst] = (std::uint16_t) command.c;
             }
         } else if (std::uint32_t *word = ExtraWord(command.b - kStatusWords)) {
-            // coop-eventslots: a save word of another player's menu (their fishing exchange) lands in their own fishing record when the
-            // records are each player's (the save's own being the game's player's). DC_COOP_MUTATE=fishpoke_into_save (twin): the save's.
-            const bool own_record = player > 1 && FishingPerPlayer() && !Mutated("fishpoke_into_save");
+            // coop-eventslots: a save word of a player's menu (their fishing exchange) lands in their fishing record's view (coop-fishpools:
+            // every player's, player 1's too: their own record, or the party's total with what it took off every player alike).
+            // DC_COOP_MUTATE=fishpoke_into_save (twin): the save's.
+            const bool own_record = player >= 1 && FishPoolsOn() && !Mutated("fishpoke_into_save");
 
             if (own_record) {
                 FishRecordSwap(player - 1);
             }
-            *word = command.c;
+            if (command.a == kPokeDelta) { // coop-fishpools: the change, onto the points as they are now
+                const int before = (int) (command.c >> 16), after = (int) (command.c & 0xFFFFu);
+
+                *word = (std::uint32_t) std::clamp((int) *word + after - before, 0, 9999);
+            } else {
+                *word = command.c;
+            }
             if (own_record) {
                 FishRecordSwap(player - 1);
             }
         }
         if (player == g_local.owner || player == NetplayLocalPlayer()) {
-            auto it = std::find_if(g_pokes.begin(), g_pokes.end(), [&](const Poke &p) { return p.word == command.b && p.value == command.c; });
+            const std::uint32_t value = command.a == kPokeDelta ? (command.c & 0xFFFFu) : command.c; // (coop-fishpools: the overlay's word is the after)
+            auto it = std::find_if(g_pokes.begin(), g_pokes.end(), [&](const Poke &p) { return p.word == command.b && p.value == value; });
 
             if (it != g_pokes.end()) {
                 g_pokes.erase(it);
@@ -1210,6 +1205,7 @@ void ApplyPoke(int player, const NetCommand &command, std::int64_t tick) {
             g_pokes.erase(it);
         }
     }
+    g_test_write_tick = (std::int64_t) tick;
     std::fprintf(stderr, "coop-localmenu: player %d's menu write: status word %d = %08x at link tick %lld\n", player, (int) command.b,
                  (unsigned) command.c, (long long) tick);
 }
@@ -1223,7 +1219,8 @@ int WorldStep() {
     // coop-opt7: with a player in a presentation of their own among the paused, the world steps under coop_pause's hold
     // (monsters and effects held, as retail's presentation holds them) so the opener's pose and engine go on.
     // DC_COOP_MUTATE=present_heldstill (twin): the world only draws, as for menus alone.
-    const bool  held = local && PauseZoneHeld() && (!AnyPresenting() || Mutated("present_heldstill"));
+    // coop-016 (option A): her copy apart with her stay waiting for her menu's close: she is its only player, in her menu: it holds.
+    const bool  held = (local && PauseZoneHeld() && (!AnyPresenting() || Mutated("present_heldstill"))) || CoopWorldsStayDeferred();
     static bool logged = false;
 
     COOP_TEST_TRACE_RESET(logged, false);
@@ -1237,9 +1234,12 @@ int WorldStep() {
         return GameLoop();
     }
 
+    PauseHeldWorldStep(); // coop-pausemotion: the monsters' paused step, as retail's pause tick gives it (their draw then holds their motions)
     DunMainDraw();
     BtGameModeFlag = 0; // GameLoop's tail (a floor left, the fade) alone
     const int result = GameLoop();
+
+    CoopWorldsVoteHeldStep(); // coop-016: the asker's box (its CANCEL, START NOW, LEAVE NOW) while the world holds
 
     if (BtGameModeFlag == 0) {
         BtGameModeFlag = BT_GAME_MODE_PLAY;
@@ -1263,6 +1263,28 @@ void KeepWorldStill() {
         std::printf("coop-localmenu: player %d's menu keeps the world behind it as its still (link tick %lld)\n", g_local.owner,
                     (long long) NetplayLinkTick());
     }
+}
+
+// coop-menubuffers: every 60 of a local menu's draws on its owner's copy, how many had its Items page's character built (the model
+// MenuCharaPolyDraw steps and draws) and where its work area lies: inside the world's read_buffer (retail's, which the floor's own reads
+// fill while the world runs on beside the menu) or outside it.
+void LocalModelTally() {
+    static int draws = 0;
+    static int built = 0;
+
+    draws++;
+    built += MenuExTextureReadFlag == MENU_EX_TEX_READY && MenuExCashBuffer.base != nullptr ? 1 : 0;
+    if (draws < 60) {
+        return;
+    }
+    const auto          *read = reinterpret_cast<const unsigned char *>(read_buffer);
+    const std::ptrdiff_t past = MenuExCashBuffer.base - read;
+    const bool           inside = MenuExCashBuffer.base != nullptr && past >= 0 && past < std::ptrdiff_t{kSecondBufferQuads} * 16;
+
+    std::fprintf(stderr, "coop-localmenu: player %d's menu character model built in %d of %d draws, chara %d, its work area %s the world's read buffer\n",
+                 g_local.owner, built, draws, ItemMenuMode.chara, MenuExCashBuffer.base == nullptr ? "not set, so outside" : inside ? "inside" : "outside");
+    draws = 0;
+    built = 0;
 }
 
 int LocalGameLoop() {
@@ -1310,6 +1332,12 @@ int LocalGameLoop() {
             }
             open = BattleMenuCursor();
             MenuPackTrace(); // coop-servecrash: the chestmenu hook on a local menu too
+            // coop-downmenu: the ring of a downed player's menu comes up with its hand on the Move icon (the fifth: Items, Weapons,
+            // Members, Atla, Move), the one page open to it, where retail's opening (BattleMenuAppear) puts it on Items.
+            if (open != 0 && g_local.down_only && !g_local.down_cursor && BattleMenuFlag == BTLMENU_STATE_MAIN) {
+                g_local.down_cursor = true;
+                MenuSelect[1] = 4;
+            }
         }
         OwnerViewEnd();
         g_stepping = 0;
@@ -1328,7 +1356,7 @@ int LocalGameLoop() {
         std::printf("coop-localmenu: player %d's menu camera eye (%.0f %.0f %.0f), the world's (%.0f %.0f %.0f)\n", g_local.owner, eye[0], eye[1],
                     eye[2], MenuCamera.pos[0], MenuCamera.pos[1], MenuCamera.pos[2]);
         // coop-bigchest: a close inside the world's own task (his chest's presentation) leaves that task to run out its way.
-        if (gameTask != GAME_TASK_PLAY) {
+        if (!CoopPlainPlay()) {
             std::printf("coop-localmenu: player %d's menu closed beside the world's task %#x\n", g_local.owner, (unsigned) gameTask);
         }
     }
@@ -1340,7 +1368,7 @@ int LocalGameLoop() {
     // leaves the menu's stick mode); its close command follows. DC_COOP_MUTATE=menudown: it stays (the lockstep menu's twin too).
     const bool down = g_local.owner == 1 ? UserStatus != nullptr && UserStatus->hp[UserStatus->cur_chara] <= 0 : g_partner.down > 0;
 
-    if (g_local.live && down && !Mutated("menudown")) {
+    if (g_local.live && down && !g_local.down_only && !Mutated("menudown")) { // (coop-downmenu: a downed player's own menu stays)
         {
             LocalPad pad;
             // coop-famA: the way out inside the menu's writes, as its step's close is: ExitBattleMenu resets the bag's melt timer
@@ -1369,13 +1397,17 @@ int LocalGameLoop() {
         static const spRGBA kDim = {0x00, 0x00, 0x00, 0x50};
 
         KeepWorldStill();
-        set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim);
+        if (Mutated("menulook")) { // coop-swapmenulook: retail's dim (fade and all) comes with the menu's draw (MenuBackdrop)
+            set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim);
+            MenuOldFillTrace(kDim.a);
+        }
         OwnerViewBegin(g_local.owner);
         MenuOverWorldDepth(g_local.owner);
         {
             PartsWritesScope parts_writes(false); // coop-pt1108
             LocalWrites writes(false); // the draw shows the menu's own edits too
             BattleMenuDraw();
+            LocalModelTally();
         }
         OwnerViewEnd();
     }
@@ -1402,7 +1434,12 @@ void Draw() {
 
         static const spRGBA kDim = {0x00, 0x00, 0x00, 0x50};
 
-        set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim);
+        if (Mutated("menulook")) {
+            set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim, (spRGBA *) &kDim);
+            MenuOldFillTrace(kDim.a);
+        } else {
+            MenuStillFromScreen(); // coop-swapmenulook: retail's dim comes with the menu's draw (MenuBackdrop)
+        }
     } else {
         DunMainDraw();
     }
@@ -1650,7 +1687,7 @@ void TestItemSelect() {
         std::printf("coop-fullmenu: test: item select done (item %d)\n", miniItemSelNo);
     }
 
-    if (running || NetplayTestPressClock() != std::atoll(spec) || gameTask != GAME_TASK_PLAY) {
+    if (running || NetplayTestPressClock() != std::atoll(spec) || !CoopPlainPlay()) {
         return;
     }
 
@@ -1740,12 +1777,12 @@ void MenuCameraSwap(MenuCameraOwn &own) {
 // coop-menuleakfix (train 49, t-menuleak-select: with Local menus 3a her menu is her own copy's, so his script item window
 // ("use an item" at a door: the world's GAME_TASK_SCRIPT_ITEM_SELECT, BT_GAME_MODE_ITEM_SELECT) drew on every copy, under her
 // open menu on hers, and that tick drew nothing else there, so her menu kept a black still): the window's loop (its step reads
-// port 1, the agreed pad, on every copy alike) draws on the copy of the player it is for, NetplayMenuOwner (port 1's), and into
+// port 1, the agreed pad, on every copy alike) draws on the copy of the player it is for, player 1 (port 1's: coop-wave2), and into
 // a target nobody sees on the others, which draw the world instead (DunMainDraw, its draw-only randoms aside, as a menu's
 // copy draws the world behind it). DC_COOP_MUTATE=itemselect_everywhere is the twin (on every copy, as train 49 brought in).
 int ItemSelectLoop() {
     const int local = NetplayLocalPlayer();
-    const int owner = NetplayMenuOwner() != 0 ? NetplayMenuOwner() : 1;
+    const int owner = 1; // (coop-wave2: port 1 is player 1's, menu_owner retired)
 
     if (local == 0 || local == owner || Mutated("itemselect_everywhere")) {
         return EventItemSelectLoop(&miniItemSelNo);
@@ -1783,6 +1820,7 @@ int ItemSelectLoop() {
 // any ring, opened with that chooser up and its first Cross took Save: InitMenuSave, whose EditSave writes the town's NowTime over the save's clock on that copy alone.
 // Every menu's start now shuts them. DC_COOP_MUTATE=ring_chooser_stays (twin): as before.
 void FullMenuStartsClean() {
+    BagScreenTargetsClose("a menu starts"); // coop-sendtarget: a list left open by a menu that closed under it
     if (!Mutated("ring_chooser_stays")) {
         BattleMenuRingChoosersOff();
     }
@@ -1823,6 +1861,52 @@ bool FullMenuLoading() {
 // chest's files went over her menu's pack, and her pages' reads over his item model. The presentations take a block of
 // their own (the same size, pinned, in the state set), and keep the open menu's read list (their StartReadBG cleared it:
 // the menu finds its files by slot 0). DC_COOP_MUTATE=chestbuffer: read_buffer and the cleared list, as before (twin).
+// coop-menubuffers (the follow-up to coop-crashmenuchar, DCO-155; found by its audit: her floor menu on its Items page while his story
+// walk-in on Seda's floor began, her copy's crash in MenuCharaPolyDraw -> CCharacter::Step -> SetMotionEX): retail's floor menu works in
+// read_buffer (BtlMenuBufferSet: its pak, message work, the Items page's character pack and the model built after it). Retail stands the
+// floor while its menu is open; together a player's local menu runs beside the world, and the world's own reads go to read_buffer too:
+// a floor's story script (ext memory: its sound bank and characters, read_buffer + 0 on) wrote over the menu's character, and its next
+// step read a wild pointer. The menu works in a block of its own now, the size the second menu's proved (kSecondBufferQuads), pinned and
+// in the state set. Every menu that opens on a floor starts there (the second's opening too, which copies what it put there to its own).
+// DC_COOP_MUTATE=dunmenu_readbuffer (twin): read_buffer, as retail.
+u_long128 *DungeonMenuWorkBuffer(u_long128 *retail) {
+    static const char kDungeonMenuArena = 0;
+
+    if (Mutated("dunmenu_readbuffer")) {
+        return retail;
+    }
+    return reinterpret_cast<u_long128 *>(ArenaBlock(&kDungeonMenuArena, kSecondBufferQuads * 16));
+}
+
+// coop-menubuffers (the same audit): retail's Use Item window (InitEventItemSelect: a talk's or a door's Use Item, the fishing bait's)
+// reads eventmnu2.pak into read_buffer and keeps reading it while it is open: its pictures a few ticks on, its message set (eventuse.bin,
+// InitMenuMesSet) on every draw. Retail stands the town under it; together the town runs on beside the event that opened it, and the
+// period's villager load (EdLoadVillager -> LoadFile2(read_buffer)) wrote over the pak: the bait window's texts read other bytes from
+// then on. The window reads into a block of its own now (4 MB, as the item select beside a floor menu has; the pak is far smaller),
+// pinned and in the state set. DC_COOP_MUTATE=itemselect_readbuffer (twin): read_buffer, as retail.
+u_long128 *EventItemSelectBuffer(u_long128 *retail) {
+    static const char kEventSelectArena = 0;
+
+    if (Mutated("itemselect_readbuffer")) {
+        return retail;
+    }
+    return reinterpret_cast<u_long128 *>(ArenaBlock(&kEventSelectArena, std::size_t{4} << 20));
+}
+
+// coop-menubuffers (the same audit, the same class as the Use Item window above): the other menus a town script opens through EdInitMenu
+// and keeps open beside the running town read into read_buffer too: the world map (InitMenuMove: its pak and the map model built after it,
+// MenuCharaFrame) and the name entry (InitNameRegist's default). Each reads into this block of its own instead (the second menu's size: the
+// world map builds a model, as the menus' Items page does), pinned and in the state set; one script menu is open on a copy at a time.
+// DC_COOP_MUTATE=scriptmenu_readbuffer (twin): read_buffer, as retail.
+u_long128 *ScriptMenuReadBuffer(u_long128 *retail) {
+    static const char kScriptMenuArena = 0;
+
+    if (Mutated("scriptmenu_readbuffer")) {
+        return retail;
+    }
+    return reinterpret_cast<u_long128 *>(ArenaBlock(&kScriptMenuArena, kSecondBufferQuads * 16));
+}
+
 u_char *PresentationBuffer(u_char *retail) {
     constexpr std::size_t kBytes = 0x445C0u * 16; // BtCashBuffer.limit's quads
     static const char     kPresentationArena = 0;
@@ -2054,6 +2138,7 @@ void FullMenuCommandHandlers() {
     CoopP2GeoramaCommandHandler(); // coop-stage4: her Georama parts menu's close (kCmdGeoMenu)
     CoopScriptMenuCommandHandler(); // coop-scriptmenus: a script's menu's end (kCmdScriptMenuEnd)
     CoopStorageCommandHandlers();   // coop-small2: the party's storage, its claims and moves (kCmdStorageClaim, kCmdStorageMove)
+    FishBuyCommandHandler();        // coop-fishpools2: a buy at the fishing exchange (kCmdFishBuy)
 }
 
 static void OpenLocalFor(int owner) {
@@ -2084,6 +2169,10 @@ static void OpenLocalFor(int owner) {
     g_local = LocalMenu{};
     g_local.live = true;
     g_local.owner = owner;
+    g_local.down_only = PlayerDown(owner) && !Mutated("downmenu_pages"); // coop-downmenu
+    if (PlayerDown(owner)) {
+        std::printf("coop-downmenu: player %d's menu opens lying down (%s)\n", owner, g_local.down_only ? "the Move page alone" : "every page");
+    }
     g_local.pad = GamePad;
     NetplayPlayerPad(owner, g_local.before);
     {
@@ -2093,6 +2182,17 @@ static void OpenLocalFor(int owner) {
             PartsWritesScope parts_writes(true); // coop-pt1108
             LocalWrites writes(true); // the menu's start writes too (a debug start's party grant): commands, as its step's are
             BattleMenuInit(menu, BATTLE_MENU_MODE_DUNGEON);
+        }
+        // coop-bagoverflow: retail's opening on the throw-away page (CheckItemThrow found something past its owner's room)
+        if (BattleMenuFlag == BTLMENU_STATE_ITEM_TRUSH) {
+            const ITEM_PACK &pack = UserStatus->item_pack; // (her bag while her view is in)
+            int              weapon = -1;
+
+            for (int c = 0; c < 6 && weapon < 0; c++) {
+                weapon = UserStatus->chara_weapons[c][10].item_no >= ITEM_WEAPON_START ? UserStatus->chara_weapons[c][10].item_no : -1;
+            }
+            std::printf("coop-localmenu: player %d's menu opens on its throw-away page: past the room %d %d %d (bag of %d), weapon %d\n", owner,
+                        (int) pack.item[pack.num], (int) pack.item[pack.num + 1], (int) pack.item[pack.num + 2], (int) pack.num, weapon);
         }
         OwnerViewEnd();
     }
@@ -2156,7 +2256,7 @@ bool FullMenuFullToLocal() {
     if (!g_full.live && !retail) {
         return false;
     }
-    const int owner = g_full.live ? g_full.owner : NetplayMenuOwner();
+    const int owner = g_full.live ? g_full.owner : 1;
 
     if (retail) {
         if (!Enabled() || !MenusOn() || OwnerHasView(owner) || Mutated("fullmenu_lockstep") || Mutated("fullmenufreeze")) {
@@ -2253,9 +2353,17 @@ void FullToLocal(int owner, const char *when) {
 
 } // namespace
 
+bool FullMenuDownOpens(int player) {
+    return LocalMenusOn() && PlayerDown(player) && !Mutated("downmenu_shut");
+}
+
+bool FullMenuDownOnly() {
+    return g_local.live && g_local.down_only && g_stepping == g_local.owner;
+}
+
 bool FullMenuOpenLocal() {
-    // Player 1's, from retail's opening on port 1 (local menus move no port: NetplayMenuOwner stays 1).
-    if (!LocalMenusOn() || NetplayMenuOwner() != 1 || !g_partner.visible) {
+    // Player 1's, from retail's opening on port 1 (port 1 is player 1's: coop-wave2 retired menu_owner).
+    if (!LocalMenusOn() || !g_partner.visible) {
         return false;
     }
 
@@ -2263,16 +2371,22 @@ bool FullMenuOpenLocal() {
     return true;
 }
 
-// coop-menulocal: the button that opens a player's local menu: Triangle, or Start with game.coop_menu_panel on (Triangle is
-// the overlay's then, as player 1's Start opens his: MenuOpensGameMenu). DC_COOP_MUTATE=panel_triangle_menu (the twin):
-// Triangle whatever the overlay and her open overlay no bar, as before, so her Triangle opened her overlay and her menu at once.
+void FullMenuDropPortOne(int mask) {
+    PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1] (ReleasePortOne)
+
+    for (PAD_DATA *port : {&data[0], &data[2]}) {
+        port->input.status.button = (decltype(port->input.status.button)) (port->input.status.button & ~mask);
+    }
+}
+
+// coop-menulocal: the button that opens a player's local menu: Triangle (coopoptions: the old overlay, which moved it to Start,
+// is retired with game.coop_menu_panel).
 std::uint16_t FullMenuLocalButton() {
-    return MenuPanelOn() && !Mutated("panel_triangle_menu") ? kInputStart : kInputTriangle;
+    return kInputTriangle;
 }
 
 // coop-localmenu 3b: player 2's opening, from her agreed Triangle in the world's free play (the same test on every copy).
-// Players past 2 take the same path once they have a body on the floor. (coop-menulocal: Start with the overlay on, and not
-// while her overlay is open, which takes her pad as his takes his: MenuFilterPort.)
+// Players past 2 take the same path once they have a body on the floor.
 // coop-atlamenu (Jep's 2026-11-04 pack 8 playtest: "while P1 is collecting an Atla, P2 can't open their own menu"): his chest,
 // Atla or gate key presentation is the world's task, not play, but the world runs on for her (coop-chestworld), so her menu
 // opens then too; its reads stay off his files (coop-chestmenu's own block) and its close leaves his task alone (coop-bigchest).
@@ -2283,17 +2397,35 @@ std::uint16_t FullMenuLocalButton() {
 // BattleMenuInit ran over his menu's globals there and her copy went to LocalGameLoop, so it stopped stepping his menu while
 // his copy stepped it. Beside a lockstep menu hers is its second menu (TrySecondOpen), on every copy, as his own Triangle
 // waits for no menu to be live (MenuOpensGameMenu). DC_COOP_MUTATE=local_beside_lockstep (twin): hers opens local, as before.
+// coop-eyemenu (seen beside the soak's seed 1625): his first-person view (R2, GAME_TASK_EYE_CAMERA) is the world's task too, and
+// the world runs on in it for her (CoopStep), but only play and a presentation passed here, so her Triangle opened nothing while
+// he looked through his eyes. Her menu opens there as it does while he stands. DC_COOP_MUTATE=eyemenu_play_only (twin): as before.
 static void OpenOthersLocal() {
-    const bool world_task_ok = gameTask == GAME_TASK_PLAY || (PresentationTask() && !Mutated("atlamenu_play_only"));
+    const bool world_task_ok = CoopPlainPlay() || (PresentationTask() && !Mutated("atlamenu_play_only")) ||
+                               (CoopEyePlay() && !Mutated("eyemenu_play_only"));
 
     if (g_full.live && !Mutated("local_beside_lockstep")) {
         return;
     }
 
     if (!LocalMenusOn() || !world_task_ok || BtEventMode != 0 || !g_partner.visible || g_partner.loaded_chara < 0 ||
-        g_partner.down > 0 || PausePlayer(2) || PlayerInMenu(2) || (MenuOpen(2) && !Mutated("panel_triangle_menu")) ||
-        !NetplayPlayerPressed(2, FullMenuLocalButton())) {
+        (g_partner.down > 0 && !FullMenuDownOpens(2)) || PausePlayer(2) || PlayerInMenu(2)) {
         return;
+    }
+
+    // coop-bagoverflow: her bag past its room (a clown's pick into its overflow slots) opens her menu as his overflow_flag opens
+    // his (movechara: no button, the flag taken), and the menu's opening finds the overflow (CheckItemThrow) and asks the
+    // throw-away. Any opening takes the flag, as his Triangle's does. The same test on every copy (the flag is in her bag, in the
+    // state set and the checksum). DC_COOP_MUTATE=overflow_menu_off (twin): only her button opens it, as before.
+    const bool overflow = PartnerOverflowPending(2) && !Mutated("overflow_menu_off") && g_partner.down == 0; // (coop-downmenu: no throw-away down)
+
+    if (!overflow && !NetplayPlayerPressed(2, FullMenuLocalButton())) {
+        return;
+    }
+    PartnerOverflowTake(2);
+    if (overflow) {
+        std::printf("coop-localmenu: player 2's bag is past its room: her menu opens for the throw-away at link tick %lld\n",
+                    (long long) NetplayLinkTick());
     }
 
     OpenLocalFor(2);
@@ -2303,6 +2435,7 @@ void FullMenuClosedByCommand(int player, int jump) {
     if (FullMenuRunsLocalFor(player)) {
         return; // its engine still runs: an old close (a state load's resend)
     }
+    CoopWorldsStayMenuClosed(player); // coop-016 (option A): her stay, waiting for this close, runs now (after the lines below)
 
     // coop-guard: the bag's melt timer as the close runs, every copy (t-triangle-menu's local rows: alike on all of them)
     std::printf("coop-localmenu: melt timer as player %d's close runs at link tick %lld: frame %d, counts %d, on %d\n", player, (long long) NetplayLinkTick(),
@@ -2314,10 +2447,13 @@ void FullMenuClosedByCommand(int player, int jump) {
     }
 
     MenuMapJumpMode = jump;
-    if (gameTask == GAME_TASK_PLAY) {
+    // coop-soakmenu: his local menu opened from the first-person view closes through retail's close too (back to the view, or
+    // out of it on a member change). DC_COOP_MUTATE=eye_menu_lockstep (twin): no such menu opens.
+    if (CoopPlainPlay() || (CoopEyePlay() && player == 1)) {
         gameTask = GAME_TASK_MENU_CLOSE;
     }
     if (jump != 0) {
+        DownPlayerLeaves(player); // coop-downmenu: a downed leaver stands as the fade begins
         CoopWorldsExitBy(player);
     }
     std::printf("coop-localmenu: player %d's menu close runs at link tick %lld (map jump %d, task %#x)\n", player,
@@ -2334,7 +2470,7 @@ void FullMenuStepping(int player) {
 
 bool FullMenuQuitHere() {
     const int local = NetplayLocalPlayer();
-    const int owner = g_stepping != 0 ? g_stepping : mode == 2 ? 1 : MenuGameMenuOwner();
+    const int owner = g_stepping != 0 ? g_stepping : 1;
 
     if (local == 0) {
         return true;
@@ -2384,7 +2520,7 @@ bool FullMenuMapKept() {
         return false;
     }
 
-    const bool opening = gameTask >= GAME_TASK_MENU_OPEN && gameTask <= GAME_TASK_MENU_INIT && NetplayMenuOwner() != local;
+    const bool opening = gameTask >= GAME_TASK_MENU_OPEN && gameTask <= GAME_TASK_MENU_INIT && local != 1;
 
     if (!opening && !(g_full.live && !FullMenuRunsFor(local))) {
         return false;
@@ -2405,7 +2541,14 @@ bool FullMenuMapKept() {
 // hidden by its own player's menu only: beside the other's opening it draws where it was before (oldRogoY3), and the
 // opener's stays away from the opening until the menu's own draw (Draw) takes over. DC_COOP_MUTATE=hudblink (twin):
 // rogoY3 as it is on both.
+static int FullMenuHudYOwn(int y);
+
+// coop-xiaogap2: and hidden on the jumper's screen through the Xiao gap's cutscene, as retail's scene has it (SpotJumpHudY).
 int FullMenuHudY(int y) {
+    return SpotJumpHudY(FullMenuHudYOwn(y), infoMap != 0 || FullMenuMapKept());
+}
+
+static int FullMenuHudYOwn(int y) {
     const int local = NetplayLocalPlayer();
 
     if (local == 0 || !Enabled() || Mutated("hudblink")) {
@@ -2415,13 +2558,51 @@ int FullMenuHudY(int y) {
     // The draw comes after the tick's step, so the opening's own tick already shows the next task.
     const bool opening = gameTask > GAME_TASK_MENU_OPEN && gameTask <= GAME_TASK_MENU_INIT;
 
-    if (opening && NetplayMenuOwner() != local) {
+    if (opening && local != 1) {
         return oldRogoY3;
     }
     if (!opening && FullMenuRunsFor(local)) { // coop-localmenu: a local menu's too
         return -0x60;
     }
     return y;
+}
+
+// coop-swapmenulook (Jep: a duplicated menu must look like the original): the menus beside the world dimmed the live scene with a
+// fill of their own (black 0x50 on a floor: the scene at 48/128, where retail's still is at 64/128; town's 0x40; neither faded as the
+// menu opens or closes). Now retail's own brightness, fade and all, from PortDrawBattleMenu (the still each page draws pieces of is
+// the scene as just drawn: KeepWorldStill, KeepLiveStill, and MenuStillFromScreen for a menu beside the world).
+// DC_COOP_MUTATE=menulook (twin): the old fills. DC_MENU_BACKDROP_TRACE=1 logs each frame's backdrop.
+void MenuBackdrop(int bright, bool live) {
+    static const bool trace = TestEnvOn("DC_MENU_BACKDROP_TRACE");
+
+    const bool fill = live && !Mutated("menulook");
+
+    if (fill) {
+        AllFadeForMenu(0x80 - bright);
+    }
+    if (trace) {
+        std::fprintf(stderr, "menu backdrop: brightness %d over the %s, black fill %d\n", bright, live ? "live scene" : "still", fill ? 0x80 - bright : -1);
+    }
+}
+
+// The old fills' line (the twin's), for a test that reads what was drawn.
+void MenuOldFillTrace(int black) {
+    static const bool trace = TestEnvOn("DC_MENU_BACKDROP_TRACE");
+
+    if (trace) {
+        std::fprintf(stderr, "menu backdrop: co-op fill black %d\n", black);
+    }
+}
+
+void MenuStillFromScreen() {
+    static const bool trace = TestEnvOn("DC_MENU_BACKDROP_TRACE");
+
+    if (CTexture *still = TexManager.GetTexture(const_cast<char *>("frame_image"), -1)) {
+        MGMoveFrameBuffImage(reinterpret_cast<sceGsTex0 *>(&still->tex0), 0, 0, 0);
+        if (trace) {
+            std::fprintf(stderr, "menu backdrop: the still made from the screen\n");
+        }
+    }
 }
 
 bool FullMenuLiveScene() {
@@ -2432,10 +2613,18 @@ bool FullMenuLiveScene() {
 void FullMenuBegin() {
     g_full.live = false;
 
-    int owner = NetplayMenuOwner();
+    const int owner = 1; // (coop-wave2: retail's menu is port 1's, player 1's; menu_owner retired)
+
+    // coop-menuaudit (diagnostic): linked play has local menus only; a retail menu reaching here while linked is the soak's
+    // desync family (DCO-136, DCO-141). Said on every copy alike (the world's task is the lockstep's).
+    if (NetplayPartnerLinked()) {
+        std::printf("coop-menuaudit: retail's dungeon menu opens while linked at link tick %lld (owner %d, local menus %d, partner shown %d, in menu %d/%d, hp %d, locked %d)\n",
+                    (long long) NetplayLinkTick(), owner, LocalMenusOn() ? 1 : 0, g_partner.visible ? 1 : 0, PlayerInMenu(1) ? 1 : 0, PlayerInMenu(2) ? 1 : 0,
+                    UserStatus != nullptr ? (int) UserStatus->hp[UserStatus->cur_chara] : -1, (int) BtActStatus.movement_locked);
+    }
 
     // Player 2's needs the link (her own copy shows it); on one screen her Start still opens the pausing one.
-    if (!Enabled() || !MenusOn() || !g_partner.visible || (owner == 2 && NetplayLocalPlayer() == 0) || Mutated("fullmenufreeze")) {
+    if (!Enabled() || !MenusOn() || !g_partner.visible || Mutated("fullmenufreeze")) {
         return;
     }
 
@@ -2511,6 +2700,22 @@ void WeaponFrameTrace() {
                      has ? "has its dcol1 frame" : "has no dcol1 frame: his swing would read a null frame");
         last = has;
     }
+    // coop-triflake (Jep, 11-15): the twin herweapons~world (DC_COOP_MUTATE=herweapon_world) leaves this null frame on purpose; the
+    // test's stop file, written once its poll read the line above, came 90-350 link ticks later on an unpaced pair and lost 2 of 10
+    // runs to P1's Cross at link tick 651 (both copies 0xC0000005 in the swing's null-frame read: CRASH, never a twin's FAIL). Under
+    // the mutation the copy stops on this line itself, on the same link tick on every copy (the build is in the lockstep), as
+    // coop_scriptmenu's and coop_wheel's twins do. Nothing without the switch.
+    if (!has && Mutated("herweapon_world")) {
+        static bool stopped = false;
+
+        if (!stopped) {
+            stopped = true;
+            std::fprintf(stderr, "coop-test: player 1's weapon has no dcol1 frame under herweapon_world at link tick %lld: this copy stops before his swing\n",
+                         (long long) NetplayLinkTick());
+            std::fflush(stderr);
+            dc::app::GameRequestStop();
+        }
+    }
 }
 
 int FullMenuGameLoop() {
@@ -2540,7 +2745,7 @@ int FullMenuGameLoop() {
 
     // coop-menuse: the game's port 1 is the menu owner's pad (the link's routing), so the menu sounds the dungeon's own
     // step plays (its Triangle and Start, its lock-on) are that player's; the menus' steps below say theirs.
-    SoundOwner port_one(NetplayMenuOwner(), true);
+    SoundOwner port_one(1, true);
 
     MenuPackTrace(); // coop-chestmenu: test hook
 
@@ -2759,7 +2964,7 @@ int FullMenuGameLoop() {
         }
         g_second = SecondMenu{};
         g_full.live = false;
-        if (gameTask == GAME_TASK_PLAY) {
+        if (CoopPlainPlay()) {
             gameTask = GAME_TASK_MENU_CLOSE;
         }
         std::printf("coop-fullmenu: player %d's menu closes: down (task %#x)\n", g_full.owner, gameTask);
@@ -2773,7 +2978,7 @@ int FullMenuGameLoop() {
         return result;
     }
 
-    if (gameTask != GAME_TASK_PLAY && gameTask != g_full.task_logged) {
+    if (!CoopPlainPlay() && gameTask != g_full.task_logged) {
         g_full.task_logged = gameTask;
         std::printf("coop-fullmenu: the world went to task %#x with the menu open\n", gameTask);
     }
@@ -2857,11 +3062,23 @@ void MenuWeaponBuildTrace(const void *file) {
                 second ? "second" : "first", g_second.live ? (g_second.owner == 1 ? "player 1's" : "player 2's") : "closed");
 }
 
-void FullMenuResetForSession() {
+void FullMenuResetForSession(bool keep_own_local) {
+    // coop-menushut (coop-menutpose's reverse: player 1's menu open as player 2 took the floor's gate, shut on the next tick):
+    // the one left on a floor takes a checkpoint there as the link goes down (netplay's Close: her way back by catch-up) and takes
+    // its own state again (TakeState(own)), whose session reset ended his local menu's engine; its close command followed
+    // (ActorMenuSync), against DCO-116 (the one left alone keeps their menu open, the world waiting under it, till they close it).
+    // A local menu's engine is this copy's own (it runs on its owner's copy alone; its bits, the agreed state, go in the
+    // checkpoint and its close comes by command, recorded): a self-take is this copy's own state again, so the engine goes on.
+    // DC_NETPLAY_MUTATE=leave_checkpoint_shuts_menu (twin, netplay's TakeState): ended, as before.
+    const LocalMenu kept = keep_own_local && g_local.live ? g_local : LocalMenu{};
+
     g_full = FullMenu{};
     g_second = SecondMenu{};
     g_select = ItemSelect{};
-    g_local = LocalMenu{};
+    g_local = kept;
+    if (kept.live) {
+        std::printf("coop-localmenu: player %d's menu goes on through this copy's own checkpoint (open %d ticks)\n", kept.owner, kept.ticks);
+    }
 }
 
 void FullMenuEndForJob() {
@@ -2876,7 +3093,7 @@ void FullMenuEndForJob() {
     FullMenuResetForSession();
 }
 
-void FullMenuEndForSplit() {
+void FullMenuEndForSplit(bool keep_local) {
     if (Mutated("staymenu")) {
         return;
     }
@@ -2887,7 +3104,12 @@ void FullMenuEndForSplit() {
         BtGameModeFlag = BT_GAME_MODE_PLAY;
         std::printf("coop-fullmenu: player %d's menu ends at the split after %d ticks\n", g_full.owner, g_full.ticks);
     }
-    // coop-localmenu: this copy's own local menu too; its close command follows (ActorMenuSync).
+    // coop-localmenu: this copy's own local menu too; its close command follows (ActorMenuSync). coop-016 (option A): not a stayer's
+    // own, kept open across her split (CoopWorldsStayOnFloor): it and its pad's stick mode go on.
+    if (keep_local && g_local.live) {
+        std::printf("coop-localmenu: player %d's menu stays open across the split after %d ticks\n", g_local.owner, g_local.ticks);
+        return;
+    }
     if (g_local.live) {
         {
             LocalPad pad;
@@ -2918,7 +3140,7 @@ void FullMenuEndForSplit() {
 } // namespace coop
 
 bool FullMenuSaveHere() {
-    const int owner = coop::g_stepping != 0 ? coop::g_stepping : mode == 2 ? 1 : coop::MenuGameMenuOwner();
+    const int owner = coop::g_stepping != 0 ? coop::g_stepping : 1;
 
     if (coop::Mutated("save_both")) {
         std::printf("coop-save: player %d's save written on this copy (player %d)\n", NetplayPartnerLinked() ? owner : NetplayLocalPlayer(),

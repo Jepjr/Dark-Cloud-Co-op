@@ -14,6 +14,7 @@
 
 #include "coop/coop.hpp"
 #include "coop/netplay.hpp"
+#include "options/screen.hpp" // coop-padpick: the Options screen's row, for its rows
 
 namespace coop {
 
@@ -65,6 +66,12 @@ void Attach(int count, const char *spec) {
         desc.vendor_id = 0x1209; // pid.codes' test VID: not a real pad's
         desc.product_id = (Uint16) (0x7000 + i);
         desc.name = "coop test pad";
+        // coop-padpick (DC_TEST_VPAD_XINPUT=N): pad N stands in for Jep's Azeron keypad (an XInput controller that opens
+        // before his Xbox pads), named as XInput pads are, under a test id (1209:7010) so a real keypad stays out of tests.
+        if (i + 1 == TestEnvInt("DC_TEST_VPAD_XINPUT", 0)) {
+            desc.product_id = 0x7010;
+            desc.name = "Controller (Test Keypad - XInput)";
+        }
         SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
         SDL_Joystick  *joystick = id != 0 ? SDL_OpenJoystick(id) : nullptr;
         g_vpad.pads.push_back(joystick);
@@ -102,12 +109,31 @@ void VpadTick() {
     if (from_press && g_vpad.ticks == 0 && NetplayTestPressClock() < 0) {
         return;
     }
+    // coop-padpick: DC_TEST_VPAD_FROM=options: the steps' ticks count from the Options screen's opening (p-lone-pads).
+    static const bool from_options = TestEnvIs("DC_TEST_VPAD_FROM", "options");
+
+    if (from_options && g_vpad.ticks == 0 && !dc::options::g_screen.open) {
+        return;
+    }
     g_vpad.ticks++;
+    // coop-padpick: the Options screen's selected row as the pads move it (Chronicle's screen reads pad 0 alone; a lone
+    // player's pad 0 is every controller): one line a change, on stderr (p-lone-pads).
+    static int said_row = -1000;
+    static int said_page = -1;
+    if (dc::options::g_screen.open && (dc::options::g_screen.row != said_row || dc::options::g_screen.page != said_page)) {
+        said_row = dc::options::g_screen.row;
+        said_page = dc::options::g_screen.page;
+        std::fprintf(stderr, "coop-vpad: options row %d of page %d at pad tick %ld\n", said_row, said_page, g_vpad.ticks);
+    }
     for (const Step &step : g_vpad.steps) {
         if (step.tick != g_vpad.ticks || step.pad < 1 || step.pad > (int) g_vpad.pads.size() || g_vpad.pads[step.pad - 1] == nullptr) {
             continue;
         }
         SDL_Joystick *joystick = g_vpad.pads[step.pad - 1];
+        if (from_options) {
+            // coop-padpick: each step said (stderr), for a script's @event and a row's end (p-lone-pads).
+            std::fprintf(stderr, "coop-vpad: step %ld pad %d %s %d\n", step.tick, step.pad, step.what, step.value);
+        }
         if (Axis(step.what) >= 0) {
             SDL_SetJoystickVirtualAxis(joystick, Axis(step.what), (Sint16) step.value);
         } else if (Button(step.what) >= 0) {

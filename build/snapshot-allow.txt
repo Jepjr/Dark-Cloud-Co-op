@@ -56,6 +56,7 @@ obj:*coop_menu.cpp*
 coop::g_partner
 coop::g_icon_due   # coop-floorscene: ChangePlayer's item-sheet reload held for a scene (both copies reload on one tick)
 coop::g_scene_handover   # coop-sceneowner: her floor merge's change of players held to her scene's end (both copies change on one tick)
+coop::g_story_role       # swapduel: the Toan story scene played by the player who plays Toan (both copies swap on one tick)
 # coop-fx51a (b2, x-fixture-fidelity -Globals 2026-11-05: a fixture's loader against its maker): the random state the floor was
 # built from and its floor (netplay.cpp, sent in a checkpoint for a catch-up joiner's floor and in an apart floor message), and
 # where this copy's player stood as the floor started (coop_worlds.cpp, her arrival's place). A load kept the loader's own.
@@ -77,6 +78,9 @@ obj:*coop_camera.cpp*
 !*CoopBeforeMotion*          # its collision scratch (a std::vector) and test statics
 !*StepPartnerCamera*report*  # a log counter
 !*g_view_arrival*            # coop-arrivalcam: the arriver's draw camera, on this copy's heap
+!*g_view_eye*                # coop-p2actions: her first-person draw camera, on this copy's heap, and its draw flag
+!*CoopViewChoose*traced*     # coop-p2actions: x-p2-eye's trace switch and its draw counter
+!*CoopViewChoose*draws*
 !*DrawTwiceCheck*              # coop-drawtwice: the self-test's switch and counters
 !*present*GuardOn*            # coop-router: the guard's switch and counters
 !*present*g_checked*
@@ -90,6 +94,13 @@ obj:*coop_camera.cpp*
 !*g_other_pres*              # coop-openercam: one draw's saved words, put back by its end
 !*g_view_projection*         # coop-hischest: each copy's own play projection and one draw's saved one
 !*LoadArrival()::pack*       # the arrival pack's heap buffer, each copy's own (its loaded_* statics stay in)
+!*g_beam*                    # coop-entrance2: Moon Sea's beam model for the characters' own beams, draw only, on this copy's heap
+!*MoonShownTick*             # coop-entrance2: its log's own state
+!*g_entrance_local_window*   # coop-entrance2: this copy's own memory of a window join on the floor (a merge must not clear it)
+!*g_door_draw*               # coop-entrance8: the walk-in door's draw-only value
+!*g_door_kept*               # coop-entrance8: the game's own door, kept over a draw
+!*g_door_drawn*              # coop-entrance9: the door as drawn, a draw-time count
+!*g_forest_after*            # coop-entrance9: the forest after-tracker (cloths, the camera at draws): a count
 
 # snapjoin run 4 (2026-10-24, two copies): the joiner's partner fell through the floor after the apply: the floor builder's
 # table and its guards (port/src/dungeonmap.cpp, sections .data$dcbuildmap_a..c) were not in the set, so the joiner kept its
@@ -563,6 +574,12 @@ coop::*::g_pause
 !ps2:*DumpTexture(*)::dir
 !ps2:*PortTextureRebuildAfterApply(*)::in_order
 !ps2:*PortTextureRebuildAfterApply(*)::near_guess
+# coop-texslots: the slot rows' switches and each copy's own peak count (a diagnostic of this copy's table, not game state)
+!ps2:*TextureSlotTaken(*)::trace
+!ps2:*TextureSlotTaken(*)::unguarded
+!ps2:*SlotsLimit(*)::limit
+!ps2:*::g_slots_peak
+!ps2:*::g_slots_peak_since_reset
 !ps2:g_slots_before
 # title/op_a.cpp
 !ps2:*DrawCloud(*)::ambient
@@ -743,8 +760,21 @@ obj:*coop_eventslots.cpp*
 !*CoopEventKeepsVillagers()::said
 !*TripForTest()::*
 !*FramesForTest(*)::on
+!*CameraScrambleTick(*)::*     # (coop-wave3: the camera scramble test hook, coop_camera.cpp: its switch and count)
+!*CameraTurnTrace(*)::*       # (coop-wave3: the camera turn test hook, coop_camera.cpp)
 !*FishTrace(*)::on
 !*::g_fish_state_said
+!*::g_pond_drawn_shown          # (coop-pondfish: this copy's frames that drew the ponds, and each catch drawn here: the test trace's)
+!*::g_pond_polys                # (coop-pondfish: the scratch the pond's walls are read into before their copy in its arena)
+!*::g_catch_shown
+!*::g_catch_hidden
+!*::g_catch_kind
+!*PondTrace(*)::on
+!*CatchDrawnSay(*)::on
+!*AtHook(*)::one
+!guard_variable_for_*PondTrace*
+!guard_variable_for_*CatchDrawnSay*
+!guard_variable_for_*AtHook*
 !*CoopFishingWalkIn()::on
 !*CoopScriptExtTrace(*)::on
 !guard_variable_for_*CoopFishingWalkIn*
@@ -756,14 +786,87 @@ obj:*coop_eventslots.cpp*
 !guard_variable_for_*SysMesForTest*
 !*::g_sys_hidden_frames       # (this copy's draw counts, the tests')
 !*::g_sys_shown_frames
+!*::g_help_frames             # (coop-fishhud: this copy's help bar draw counts, the tests')
+!*HelpFrame(*)::on
+!guard_variable_for_*HelpFrame*
 !*CoopEventSlotsAfterLive()::on
 !guard_variable_for_*CoopEventSlotsAfterLive*
 !*CatchPressForTest(*)::on
 !guard_variable_for_*CatchPressForTest*
 !*CoopEventSlotsAfterLive()::tie
 !*CoopEventSlotsAfterLive()::live_was
+# coop-daytrans: the time of day's world slot (g_world, its bytes and camera) is in the set; out: this copy's own draw (its render
+# targets, a watcher's view camera made from this copy's camera, its frame counts) and its test switch.
+!*::g_dt_hidden
+!*::g_dt_previous
+!*::g_dt_frames_shown
+!*::g_dt_frames_hidden
+!*::g_dt_frames_view
+!*::g_view_camera
+!*::g_view_camera_made
+!*DayTransViewSay(*)::on
+!guard_variable_for_*DayTransViewSay*
+!*CoopDayTransTick()::*        # (its test hook: the switch and its one ask)
+!guard_variable_for_*CoopDayTransTick*
+# coop-dayhouses: each player's and the world slot's clip points (g_clip, g_world_clip) are in the set; out: this copy's frame's own
+# (the ground's clip point kept while its screen's frame draws with its player's) and its test line.
+!*::g_clip_kept
+!*::g_clip_in
+!*PartsSay()::*
+!guard_variable_for_*PartsSay*
 # coop-eventslots: each player's own fishing record (coop_inventory.cpp), carried by a merge or resync with the save it sits beside.
 *g_fish_records
+*g_fish_pools                # coop-fishpools: the save's view of the records (what it last put there, the setting and the players it was made for, the activity under way)
 !*CoopEventSlotsAfterLive()::trace
 !*CoopEventSlotsAfterLive()::said
 !guard_variable_for_*CoopEventSlotsAfterLive*
+
+# coop-swapcombo (A), at rc2 (coop-rc2): each player's kept member (coop_prompt.cpp g_member_of) and the floor's first-tick restore
+# armed (g_member_restore_due), both in the checksum since 9258bbd3 but never in the set: a load, catch-up or resync left the
+# copies apart on them (x-xiao-gap-p1's fixture failed its saved checksum; x-entrwin-* OUT OF SYNC at the catch-up's end).
+coop::g_member_of
+coop::g_member_restore_due
+
+# coop-clownchest (rc4 owed: a clown chest opened apart reaching the other copy at the merge): each player's use prompt (a chest's,
+# the clown's, a gate's, a floor message's: coop_useprompt.cpp) steps on every copy from its player's pad, so an open one is game
+# state, as the key pickers above; it stayed each copy's own across a take (Prompt is fixed storage, no heap: its map pointer is the
+# floor's, alike under the fixed layout). Her clown prompt open as he arrived: his copy had none, her Cross opened and rolled a second
+# there, OUT OF SYNC. With what each held as one closed (kept from the game until let go).
+coop::*::g_prompts
+coop::*::g_held_after
+coop::*::g_note_held_after
+
+# coop-settings (Jep's option C, 11-17): every player's own Element Quick Select, Swap Keeps Lock-On and QTE Always Win, as the step reads them
+*g_player_options            # netplay.cpp
+
+# coop-soundset (localaudit 3.9, Wave 4's group "special sound set"; coop_ownlook.cpp): which special sound set this copy's own sound
+# driver holds (snd.cpp now_sp_no) and the one it is loading (load_sp_no, load_sp_adr). A presentation loads its set on its opener's
+# copy alone, so the copies differ (the write guard's census); taken from the sender, a taker's SndSPSeLoad skipped a load its driver
+# needed and its next presentation played another set's sounds. Read only by the sound calls. Twin DC_SNAPSHOT_MUTATE=sound_in_set.
+!ps2:now_sp_no
+!ps2:load_sp_no
+!ps2:load_sp_adr
+
+# coop-wave4 (localaudit 3.9, Jep-approved Wave 4: per-player presentation out of the state set, a group a session; coop_ownlook.cpp):
+# group "message look". The speech bubbles' wobble tables (ClsMes::MakeMesWin rolls them from TableRand, a generator of its own while
+# linked; only MakeFukidashi_sub and BubbleTarget, draws, read them), TableRand's state, the windows' palette and two draw functions'
+# frame counters: each copy's own screen, read by nothing the step runs (the census: they already differ between two copies in
+# lockstep). A join, merge or state file no longer gives the taker the sender's. Twin DC_SNAPSHOT_MUTATE=look_in_set (back in).
+!ps2:RandTbl
+!ps2:RandTbl2
+!ps2:TableRand()::state
+!ps2:MesWinClut
+!ps2:DrawMenuWaku(*)::MenuWakuCnt
+!ps2:CharaStatusMsgDraw(*)::statusCnt
+
+# coop-seed324 (rc5 soak seed 20261123324, apart in town: OUT OF SYNC at tick 60 after a merge): the rings' stepped state
+# (coop_wheel.cpp) is lockstep state. Player 1's ring holds the game port's buttons (PlayerWheelMask: all while it is open, and
+# after it closes those still held, till let go), and each ring reads its presses against the buttons it last saw. Out of the set,
+# a joiner took the sender's world without them: his ring (apart, this copy's own: coop-apartrings) closed on the Select that
+# opened his Georama, which kept Select off the game till let go on the sender's copy; on hers the game saw it pressed again and
+# closed his Georama. Trivially copyable; the twin DC_COOP_MUTATE=ringset_own keeps this copy's own across the apply.
+# (Not g_wheel: a reference to g_wheels[1]; not the faces' file nor the element sheet's history: a vector and a log.)
+*::g_wheels
+*::g_town_p1_held
+*::g_ring_held
+*::g_town_let_go

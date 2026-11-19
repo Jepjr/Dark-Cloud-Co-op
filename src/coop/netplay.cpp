@@ -36,6 +36,7 @@
 #include "coop/coop_camera.hpp"
 #include "coop/coop_camtest.hpp" // coop-lockpress: CamTestOwnPad
 #include "coop/coop_combat.hpp"
+#include "coop/coop_prompt.hpp"    // coop-swapcombo (A): the players' kept members
 #include "coop/coop_core.hpp"
 #include "coop/coop_georama.hpp"
 #include "coop/coop_interact.hpp"  // coop-gateopen: OpenGatesBytes
@@ -49,6 +50,7 @@
 #include "editmenu.hpp"           // coop-soakfix4: the Georama menu's page (test hook)
 #include "memcard.hpp"            // coop-soakfix4: OPTION_STEP_RUN (test hook)
 #include "options/screen.hpp"     // coop-soakfix4: the Options screen running (test hook)
+#include "options/menu_option.hpp" // coop-settings: GameOptionsApply (each copy's own options)
 namespace dc::game { // coop-soakfix4: the town edit menu's page and cursor (editmenu.cpp, its recipe; a test hook)
 int  EditMenuPage();
 bool EditMenuOnSelect();
@@ -70,6 +72,7 @@ void EditMenuSetCursor(int selection);
 #include "coop/coop_townmenu.hpp" // coop-saveload
 #include "coop/coop_scriptmenu.hpp" // coop-small2: a script's menu open at the merge
 #include "coop/coop_worlds.hpp"    // coop-worlds
+#include "coop/coop_whereis.hpp"   // coop-whereis
 #include "coop/coop_wheel.hpp"     // coop-wheelcrash
 #include "coop/netplay_socket.hpp"
 #include "coop/netplay_steam.hpp"
@@ -141,6 +144,8 @@ bool         PortBuildMapGuardsPlaced();
 extern s32        gameTask;
 extern s32        mode;
 extern s32        MapNo;
+extern s32        infoMap;    // coop-settings: the mini-map's switch (dun/gameloop.cpp)
+extern s32        infoMapOld;
 extern s32        existFlag;
 extern s32        NextMapNo;
 extern s32        OldMapNo;
@@ -184,6 +189,7 @@ struct TickParts {
     const char                                  *at = nullptr;
     std::chrono::steady_clock::time_point        since{};
     std::vector<std::pair<const char *, double>> ms; // since the last NetplayTickPartsSay
+    std::vector<std::pair<const char *, double>> window; // coop-apartfps: since the last NetplayTickPartsWindow (tick-stats)
 };
 TickParts g_tick_parts;
 
@@ -203,6 +209,17 @@ void TickPart(const char *name) {
         }
         if (!found) {
             g_tick_parts.ms.emplace_back(g_tick_parts.at, spent);
+        }
+        found = false;
+        for (auto &part : g_tick_parts.window) {
+            if (part.first == g_tick_parts.at) {
+                part.second += spent;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            g_tick_parts.window.emplace_back(g_tick_parts.at, spent);
         }
     }
     g_tick_parts.at = name;
@@ -232,11 +249,9 @@ struct LinkSettings {
     int         netplay = 0;
     std::string peer;
     int         port = 0;
-    int         delay = 3;
-    bool        controller_only = true;
+    int         delay = 3;          // the input delay a link starts at (it then follows the round trip; a joiner takes the host's)
     bool        join_menu = false; // DC_NETPLAY_JOIN_MENU: player 2 joins from the main menu (NetplayTitleJoin)
     bool        one_client = false; // game.netplay 3 (DC_NETPLAY=3): host or join, as the player picks (below)
-    bool        keyboard = false;   // game.netplay_keyboard (DC_NETPLAY_KEYBOARD=1): the keyboard plays while linked
 };
 
 // One client (game.netplay 3, or DC_NETPLAY=3: the LAN pack's "Play Dark Cloud (LAN).cmd"): a copy that starts or
@@ -341,21 +356,42 @@ void        MenuOnline(bool on);
 // The tag a Steam lobby carries, so a guest joins only Dark Cloud co-op lobbies (the Hello then checks the build).
 constexpr const char *kSteamTag = kNetSteamTag; // (coop-lobbysteam's, one tag)
 
+// coop-apartfps (Jep's rc1 playtest: alone in the mayor's house after a split, player 1's copy ran 40.9 tps with "netplay wait 20.01" ms a
+// tick, 144 fps down to 20): the environment's switches here are read once a job (COOP_TEST_SWITCH), not on every call. Each getenv scans
+// the process's environment under the CRT's lock, and NetplayRole (worlds' Player(), the storage's Me()) is a whole Settings(): eight of them
+// a call, 10-20 us. The apart slot scan asked it for each of the storage's 120 slots every tick: 2.3 ms a tick on the host's copy apart and
+// 4.4 on the other's on the x-apart-fps fixture (headless, no draw; tick-stats' netplay tick's parts), more where the environment is larger.
+// A player's environment never changes these in a run (netplay_local's SetEnvironmentVariableA, for a child, is not the CRT's getenv).
+// DC_NETPLAY_MUTATE=settings_env_each_call (twin, x-apart-fps~env): read on every call, as before.
 LinkSettings Settings() {
     const dc::platform::Config &config = dc::platform::ConfigGet();
-    LinkSettings  out{config.netplay, config.netplay_peer, config.netplay_port, config.netplay_delay, config.netplay_controller_only};
+    LinkSettings  out{config.netplay, config.netplay_peer, config.netplay_port};
+    COOP_TEST_SWITCH(bool, each_call, NetplayMutated("settings_env_each_call"));
+    COOP_TEST_SWITCH(int, env_netplay, TestEnvInt("DC_NETPLAY", -1000));
+    COOP_TEST_SWITCH(bool, env_plain_online, TestEnvIs("DC_NETPLAY_MUTATE", "plain_online"));
+    COOP_TEST_SWITCH(const char *, env_peer, TestEnv("DC_NETPLAY_PEER"));
+    COOP_TEST_SWITCH(int, env_port, TestEnvInt("DC_NETPLAY_PORT", -1000));
+    COOP_TEST_SWITCH(int, env_delay, TestEnvInt("DC_NETPLAY_DELAY", -1000));
+    COOP_TEST_SWITCH(bool, env_join_menu, TestEnvOn("DC_NETPLAY_JOIN_MENU"));
 
-    out.netplay = TestEnvInt("DC_NETPLAY", out.netplay);
-    if (out.netplay == 0 && (g_menu_online || TestEnvIs("DC_NETPLAY_MUTATE", "plain_online"))) {
+    if (each_call) {
+        env_netplay = TestEnvInt("DC_NETPLAY", -1000);
+        env_plain_online = TestEnvIs("DC_NETPLAY_MUTATE", "plain_online");
+        env_peer = TestEnv("DC_NETPLAY_PEER");
+        env_port = TestEnvInt("DC_NETPLAY_PORT", -1000);
+        env_delay = TestEnvInt("DC_NETPLAY_DELAY", -1000);
+        env_join_menu = TestEnvOn("DC_NETPLAY_JOIN_MENU");
+    }
+    out.netplay = env_netplay != -1000 ? env_netplay : out.netplay;
+    if (out.netplay == 0 && (g_menu_online || env_plain_online)) {
         out.netplay = 3; // (plain_online: the test's twin, a plain copy always online)
     }
-    if (const char *peer = TestEnv("DC_NETPLAY_PEER")) {
-        out.peer = peer;
+    if (env_peer != nullptr) {
+        out.peer = env_peer;
     }
-    out.port = TestEnvInt("DC_NETPLAY_PORT", out.port);
-    out.delay = TestEnvInt("DC_NETPLAY_DELAY", out.delay);
-    out.join_menu = TestEnvOn("DC_NETPLAY_JOIN_MENU");
-    out.keyboard = config.netplay_keyboard || TestEnvOn("DC_NETPLAY_KEYBOARD") || g_menu_online;
+    out.port = env_port != -1000 ? env_port : out.port;
+    out.delay = env_delay != -1000 ? env_delay : out.delay;
+    out.join_menu = env_join_menu;
 
     if (out.netplay == 3) {
         out.one_client = true;
@@ -414,6 +450,10 @@ int ActivePad() {
         return 0;
     }
 
+    // coop-padpick: each pad as itself (a lone player's pad 0 adds the others: read merged, it would win every press).
+    const bool merged = InputPadsMerged();
+
+    InputSetPadsMerged(false);
     for (int i = 0; i < kInputPadCount; i++) {
         InputPadState state = InputGetPad(i);
         bool          stick = std::abs((int) state.left_x - 128) > 60 || std::abs((int) state.left_y - 128) > 60;
@@ -426,6 +466,7 @@ int ActivePad() {
             break;
         }
     }
+    InputSetPadsMerged(merged);
 
     return active;
 }
@@ -456,6 +497,60 @@ int PadNamed(const char *variable, int number) {
     return here;
 }
 
+// coop-padpick (Jep, 2026-11-12): a lone player (one player on this PC, no controller handed to anyone else) is played
+// by every connected controller at once, with the keyboard and mouse, on every screen: Kazarov's pad 0 then reads them
+// all (InputSetPadsMerged). Chronicle reads player 1 from pad 0 alone (the first controller opened), and one client read
+// only the controller last pressed, which Chronicle's own screens never saw: Jep's v0.1.1 install (an Azeron keypad
+// opened first, two Xbox pads) had dead Xbox pads in OPTION, and the lobby kept him on one pad. Picking a controller per
+// player is only for players to hand pads to: Local's two copies, a lobby (open, or started with another seat on this
+// PC), a copy bound to one (input.controller, DC_NETPLAY_PAD), two copies numbered by game.netplay 1/2.
+// Returns why it is not lone, or nullptr. DC_NETPLAY_MUTATE=pads_unmerged (the twin): never merged, as before;
+// pads_always_merged (l-lobby -Case handed's twin): merged even with controllers handed out.
+const char *PadsHandedOut() {
+    static const int  pad = TestEnvInt("DC_NETPLAY_PAD", 0);
+    static const bool handed = TestEnvInt("DC_NETPLAY_LOCAL_PAD", -1) >= 0 || TestEnvInt("DC_NETPLAY_LOCAL_CLAIM", -1) >= 0;
+    const LinkSettings settings = Settings();
+
+    if (NetplayMutated("pads_always_merged")) {
+        return nullptr;
+    }
+    if (NetplayMutated("pads_unmerged")) {
+        return "pads_unmerged (test twin)";
+    }
+    if (pad > 0 || dc::platform::ConfigGet().controller != 0) {
+        return "this copy is bound to one controller";
+    }
+    if (handed || g_host_via == 3 || g_lobby_spawned) {
+        return "another copy on this PC has a controller";
+    }
+    if (g_lobby_pad >= 0) {
+        return "the lobby gave each seat its controller";
+    }
+    if (settings.netplay != 0 && !settings.one_client) {
+        return "two copies numbered by game.netplay";
+    }
+    return nullptr;
+}
+
+// Each tick, before the pads are read (NetplayPad): merged while lone.
+void PadsMergeTick() {
+    const char *why = PadsHandedOut();
+    static int  said = -1;
+
+    InputSetPadsMerged(why == nullptr);
+    if (why == nullptr) {
+        ActivePad(); // (still followed: a lone player's rumble, and the lobby's host seat when one opens)
+    }
+    if (said != (why == nullptr ? 1 : 0)) {
+        said = why == nullptr ? 1 : 0;
+        if (why == nullptr) {
+            std::fprintf(stderr, "netplay: pads: every controller plays player 1 (one player on this PC)\n");
+        } else {
+            std::fprintf(stderr, "netplay: pads: one controller a player (%s)\n", why);
+        }
+    }
+}
+
 // This copy's controller: player 1's copy reads controller 1, player 2's controller 2 (two copies on one PC),
 // or the one DC_NETPLAY_PAD names (1 for the first: a joiner on its own PC). One client plays controller 1.
 int OwnPad(int player) {
@@ -463,6 +558,10 @@ int OwnPad(int player) {
 
     if (pad >= 0 && pad < kInputPadCount) {
         return pad;
+    }
+    // coop-padpick: a lone player's pad 0 is every controller (PadsHandedOut).
+    if (InputPadsMerged()) {
+        return 0;
     }
 
     // Local (two copies on this PC, netplay_local.hpp): player 1's copy keeps the controller pressed on its title
@@ -545,6 +644,8 @@ void SetWaiting(char *status, std::size_t size, int player) {
 constexpr std::uint32_t kMagic = 0x44434F51;       // "QOCD": the tick packet
 constexpr std::uint32_t kChunkMagic = 0x44435253;  // "SRCD": a piece of the host's resync state
 constexpr std::uint32_t kAckMagic = 0x44435241;    // "ARCD": the pieces the joiner holds
+constexpr std::uint32_t kLoadPieceMagic = 0x44434A4C; // "LJCD": coop-joinload: a piece of the host's load for a joiner (a Chunk)
+constexpr std::uint32_t kLoadAckMagic = 0x44434A41;   // "AJCD": coop-joinload: the load's pieces the joiner holds (an Ack)
 constexpr std::uint32_t kBusyMagic = 0x44434255;   // "UBCD": this copy is loading, not gone
 constexpr std::uint32_t kLeaveMagic = 0x4443564C;  // "LVCD": this copy is quitting (a Busy's layout)
 constexpr std::uint32_t kLeaveGaveUp = 2;          // coop-catchupdrop: a Leave's word: this copy gave the link up mid catch-up
@@ -566,12 +667,73 @@ constexpr std::size_t kSaveMenuCursorBytes = 0x2C;
 
 // Blanks the parts of a SaveData copy that each copy keeps for itself (config, play time, menu cursor).
 // DC_NETPLAY_MUTATE=save_sums_cursor (twin): the menu cursor summed as before.
+// coop-settings (Jep's option C, 11-17): the dungeon map's status (UserStatus->minimap_status, in the SaveData's dungeon status) is
+// each player's own Dungeon Map row, read by the mini-map's draw alone (dungeonmap.cpp, and infoMap, which only the draw reads):
+// out of the sum, as the config words are. (Its offset from any CSaveData: the dungeon status sits at one place in the class.)
+std::size_t SaveMinimapOffset() {
+    static CSaveData *const probe = (CSaveData *) ::operator new(sizeof(CSaveData));
+
+    return (std::size_t) ((const unsigned char *) &((CUserStatus *) probe->GetDngStatus())->minimap_status - (const unsigned char *) probe);
+}
+
 void BlankOwnSaveParts(unsigned char *save) {
     std::memset(save + kSaveConfigOffset, 0, kSaveConfigBytes);
+    std::memset(save + SaveMinimapOffset(), 0, sizeof(s32));
     std::memset(save + kSavePlayTimeOffset, 0, 4);
     if (!NetplayMutated("save_sums_cursor")) {
         std::memset(save + kSaveMenuCursorOffset, 0, kSaveMenuCursorBytes);
     }
+}
+
+// coop-settings (Jep's option C, 11-17): Element Quick Select, Swap Keeps Lock-On and QTE Always Win are each player's own, and
+// every copy knows every player's (this table, simulation state: in the state set, snapshot-allow.txt, and carried by a resync
+// as the "own options" part), so the step reads the value of the player it steps (CoopPlayerOption: the game pad's player, whose
+// pad DunMoveChara and a duel read) and every copy reads the same. Each player's copy sends its own row as a command
+// (kCmdOwnOptions) whenever the table's row differs from its config (a link, a take, a change in its Options), and every copy
+// sets it on that command's tick. Before, the three were shared: the joiner played by the host's, her own change snapped back.
+constexpr std::uint8_t kOptQuickSelect = 1;
+constexpr std::uint8_t kOptKeepsLock = 2;
+constexpr std::uint8_t kOptQteWin = 4;
+constexpr std::uint8_t kOptCharaQuick = 8; // coop-dpadwheel: game.chara_quick_select (D-pad Down, the character ring)
+// coop-wave2 (Jep's 5.4, 11-17: own-talk message speed): game.message_speed is each player's own for their own talks (a talk's window
+// steps on every copy, so every copy reads its talker's row: CoopMessagesFastFor); the windows every player shares (a scene's, an
+// event's) run at player 1's (CoopSharedMessagesFast). Before, Message Speed was a shared key: player 1's for every window.
+constexpr std::uint8_t kOptFastMessages = 16;
+std::uint8_t           g_player_options[coop::kMaxPlayers] = {};
+std::int64_t           g_own_options_sent = -1; // the link tick this copy last sent its row (this copy's own, not state)
+
+std::uint8_t OwnOptionBits() {
+    const dc::platform::Config &config = dc::platform::ConfigGet();
+
+    return (std::uint8_t) ((config.element_quick_select ? kOptQuickSelect : 0) | (config.swap_keeps_lock_on ? kOptKeepsLock : 0) |
+                           (config.qte_always_win ? kOptQteWin : 0) | (config.chara_quick_select ? kOptCharaQuick : 0) |
+                           (config.options.fast_messages ? kOptFastMessages : 0));
+}
+
+// coop-settings (Jep's option C, 11-17): this copy's own options (Clock, Dungeon Map, Enemy and Party Damage, and the other
+// config words) written again into the SaveData after it took another copy's (a resync's, a load's or a state set's), so each
+// player keeps their own through them; the mini-map's switch follows its own map (a hidden map shown, or a shown one hidden, as
+// the game's mode start sets it). Before, a joiner took the host's rows at the join and the state carried the host's words.
+void KeepOwnOptions(const char *why) {
+    if (SaveData == nullptr) {
+        return;
+    }
+    const dc::platform::ConfigGameOptions &own = dc::platform::ConfigGet().options;
+    CUserStatus *const status = (CUserStatus *) SaveData->GetDngStatus();
+    const s32 took = status->minimap_status;
+
+    dc::options::GameOptionsApply(own);
+    g_own_options_sent = -1; // (the taken state's table may lack this copy's row: sent again on the next tick, not after the wait)
+    if (status->minimap_status == 3) {
+        infoMap = 0;
+        infoMapOld = 0;
+    } else if (infoMap == 0 && infoMapOld == 0) {
+        infoMap = 1;
+        infoMapOld = 1;
+    }
+    std::fprintf(stderr, "netplay: own options kept (%s): clock %s, map %d (minimap %d, took %d), enemy damage %s, party damage %s\n", why,
+                 own.clock ? "on" : "off", own.map, (int) status->minimap_status, (int) took, own.enemy_damage ? "on" : "off",
+                 own.player_damage ? "on" : "off");
 }
 
 // The first tick waits a minute for the other copy to start and load; later ones give up after five
@@ -617,8 +779,17 @@ constexpr int kPieceWindowStart = 32;
 // trips and the first 2 MB part five more of doubling (1.1 s of the 3.4); 128 KB at once is half a home router's queue (the
 // 2 MB/s relay's 256 KB, mp-direct-join-bottleneck). DC_NETPLAY_MUTATE=window_start_small (twin): 32, as before.
 constexpr int kPieceWindowFirst = 128;
+bool OwnWindowLink();
 int PieceWindowFirst() {
     static const bool small = NetplayMutated("window_start_small");
+
+    // coop-p2tick (her first play tick after his: the state set's first 2 MB part took 4 rounds, 64 ms, its window doubling
+    // from the checkpoint's 286 to 2048, the next parts 1 round, 15 ms): a link between a host and a window it started on
+    // this PC goes straight to 127.0.0.1, with no router or relay queue between them, and each copy's socket holds 4 MB
+    // (two whole windows). There the first window is a whole part. DC_NETPLAY_MUTATE=window_first_ramp (twin): 128 there too.
+    if (!small && OwnWindowLink() && !NetplayMutated("window_first_ramp")) {
+        return kChunks;
+    }
     return small ? kPieceWindowStart : kPieceWindowFirst;
 }
 // coop-steamjoin: over Steam the pieces wait in Steam's own send queue, paced at its send rate, before they reach the wire,
@@ -653,6 +824,7 @@ struct Entry {
     std::uint16_t buttons;
     std::uint8_t  lx, ly, rx, ry;
     NetCommand    command; // coop-localmenu: the player's command on this frame (kind 0: none)
+    std::int32_t  steer;   // coop-wave3: the steer row, the yaw this pad's stick is read against (InputPadState::steer)
 };
 
 struct Packet {
@@ -676,6 +848,7 @@ struct Chunk {
     std::uint32_t total;
     std::uint16_t index;
     std::uint16_t count;
+    std::uint16_t part; // coop-joinstuck: a resync's part (kResyncPartLast on its last), 0 otherwise
     std::uint8_t  data[kChunkBytes];
 };
 
@@ -765,6 +938,7 @@ struct PieceSender {
     std::chrono::steady_clock::time_point resent_held_sent{};         // and the newest send of a piece sent again held
     std::chrono::steady_clock::time_point resent_held_at{};           // and when it was seen held
     std::chrono::steady_clock::time_point resent_held_first{};        // coop-joinbudget: when the first such was held, while pieces are late
+    std::uint16_t                         part = 0;                   // coop-joinstuck: the pieces' part word (Chunk::part, a resync's)
     std::uint32_t                         sends_here = 0;             // coop-offthread: pieces sent on the game thread
     std::uint32_t                         sends_off = 0;              // and handed to the send thread (PieceSends)
     double                                call_ms_max = 0.0;          // the game thread's longest SendPieces call
@@ -880,6 +1054,7 @@ struct Ack {
     std::uint32_t player;
     std::uint32_t session;
     std::uint32_t tick;
+    std::uint32_t part; // coop-joinstuck: a resync's part the held bits are of (0 otherwise)
     std::uint32_t held[kChunks / 32];
 };
 
@@ -987,6 +1162,7 @@ struct Link {
     bool          started = false;
     bool          up = false;
     std::chrono::steady_clock::time_point peer_busy_at{}; // the other copy's last Busy
+    std::chrono::steady_clock::time_point word_at{}; // coop-falsedrop: the other copy's last datagram of this link, any kind (LinkedCheckIn)
     std::chrono::steady_clock::time_point peer_linking_at{}; // coop-worlds: the other copy's last link datagram heard while listening
     std::uint32_t peer_linking_session = 0; // coop-linkrace: ... and the session it came under
     bool          link_heard = false;       // coop-linkrace: a datagram of the other copy's link came while this one was up
@@ -1011,18 +1187,18 @@ struct Link {
     bool          arriving = false;     // coop-houseexit: this copy arrived where the other stayed and catches up, until the lockstep
     int           arrival_walk = 0;     // coop-arrivalfull: this link is a floor join: the arriver (the one taking the state) whose
                                         // arrival both copies play at the lockstep (coop::ArrivalWalkStart), 0 none
+    int           entrance_walk = 0;    // coop-entrwin: a join in the floor's entrance window: the walker whose own entrance both
+                                        // copies play at the lockstep at its spot (coop::EntranceWalkStart), 0 none
+    int           entrance_gap = -1;    // coop-entrance2 rule 3: that walker's arrival after the lead (its Hello's walk_gap), -1 none
+    int           cut_word = 0;         // coop-b4arrive: the arriver whose own arrival the merge cut (the host's link Hello's cut_walk), 0 none
+    bool          arrival_cut = false;  // and this floor join's arrival walk is that one's: played and shown on its own screen
     Slot          local[kRing];
     Slot          remote[kRing];
     InputPadState synced[2];
     InputPadState previous[2];
     InputPadState routed[2];
-    // Who steers the menus (port 1): 1 or 2; see netplay.hpp. menu_tick is the tick player 2 took them,
-    // menu_seen whether the game has left free play since, held the buttons the new owner of port 1
-    // still held as it changed hands, which port 1 keeps released until they are let go.
-    int           menu_owner = 1;
-    std::int64_t  menu_tick = -1;
-    bool          menu_seen = false;
-    std::uint16_t held = 0;
+    // (coop-wave2: menu_owner, menu_tick, menu_seen and held retired: player 2's claim of port 1 for retail's menu, a 2-player
+    // single field, had no way left to happen: linked play is always co-op, where every player's menu is their own local one.)
     std::int64_t  sums_frame[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     std::uint32_t sums[8] = {};
     std::int64_t  last_checksum_frame = -1;
@@ -1084,6 +1260,12 @@ struct Link {
     std::chrono::steady_clock::time_point resynced_clock{}; // coop-mergetime: when the last resync's state was held
     std::vector<unsigned char> resync_state;
     std::uint32_t              resync_held[kChunks / 32] = {};
+    // coop-joinstuck: a state past one blob's pieces goes in parts of kResyncPartBytes, one after the other (Resync): the host's
+    // part in flight (resync_held is its) and how many; the joiner's part arriving and whether it is the last
+    std::uint32_t              resync_out_part = 0, resync_out_parts = 1;
+    std::vector<unsigned char> resync_part;
+    std::uint32_t              resync_in_part = 0;
+    bool                       resync_in_last = false;
     std::int64_t               restart_map = -1;
     int                        restart_floor = -1; // coop-snapshot: a floor-start checkpoint's floor, for GameTakeJumpFloor (once)
     int                        resync_target = -1; // the map the last resync sent both copies to
@@ -1208,6 +1390,9 @@ void TakerDropsSolo() {
 // replayed to J, does too. The host is never reloaded; until it has a checkpoint a join keeps the quiet resync.
 constexpr std::uint32_t kCatchBit = 0x80000000u;   // a Chunk's or Ack's tick with it: a catch-up blob's id
 constexpr std::uint32_t kCaughtMagic = 0x44435543; // "CUCD": the joiner replayed to a tick (a Busy, unused the tick)
+// coop-b4arrive: "ENCD": the joiner's own arrival as far as its screen showed it before the state set landed (a Busy, unused the
+// record's ticks: coop::ArrivalOwnShown), said with each kCaughtMagic; the host's word of it rides the last blob (NetplayEntranceFrom).
+constexpr std::uint32_t kEntranceShownMagic = 0x44434E45;
 constexpr int           kJoinGapTicks = 90;
 // coop-lockgap: her merge's tight gap (coop-localfix2, below). At 2 he trailed her by ~4 ticks through many 2-tick blobs,
 // 180-400 ms of his black; at 8 her copy waits at most on his last 8 replay ticks (~10 ms). Roll back: 2.
@@ -1277,6 +1462,10 @@ struct Catch {
     // page list's next blob waits on the taker's landing)
     std::chrono::steady_clock::time_point out_held_at{};
     PieceSender                           out_pieces;
+    // coop-joinstuck: a blob past one blob's pieces (kChunks: the checkpoint with the host's save slots, 2.19 MB with Jep's 24) goes
+    // in parts of kBlobPartMark, one blob each (CatchBlobPart): the whole, and the part in flight of how many
+    std::vector<unsigned char>            out_whole;
+    std::size_t                           out_part = 0, out_parts = 0;
     std::int64_t                          sent_to = 0;
     std::size_t                           deltas_sent = 0; // player 2's changes from apart the blobs so far carried
     std::vector<unsigned char>            join_save;       // the joiner: the host's town Georama at J, from the last blob
@@ -1286,11 +1475,20 @@ struct Catch {
     int                                   pick_member = -1;
     std::string                           pick_name;
     std::vector<unsigned char>            pick_bag;
+    // coop-b4arrive: the joiner's own arrival as its screen showed it before the state set landed (record ticks; the joiner's own
+    // count, the host's as she said it; -1 none), and the last blob's word of where both copies go on with it at J (-1 none)
+    int                                   entrance_shown = -1;
+    int                                   entrance_from = -1;
+    // coop-p2tick (l-lobby-join-card's OUT OF SYNC at tick 60): the sender's word with the last blob that its copy is apart
+    // at J, so this catch-up ends in a worlds merge placed at J+1; both copies leave J and J+1 out of the compare by it
+    bool                                  join_merge = false;
     std::int64_t                          caught = -1;
     // The joiner: the blob arriving, the last whole one (ids from 1), the pads held so far.
     std::uint32_t                         in_id = 0;
     std::uint32_t                         in_done = 0;
     std::vector<unsigned char>            in;
+    std::vector<unsigned char>            in_whole;       // coop-joinstuck: a parted blob's parts so far (CatchTake)
+    std::size_t                           in_whole_parts = 0;
     std::uint32_t                         in_held[kChunks / 32] = {};
     std::uint32_t                         in_pieces = 0; // coop-steamceiling: the pieces of the blob arriving that came (coop-ackbatch counts them too),
     std::uint32_t                         in_again = 0;  // ... and of those, ones already held (late, not lost)
@@ -1320,6 +1518,7 @@ CloseWatch g_close_watch;
 
 Catch g_catch;
 int   g_catches_begun = 0; // coop-catchupdrop: catch-ups begun on this copy in this game (the give-up hook's N)
+std::int64_t g_tick0_made_up = 0; // coop-p2tick: CoopPerfMadeUp at the recording's tick 0
 
 // coop-snapshot stage 4 (DC_NETPLAY_SNAPSHOT=1 on the host): a catch-up join sends the
 // checkpoint alone, then the host's state set as taken on a quiet frame start at tick S (Snap::tick), in parts of at most
@@ -1339,6 +1538,20 @@ constexpr std::size_t   kSnapPartBytes = (std::size_t) kChunks * kChunkBytes - 6
 // DC_NETPLAY_MUTATE=no_pagediff: the whole state set, as before.
 constexpr std::uint32_t kPageListMark = 0xFFFFFFFCu;
 constexpr std::uint32_t kPageDiffMark = 0xFFFFFFFBu;
+// coop-joinstuck (the developer's 11-18 rc4 multi-screen join, "Joining player 1..." for good): a blob's from word for a part of a catch-up blob
+// past one blob's pieces (kChunks, 2 MB). A blob's pieces are at most kChunks: the acknowledgement's bitmap, the joiner's checks and
+// every PieceSender array are that big. The checkpoint carries the host's save slots (NetplaySlotsTake, some 95 KB a slot), and
+// Jep's 24th slot made it 2,191,173 bytes: blob 1 was 2140 pieces, the joiner dropped each (count past kChunks, never acknowledged),
+// and the host sent them again forever, reading its piece arrays past their ends (the nonsense "sent ... ms ago" ages). Such a blob
+// now goes in parts of kSnapPartBytes (from kBlobPartMark, to the part, join the count, checkpoint the length), which the joiner
+// puts together and takes as the one blob. DC_NETPLAY_MUTATE=blob_one_part (twin): the whole blob as one, as before (SendPieces
+// refuses it now: no piece goes, the join stalls, as in the developer's).
+constexpr std::uint32_t kBlobPartMark = 0xFFFFFFFAu;
+// coop-joinstuck: a resync's state goes the same way (the coop-latejoinscene resync, the developer's: his checkpoint 2,096,789 bytes and 9,983
+// carried, past 2 MB, dropped at the joiner): parts of one blob's bytes each, one after the other, each piece naming its part
+// (Chunk::part, the last's with kResyncPartLast), each acknowledgement the part its bits are of (Ack::part).
+constexpr std::size_t   kResyncPartBytes = (std::size_t) kChunks * kChunkBytes;
+constexpr std::uint16_t kResyncPartLast = 0x8000;
 constexpr std::uint32_t kPageNeedMagic = 0x4443444E;  // "NDCD"
 constexpr std::uint32_t kPageWholeMagic = 0x44434857; // "WHCD"
 constexpr std::uint32_t kPageNeedWords = 128;
@@ -1392,6 +1605,7 @@ struct Snap {
     bool                       taken = false;
     bool                       refused = false; // the joiner could not apply it: the pads from 0
     std::int64_t               tick = -1;       // S
+    std::uint32_t              deltas = 0;      // coop-soakapart2: the recorded changes the set holds (g_solo.deltas at the take)
     std::vector<unsigned char> bytes;
     std::size_t                parts = 0;
     std::size_t                sent = 0; // parts sent (the one in flight included)
@@ -1401,6 +1615,7 @@ struct Snap {
     std::size_t                in_parts = 0;
     std::size_t                in_total = 0;
     std::int64_t               in_tick = -1;
+    std::uint32_t              in_deltas = 0; // coop-soakapart2: the host's word of the recorded changes its set holds
     bool                       apply_due = false;
     bool                       applied = false;
     bool                       said_refused = false;
@@ -1457,7 +1672,7 @@ bool SnapshotJoinOn() {
     return asked && SnapshotLayoutPinned() && !NetplayMutated("no_snapshot");
 }
 
-// coop-samedoorfix (w-flagsync -Case samedoor, red with game.coop_story_gather off): whether a merge goes by the state of
+// coop-samedoorfix (w-flagsync -Case samedoor, red with the story gather off, before coop-gatherpicker made it always on): whether a merge goes by the state of
 // the copy that was there first (the Hellos' stayer). It asked for the snapshot as the session's setting, which only the
 // Online launchers set (DC_NETPLAY_SNAPSHOT), so from the title's Multi-player or a test without it the host sent always:
 // she in the mayor's house first and he following, her copy caught up to his walk-in and played the mayor's scene that
@@ -1544,7 +1759,7 @@ bool SnapshotQuietTick(bool menu_ok = false) {
         // (twin, l-local-play-houseout-towntask~twin): the dungeon's task must be play here too, as before.
         static const bool task_counts = NetplayMutated("town_quiet_task");
 
-        return (!task_counts || gameTask == GAME_TASK_PLAY) && ((walks && !menu_for_test) || (menu_ok && (walks || menu)));
+        return (!task_counts || CoopPlainPlay()) && ((walks && !menu_for_test) || (menu_ok && (walks || menu)));
     }
     // coop-localfix: after the menu's wait, a knocked-out host's change screen too (its state is the game's globals, as a
     // menu's): the replay from tick 0 it fell back to parted the copies (P1 knocked out alone as she arrived, 2026-10-26).
@@ -1555,7 +1770,7 @@ bool SnapshotQuietTick(bool menu_ok = false) {
     }
     // coop-b1lesson: or the floor's opening scene she joins (CoopWorldsSceneJoining: its script's state is in the set, the
     // VM's arena, since coop-scenejoin), so her copy takes it mid-scene and plays the rest with this one.
-    if (mode == GAME_MODE_DUNGEON && BtEventMode != 0 && (gameTask == GAME_TASK_PLAY || gameTask == GAME_TASK_SCRIPT_RUN) && CoopWorldsSceneJoining() == 1) {
+    if (mode == GAME_MODE_DUNGEON && BtEventMode != 0 && (CoopPlainPlay() || gameTask == GAME_TASK_SCRIPT_RUN) && CoopWorldsSceneJoining() == 1) {
         return true;
     }
     // coop-joinfix (LAN playtest 2026-10-30, item 37a: she joined his B4 during its skeleton scene and stayed black through all
@@ -1565,7 +1780,7 @@ bool SnapshotQuietTick(bool menu_ok = false) {
     // scene_holds_join (twin): the take waits for the scene's end, as before.
     // coop-soakfix3: or the event's item choice (SCRIPT_ITEM_SELECT: "use an item" at a door or an altar), which he may sit in: the
     // script's own state, as the scene's. DC_NETPLAY_MUTATE=message_holds_join (twin): it waits, as before.
-    const bool scene_task = gameTask == GAME_TASK_PLAY || gameTask == GAME_TASK_SCRIPT_RUN ||
+    const bool scene_task = CoopPlainPlay() || gameTask == GAME_TASK_SCRIPT_RUN ||
                             (gameTask == GAME_TASK_SCRIPT_ITEM_SELECT && !NetplayMutated("message_holds_join"));
 
     if (menu_ok && mode == GAME_MODE_DUNGEON && BtEventMode != 0 && scene_task &&
@@ -1587,7 +1802,7 @@ bool SnapshotQuietTick(bool menu_ok = false) {
     const bool message = (gameTask == GAME_TASK_SYSMES_WAIT || gameTask == GAME_TASK_GATE_KEY_LOOP || gameTask == GAME_TASK_ATTACH_LOOP ||
                           gameTask == GAME_TASK_ATRA_REFUSE_WAIT || gameTask == GAME_TASK_REVIVE_WAIT || gameTask == GAME_TASK_REVIVE_DONE) &&
                          !NetplayMutated("message_holds_join");
-    const bool plays = gameTask == GAME_TASK_PLAY || (gameTask == GAME_TASK_EYE_CAMERA && !NetplayMutated("eye_holds_join")) ||
+    const bool plays = CoopPlainPlay() || (CoopEyePlay() && !NetplayMutated("eye_holds_join")) ||
                        (gameTask == GAME_TASK_PAUSE && !NetplayMutated("pause_holds_join")) || message;
 
     return mode == GAME_MODE_DUNGEON && plays && BtEventMode == 0 &&
@@ -1601,6 +1816,8 @@ bool SnapshotQuietTick(bool menu_ok = false) {
 // CObject::GetDistance on a null talker, o-opening-resync -Step house-after) was the port's interior loop's own statics
 // (port/src/edit_in.cpp: its phase, character and camera pointers, the room's parts) left out of the state set: in it now
 // (snapshot-allow.txt). DC_NETPLAY_MUTATE=no_building_snapshot (twin): buildings keep coop-housemerge's replay.
+// coop-joinload (Jep 11-11): a first join no longer comes here: it loads in town apart (JoinLoad). This is the merges' way and
+// the one join exception's (a rejoin onto the floor that player dropped from, beside player 1).
 bool SnapshotJoinHere() {
     return mode == GAME_MODE_DUNGEON ||
            (mode == GAME_MODE_EDIT && (EdInteriorFlag == 0 || !NetplayMutated("no_building_snapshot")) && !NetplayMutated("no_town_snapshot"));
@@ -1611,15 +1828,17 @@ bool Catchup();
 // coop-joinfix test hook (DC_COOP_TEST_SCENE_AT_JOIN=N, n-debug-start -Kind floorscene; item 37a): the host on a floor, as a join
 // from the title begins (the catch-up's start), runs the floor's system script N by the game's own debug-event way
 // (GAME_TASK_DEBUG_RUN_EVENT), so the join's state set comes while a scene is under way. Logs the scene's start and end.
+int g_test_scene_state = 0; // TestSceneAtJoin's: 0 waiting, 1 asked, 2 running, 3 done
+
 void TestSceneAtJoin(bool join_began) {
     static const int script = TestEnvInt("DC_COOP_TEST_SCENE_AT_JOIN", -1);
-    static int       state = 0; // 0 waiting, 1 asked, 2 running, 3 done
+    int             &state = g_test_scene_state;
     static long long ran = 0;
 
     if (script < 0 || state == 3) {
         return;
     }
-    if (state == 0 && join_began && mode == GAME_MODE_DUNGEON && gameTask == GAME_TASK_PLAY && BtEventMode == 0) {
+    if (state == 0 && join_began && mode == GAME_MODE_DUNGEON && CoopPlainPlay() && BtEventMode == 0) {
         DebugStatus[11] = script;
         DebugStatus[12] = 0;
         gameTask = GAME_TASK_DEBUG_RUN_EVENT;
@@ -1629,7 +1848,7 @@ void TestSceneAtJoin(bool join_began) {
         state = 2;
     } else if (state == 2) {
         ran++;
-        if (BtEventMode == 0 && gameTask == GAME_TASK_PLAY) {
+        if (BtEventMode == 0 && CoopPlainPlay()) {
             state = 3;
             std::fprintf(stderr, "netplay: test: floor system script %d ended after %lld ticks (tick %lld)\n", script, ran, (long long) g_link.tick);
         }
@@ -1668,6 +1887,10 @@ std::mutex              g_keepalive_lock;
 std::condition_variable g_keepalive_wake;
 std::thread             g_keepalive_thread;
 
+// coop-falsedrop (test hook DC_NETPLAY_TEST_FREEZE): until this time (NowMs) the copy is frozen whole, as a starved or paging PC's
+// process is: its game thread sleeps and its keepalive says nothing either (FreezeTest).
+std::atomic<std::int64_t> g_test_frozen_until_ms{0};
+
 void Keepalive() {
     const bool off = NetplayMutated("no_keepalive");
 
@@ -1680,7 +1903,10 @@ void Keepalive() {
             }
         }
 
-        if (off || !g_keepalive_on.load() || NowMs() - g_last_tick_ms.load() < kBusyAfterMs) {
+        if (!off && !g_keepalive_on.load()) {
+            CoopWorldsKeepaliveApart(); // coop-hostquit: apart, the same word on the worlds channel (its game not ticking: a load)
+        }
+        if (off || !g_keepalive_on.load() || NowMs() - g_last_tick_ms.load() < kBusyAfterMs || NowMs() < g_test_frozen_until_ms.load()) {
             continue;
         }
 
@@ -1733,11 +1959,11 @@ void SayGaveUp() {
     std::fprintf(stderr, "netplay: told player %d this copy gave up the catch-up\n", 3 - g_link.player);
 }
 
-// While linked with game.netplay_controller_only, keyboard, text and mouse events never reach the
-// queue Kazarov's input reads (an SDL event filter runs before it), so neither copy's game sees them.
-// Window events, closing the window among them, still pass.
-// With game.netplay_keyboard (userdata non-null) the keyboard's events pass: its keys fold into this copy's pad,
-// which the link sends, so both copies see them; the mouse, which also turns this copy's camera alone, stays out.
+// While linked, mouse events never reach the queue Kazarov's input reads (an SDL event filter runs before it), so neither
+// copy's game sees them: the mouse turns this copy's camera alone and would steer one copy apart. The keyboard's events pass
+// (userdata non-null): its keys fold into this copy's pad, which the link sends, so both copies see them. Window events,
+// closing the window among them, still pass. (coopoptions: game.netplay_controller_only and game.netplay_keyboard retired:
+// always so; DC_NETPLAY_MUTATE=no_keyboard keeps the keyboard out too, for a test.)
 bool SDLCALL DropKeyboardAndMouse(void *keyboard, SDL_Event *event) {
     switch (event->type) {
         case SDL_EVENT_KEY_DOWN:
@@ -1755,17 +1981,17 @@ bool SDLCALL DropKeyboardAndMouse(void *keyboard, SDL_Event *event) {
     }
 }
 
-// From the first link on (or the start of Option B's recording), with game.netplay_controller_only.
+// From the first link on (or the start of Option B's recording).
 void ControllersOnly() {
     static bool filtered = false;
 
-    if (!filtered && Settings().controller_only && !NetplayMutated("no_filter")) {
+    if (!filtered && !NetplayMutated("no_filter")) {
         filtered = true;
         static int keyboard = 1;
-        const bool keys = Settings().keyboard && !NetplayMutated("no_keyboard");
+        const bool keys = !NetplayMutated("no_keyboard");
 
         SDL_SetEventFilter(DropKeyboardAndMouse, keys ? &keyboard : nullptr);
-        std::fprintf(stderr, keys ? "netplay: mouse ignored while linked; the keyboard plays this copy's pad (game.netplay_keyboard)\n"
+        std::fprintf(stderr, keys ? "netplay: mouse ignored while linked; the keyboard plays this copy's pad\n"
                                   : "netplay: keyboard and mouse ignored while linked (controllers only)\n");
     }
 }
@@ -1780,6 +2006,27 @@ InputPadState OwnInput(int player) {
     if (CoopGeoramaParkedPress(player)) {
         state.buttons |= kInputSelect; // coop-stage4 4d: a Georama parked for a merge opens again as it was opened
     }
+    // coop-soakapart test hook (DC_NETPLAY_TEST_HOST_MENU_CLOSE_RECORDED=N, the host): a merge's state set is taken no sooner than its
+    // recorded tick N (TakeHeldTestTick: a loaded PC's later take, soak seed 1142's at 3), and before it player 1's own pad (what his
+    // local menu reads in the catch-up, NetplayMenuPad, and what is recorded) takes a Circle each 8 recorded ticks: his menu's close
+    // and melt are recorded after the checkpoint and before the take, where seed 1142's were (they reach her after the state set).
+    // coop-soakapart2: =N:K, the Circles from recorded tick K on (each 8 ticks from it), to put his menu's close on a chosen tick.
+    static const int close_recorded = TestEnvInt("DC_NETPLAY_TEST_HOST_MENU_CLOSE_RECORDED", 0);
+    static const int circle_from = [] {
+        const char *spec = TestEnv("DC_NETPLAY_TEST_HOST_MENU_CLOSE_RECORDED");
+        const char *colon = spec != nullptr ? std::strchr(spec, ':') : nullptr;
+
+        return colon != nullptr ? std::atoi(colon + 1) : 1;
+    }();
+
+    if (close_recorded > 0 && player == 1 && g_link.player == 1 && g_link.up && g_catch.active && SendsState() && !g_solo.replay && !g_snap.taken &&
+        g_link.tick >= circle_from && (g_link.tick - circle_from) % 8 < 4 && coop::PlayerInMenu(1, coop::kActorMenuLocal)) {
+        state.buttons |= kInputCircle;
+        if (static std::int64_t said = -1; said != g_link.tick) {
+            said = g_link.tick;
+            std::fprintf(stderr, "netplay: test: player 1's Circle on the recorded tick %lld, before the state set's take\n", (long long) g_link.tick);
+        }
+    }
     return state;
 }
 
@@ -1787,6 +2034,17 @@ InputPadState Neutral() {
     InputPadState pad;
     pad.connected = true;
     return pad;
+}
+
+// coop-wave3 (local-first Wave 3, cameras local): the steer row. Each player's pad carries the yaw its left stick is read against, as
+// its own copy's camera has it when the pad is read (port: where the pad goes, 0 the game's player, 1 the partner), so the step on
+// every copy turns the stick by the one yaw the player saw, never by a camera stepped on each copy. 65536ths of a turn, so every copy
+// (the sender's too) reads the same rounded value. DC_NETPLAY_MUTATE=steer_off (twin): no row, the step reads its camera as before.
+std::int32_t OwnSteer(int port) {
+    if (NetplayMutated("steer_off")) {
+        return kInputNoSteer;
+    }
+    return coop::SteerQuantize(coop::SteerOwnAngle(port));
 }
 
 std::uint32_t NewSession() {
@@ -1803,29 +2061,55 @@ std::uint32_t NewSession() {
 // The link went down: this copy plays on alone and listens for the other copy (a restarted game, or
 // the same one back), which then links again from the host's state.
 // The join notice (Jep, 2026-10-21): "<name> has joined" in the game's own lettering at the top left for a few seconds,
-// the other player's Steam name or address; "<name> has left" when the link goes. Local and draw-only (a wall clock,
+// the player's profile name (coop-joinname); "<name> has left" when the link goes. Local and draw-only (a wall clock,
 // never the game's tick or random generator), so the two copies may show it at different moments.
 struct Notice {
     std::string                           text;
     std::chrono::steady_clock::time_point until{};
     bool                                  drawn = false;
+    // coop-areanotice: a notice naming a player by the member's face: the member (-1 none) and the line drawn after the face
+    // (text is the line drawn when the face will not draw: the member named in words).
+    int         face = -1;
+    std::string after_face;
 };
 
 Notice g_notice;
 
-// The other player as a person reads it: a Steam friend's name, else the address without its port.
-std::string PeerName() {
-    std::string peer = NetSocketLearnsPeer() ? std::string(NetSocketPeerText()) : Settings().peer;
+// The player a join or leave notice names: peer, that player's Hello.
+// coop-joinname (Jep 11-16: "when a player joins the game, it shouldn't show their IP anymore since they will always join with an
+// associated profile"): the player's profile name as the lobby shows it, never an address or a Steam name: the lobby's table
+// names it for its player id when a seat has it (the host's table, or a joiner's copy of it), else its own Hello's profile (each
+// player's Hello carries its own, so with more players each notice names its own player), else "Player N" as the lobby says
+// an unnamed seat. The address stays in the log alone. DC_NETPLAY_MUTATE=notice_address (twin): a Steam friend's name, else the
+// address without its port, as before.
+std::string PeerName(const NetplayHello &peer) {
+    const std::string address = NetSocketLearnsPeer() ? std::string(NetSocketPeerText()) : Settings().peer;
 
-    if (peer.rfind("steam:", 0) == 0) {
-        const char *name = NetSteamName(std::strtoull(peer.c_str() + 6, nullptr, 10));
+    if (NetplayMutated("notice_address")) {
+        std::fprintf(stderr, "netplay: notice names the peer by its address (DC_NETPLAY_MUTATE=notice_address)\n");
+        if (address.rfind("steam:", 0) == 0) {
+            const char *name = NetSteamName(std::strtoull(address.c_str() + 6, nullptr, 10));
 
-        return name[0] != '\0' ? std::string(name) : std::string("A Steam friend");
+            return name[0] != '\0' ? std::string(name) : std::string("A Steam friend");
+        }
+        const std::size_t colon = address.find(':');
+
+        return colon == std::string::npos ? address : address.substr(0, colon);
     }
+    std::string name = coop::lobby::NameFor(peer.player_id);
+    const char *from = "the lobby's table";
 
-    std::size_t colon = peer.find(':');
-
-    return colon == std::string::npos ? peer : peer.substr(0, colon);
+    if (name.empty()) {
+        name.assign(peer.profile, strnlen(peer.profile, sizeof peer.profile));
+        from = "its Hello's profile";
+    }
+    if (name.empty()) {
+        name = "Player " + std::to_string(peer.player >= 1 && peer.player <= 6 ? (int) peer.player : 3 - g_link.player);
+        from = "no profile";
+    }
+    std::fprintf(stderr, "netplay: notice names player %u (id %016llx) '%s' (%s; at %s, the log alone)\n", (unsigned) peer.player,
+                 (unsigned long long) peer.player_id, name.c_str(), from, address.c_str());
+    return name;
 }
 
 // coop-uinotice (Jep's 2026-10-30 playtest, item 35): a split or a merge is not a connect or a disconnect: "P2 (Xiao) has left
@@ -1840,10 +2124,33 @@ int g_apart_mover = 0; // the player who left at this link's split (NetplayGoApa
 int g_merge_word = 0;  // this link's merge source as Begin decided it (MergeSourceWord: 2 she stayed, 3 he did)
 bool g_handed_title_pressed = false; // coop-pt1106-batch: the handed window's controller pressed on its title before its first link
 
-std::string AreaNotice(bool entered, int mover) {
+// coop-p2boot: the lobby's Multi screen window (started by the host's copy with seat 2's controller handed over:
+// DC_NETPLAY_LOCAL_PAD), as against a friend's own copy or the plain Local one.
+bool HandedWindow() {
+    static const bool handed = TestEnvInt("DC_NETPLAY_LOCAL_PAD", -1) >= 0;
+
+    return handed;
+}
+
+// coop-areanotice (the developer 11-18: "When P1 enters the town, it still says 'P1 (Toan) has entered the area' to P1. P1 doesn't need to
+// announce that they entered the location to themself. It can show the profile name instead of the player number ... Even better
+// would be using the character icon, then putting the profile name after it"): the mover's own copy shows no area notice (every
+// other copy does, for every split and merge: town, floor, house, apart or together); the line names the mover by profile
+// (NetplayShownName, the lobby's), its member by the face the ready box draws (quickchara's 48 by 48, at the lettering's height)
+// before the name: "[face] Jep has entered the area"; "Jep (Toan) has entered the area" where the face will not draw.
+// DC_NETPLAY_MUTATE=notice_to_self (twin): the mover's own copy shows it too, as before.
+struct AreaLine {
+    bool        shown = false;
+    std::string text;       // the words-only line (the log's, and the draw's without a face)
+    std::string after_face; // the line drawn after the face
+    int         member = -1;
+};
+
+AreaLine AreaNotice(bool entered, int mover) {
     static const char *const names[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
-    const int                who = mover >= 1 && mover <= 2 && !NetplayMutated("notice_names_other") ? mover : 3 - g_link.player;
+    const int                who = mover >= 1 && mover <= coop::kMaxPlayers && !NetplayMutated("notice_names_other") ? mover : 3 - g_link.player;
     int                      chara = -1;
+    AreaLine                 line;
 
     // Player 1's character is the retail one on every copy, player 2's the partner's (both read by player index).
     if (who == 1) {
@@ -1852,8 +2159,39 @@ std::string AreaNotice(bool entered, int mover) {
         chara = mode == GAME_MODE_DUNGEON ? coop::g_partner.loaded_chara : CoopTownPartnerMember();
     }
 
-    return "P" + std::to_string(who) + " (" + (chara >= 0 && chara < 6 ? names[chara] : "?") + ") has " + (entered ? "entered" : "left") +
-           " the area";
+    const std::string name = NetplayShownName(who);
+    const std::string verb = std::string(" has ") + (entered ? "entered" : "left") + " the area";
+
+    line.member = chara >= 0 && chara < 6 ? chara : -1;
+    line.text = name + " (" + (line.member >= 0 ? names[line.member] : "?") + ")" + verb;
+    line.after_face = name + verb;
+    line.shown = who != g_link.player || NetplayMutated("notice_to_self");
+    if (!line.shown) {
+        std::fprintf(stderr, "netplay: notice not shown: this copy's own move (player %d): %s\n", who, line.text.c_str());
+    }
+    return line;
+}
+
+// coop-areanotice: each player's profile name as last heard (index player - 1), kept while the copies are apart (no link, so no
+// Hello of theirs on hand): what a box, question or notice names them by then. Filled from every Hello taken (RememberPeerName).
+std::string g_known_names[coop::kMaxPlayers];
+
+void RememberPeerName() {
+    const int player = (int) g_link.peer_hello.player;
+
+    if (player < 1 || player > coop::kMaxPlayers) {
+        return;
+    }
+
+    std::string name = coop::lobby::NameFor(g_link.peer_hello.player_id);
+
+    if (name.empty()) {
+        name.assign(g_link.peer_hello.profile, strnlen(g_link.peer_hello.profile, sizeof g_link.peer_hello.profile));
+    }
+    if (!name.empty() && name != g_known_names[player - 1]) {
+        g_known_names[player - 1] = name;
+        std::fprintf(stderr, "netplay: player %d's name is '%s' (kept for while apart)\n", player, name.c_str());
+    }
 }
 
 std::string g_adopt_note; // coop-pt1111o: the host's settings this joiner took, for the joined notice
@@ -1863,7 +2201,19 @@ void SetNotice(const std::string &text) {
     g_notice.text = text;
     g_notice.until = std::chrono::steady_clock::now() + std::chrono::seconds(6);
     g_notice.drawn = false;
+    g_notice.face = -1;
+    g_notice.after_face.clear();
     std::fprintf(stderr, "netplay: notice: %s\n", text.c_str());
+}
+
+// coop-areanotice: an area notice, on the copies it is for (none on the mover's own).
+void SetAreaNotice(const AreaLine &line) {
+    if (!line.shown) {
+        return;
+    }
+    SetNotice(line.text);
+    g_notice.face = line.member;
+    g_notice.after_face = line.after_face;
 }
 
 // coop-natcodemsg (Jep, 2026-10-28: a NAT > Code join that never gets through sat on "joining" for good): 20 s of
@@ -1947,6 +2297,10 @@ extern bool g_floor_started;
 std::uint32_t g_floor_build_rand = 0; // coop-floorsnap: the random state the floor on this copy was built from (NetplayFloorBuilding)
 int           g_floor_builds = 0;     // coop-cutscenejoin: floors built so far (NetplayFloorBuilds)
 int           g_floor_build_key = -1; // coop-localfix: selectMapNo * 256 + cur_floor of that build (NetplayFloorBuilt)
+// coop-floorrand: player 1's session of the last link that came up (both copies of that link hold the same word), for the
+// floor builds apart that neither copy has heard the other make (CoopWorldsAgreedFloorRand). Unset before any link.
+std::uint32_t g_link_floor_seed = 0;
+bool          g_link_floor_seed_set = false;
 
 int  g_links_up = 0;      // links come up so far (DC_NETPLAY_TEST_LATE_JOIN)
 bool g_went_down = false; // coop-quitown: the link went down and has not come up again (DC_NETPLAY_TEST_ALONE_LOG)
@@ -1958,8 +2312,696 @@ bool        g_quit_ends = false;
 std::string g_quit_note;
 std::int64_t g_quit_tick = -1; // the link tick the quit applied on (the take runs at that frame's end, the link's tick already the next)
 
+// coop-joinload (Jep 11-11: "a joining player ALWAYS loads in as if they had just loaded the game, whatever P1 is doing"): a copy
+// joining from its title (its Hello's start_mode kJoinAsks) is not linked into player 1's place any more. The host answers
+// kJoinLoads and sends its load (below, kLoadPieceMagic pieces under its Hello's session): its save as it plays it, its slots,
+// the bags, the quests and the joiner's card pick. The joiner takes them as a save load takes a slot and loads the town of the
+// world's map (player 1's town; in a dungeon the town its way out leads to, CoopDungeonTownMap) by retail's title load: the
+// town's own start event (128, StartEventNo -1) puts her where a load of a save made there puts its player. Both copies are
+// apart from there (coop_worlds' CoopWorldsJoinAsLoad: player 1 the one that stayed, she the one that arrived), so player 1
+// never stops, waits or sends a state set for her; a later merge (the same town) goes as every merge does. Every joiner the
+// same (by its player id; the link has two copies today, the decision table is per id: design for 3).
+// The one exception (Jep 11-11): a new copy of a player who dropped while on player 1's floor, back while he is still on that
+// floor's same build (g_join_drops, by player id), links as before (the floor's state set, beside him).
+// DC_NETPLAY_MUTATE=join_beside (the rows' twin): every join links as before (the host's place, beside him).
+// DC_NETPLAY_MUTATE=rejoin_forgets_floor (the rejoin row's twin): no drop is kept, so a rejoin to his floor loads in town too.
+constexpr std::uint8_t  kJoinAsks = 1;   // the joiner's Hello: at its title, asking to join a game in progress
+constexpr std::uint8_t  kJoinLoads = 2;  // the host's Hello: load in from my pieces (no link)
+constexpr std::uint8_t  kJoinLoaded = 3; // the joiner's Hello: loaded in, apart
+constexpr std::uint32_t kLoadMark = 0x31444C4Au; // "JLD1": the load's first word
+constexpr std::uint32_t kLoadBlobTick = 1;       // the pieces' tick word (one load at a time)
+
+struct JoinDrop {
+    int map = -1;
+    int floor = -1;
+    int builds = -1;
+};
+
+struct JoinLoad {
+    // The host: the load it sends, to whom (the joiner's Hello session and player id), what it holds, and since when.
+    bool                                  sending = false;
+    std::uint32_t                         to_session = 0;
+    std::uint64_t                         to_id = 0;
+    std::vector<unsigned char>            out;
+    std::uint32_t                         held[kChunks / 32] = {};
+    std::chrono::steady_clock::time_point began{};
+    std::uint32_t                         beside_session = 0; // a joiner this host let link as before (the exception), by session
+    // The joiner: the pieces of the host's load as they come, and whether it has loaded in.
+    std::uint32_t                         from_session = 0;
+    std::vector<unsigned char>            in;
+    std::uint32_t                         in_held[kChunks / 32] = {};
+    std::uint32_t                         in_count = 0;
+    std::uint32_t                         in_got = 0;
+    bool                                  loaded = false;
+    bool                                  jump_due = false; // its town's load, at the frame's end (NetplayTakeRestart)
+    int                                   town = -1;
+};
+
+JoinLoad                          g_joinload;
+std::map<std::uint64_t, JoinDrop> g_join_drops; // the host: who dropped from which floor build (the rejoin exception)
+
+std::vector<unsigned char> TakeState(bool keep_stands);
+void QuestsPartTake(std::vector<unsigned char> &out);
+void QuestsPartPut(const unsigned char *data, std::size_t size);
+void SendPieces(PieceSender &out, const std::vector<unsigned char> &data, const std::uint32_t *held, std::uint32_t tick, std::uint32_t magic);
+std::uint32_t SaveSum(const unsigned char *bytes);
+
+// The host, as its link with a joiner goes down for real (not a split): a drop together on a floor is kept by the joiner's
+// player id, for its new copy's rejoin (JoinLoadException). A drop anywhere else is no exception: forgotten.
+void JoinLoadNoteDropOf(std::uint64_t id) {
+    if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && !CoopWorldsApart() && CoopWorldsHereFloor() >= 0 && !NetplayMutated("rejoin_forgets_floor")) {
+        g_join_drops[id] = JoinDrop{(int) selectMapNo, (int) UserStatus->cur_floor, g_floor_builds};
+        std::fprintf(stderr, "joinload: player %d (id %016llx) dropped on dungeon %d floor %d (build %d): a new copy of it rejoins beside player 1 while he is there\n",
+                     3 - g_link.player, (unsigned long long) id, (int) selectMapNo, (int) UserStatus->cur_floor + 1, g_floor_builds);
+    } else {
+        g_join_drops.erase(id);
+    }
+}
+
+void JoinLoadNoteDrop(bool apart_split) {
+    if (g_link.player != 1 || apart_split || g_link.peer_hello.player_id == 0) {
+        return;
+    }
+    JoinLoadNoteDropOf(g_link.peer_hello.player_id);
+}
+
+// The host: whether this joiner's new copy is the one exception (it dropped from the floor build player 1 is still on).
+bool JoinLoadException(std::uint64_t id) {
+    const auto drop = g_join_drops.find(id);
+
+    if (drop == g_join_drops.end()) {
+        return false;
+    }
+    return mode == GAME_MODE_DUNGEON && UserStatus != nullptr && CoopWorldsHereFloor() >= 0 && drop->second.map == (int) selectMapNo &&
+           drop->second.floor == (int) UserStatus->cur_floor && drop->second.builds == g_floor_builds;
+}
+
+// Test hook (DC_NETPLAY_TEST_JOIN_TABLE=1, the host alone on a dungeon floor; j-joinload-table, design for 3): the join decision
+// for three player ids at once, as the host's table has them (by id, never "player 2"): one dropped on this floor's build, one
+// dropped on this floor's earlier build (the floor built again since), one never dropped; then the first again after its rejoin
+// (its entry spent). Each line "joinload: table: id N (...) -> beside|load"; then the copy stops (its stop file's way).
+void JoinLoadTestTable() {
+    static const bool on = TestEnvOn("DC_NETPLAY_TEST_JOIN_TABLE");
+    static bool       done = false;
+
+    if (!on || done || g_link.player != 1 || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || CoopWorldsHereFloor() < 0 || !CoopPlainPlay()) {
+        return;
+    }
+    done = true;
+    const std::uint64_t ids[3] = {0x1111, 0x2222, 0x3333};
+
+    JoinLoadNoteDropOf(ids[0]);
+    JoinLoadNoteDropOf(ids[1]);
+    if (const auto drop = g_join_drops.find(ids[1]); drop != g_join_drops.end()) {
+        drop->second.builds--; // (as dropped before the floor was built again)
+    }
+    const char *const what[3] = {"dropped on this floor's build", "dropped on this floor's earlier build", "never dropped"};
+
+    for (int i = 0; i < 3; i++) {
+        std::fprintf(stderr, "joinload: table: id %d (%s) -> %s\n", i + 1, what[i], JoinLoadException(ids[i]) ? "beside" : "load");
+    }
+    g_join_drops.erase(ids[0]); // (its rejoin spends it, JoinLoadHostAnswers)
+    std::fprintf(stderr, "joinload: table: id 1 again after its rejoin -> %s\n", JoinLoadException(ids[0]) ? "beside" : "load");
+    std::fprintf(stderr, "joinload: table: done (dungeon %d floor %d build %d)\n", (int) selectMapNo, (int) UserStatus->cur_floor + 1, g_floor_builds);
+}
+
+// The town a joiner loads in, from where player 1 is: his town (outdoors or in one of its buildings), or the town his
+// dungeon's way out leads to; -1 anywhere else (the title, the opening, a load).
+int JoinLoadTown() {
+    if (mode == GAME_MODE_EDIT && MapNo >= 0 && MapNo < 200) {
+        return MapNo;
+    }
+    if (mode == GAME_MODE_DUNGEON) {
+        return dc::game::CoopDungeonTownMap();
+    }
+    return -1;
+}
+
+void PutWord(std::vector<unsigned char> &out, std::uint32_t value) {
+    for (int i = 0; i < 4; i++) {
+        out.push_back((unsigned char) (value >> (8 * i)));
+    }
+}
+
+std::uint32_t GetWord(const std::vector<unsigned char> &in, std::size_t &at) {
+    std::uint32_t value = 0;
+
+    for (int i = 0; i < 4 && at + i < in.size(); i++) {
+        value |= (std::uint32_t) in[at + i] << (8 * i);
+    }
+    at += 4;
+    return value;
+}
+
+// candreds2 (design for 3+): the joining player's number, for its profile bag (ProfileBagsJoinBag/Take go by player). The link
+// is one pair today: the joiner is the copy that is not the host's, so the host's copy (player 1, or not yet linked) names its
+// one peer's seat, 2, and the joiner's copy itself. A join that names its seat (more players) gives it here.
+int JoinerPlayer() {
+    return g_link.player > 1 ? g_link.player : 2;
+}
+
+// The host, on a Hello asking to join (kJoinAsks) once it is somewhere (Listen's waits for a place come first): true while
+// it answers with its load (the joiner loads in; no link), false to link as before (the exception, a refusal, the twin).
+bool JoinLoadHostAnswers(const NetplayHello &mine) {
+    const NetplayHello &peer = g_link.peer_hello;
+
+    if (peer.start_mode != kJoinAsks) {
+        return false;
+    }
+    if (g_joinload.sending && g_joinload.to_session == peer.session) {
+        return true;
+    }
+    // (coop-joinfix's test hook, DC_COOP_TEST_SCENE_AT_JOIN, j-joinload -Case scene: the host's floor scene starts as the join is
+    // first heard, and the join is answered once it runs: player 1 in a scene as a joiner comes.)
+    TestSceneAtJoin(true);
+    if (g_test_scene_state == 1) {
+        return true;
+    }
+    if (g_joinload.beside_session == peer.session) {
+        return false;
+    }
+    const int town = JoinLoadTown();
+
+    if (town < 0) {
+        return false;
+    }
+    if (NetplayMutated("join_beside")) {
+        g_joinload.beside_session = peer.session;
+        std::fprintf(stderr, "joinload: test: player 2 links as before, beside player 1 (DC_NETPLAY_MUTATE=join_beside)\n");
+        return false;
+    }
+    // A link this copy would refuse (another build, protocol or region) goes on to Begin, which says why as before.
+    const std::string refusal = NetplayHelloCompare(mine, peer);
+
+    if (!refusal.empty() && !NetplayHelloSettingsOnly(mine, peer)) {
+        return false;
+    }
+    if (JoinLoadException(peer.player_id)) {
+        g_joinload.beside_session = peer.session;
+        g_join_drops.erase(peer.player_id);
+        std::fprintf(stderr, "joinload: player 2 (id %016llx) dropped from this floor (dungeon %d floor %d) and rejoins: it links beside player 1, as before\n",
+                     (unsigned long long) peer.player_id, (int) selectMapNo, UserStatus != nullptr ? (int) UserStatus->cur_floor + 1 : 0);
+        return false;
+    }
+    g_join_drops.erase(peer.player_id);
+
+    // The joiner's card pick (the lobby's seat for its player id), as a catch-up's last blob carries it (CatchBlob).
+    coop::lobby::LateJoin(peer.player_id);
+    int         member = -1;
+    std::string name;
+    std::vector<unsigned char> bag;
+    const bool  pick = coop::lobby::JoinPickTake(member, name);
+
+    if (pick) {
+        coop::ProfileBagsJoinBag(JoinerPlayer(), name, bag);
+    }
+    if (mode == GAME_MODE_EDIT && SaveData != nullptr) {
+        CoopTownGeoramaToSave(); // the town's live Georama in the save first, as a catch-up's last blob does
+    }
+    std::vector<unsigned char> state = TakeState(false);
+    std::vector<unsigned char> quests;
+
+    QuestsPartTake(quests);
+
+    int zone_mode = -1, zone_map = -1, zone_floor = -1;
+
+    CoopWorldsHereZone(&zone_mode, &zone_map, &zone_floor);
+
+    std::vector<unsigned char> &out = g_joinload.out;
+
+    out.clear();
+    PutWord(out, kLoadMark);
+    PutWord(out, (std::uint32_t) town);
+    PutWord(out, (std::uint32_t) zone_mode);
+    PutWord(out, (std::uint32_t) zone_map);
+    PutWord(out, (std::uint32_t) zone_floor);
+    PutWord(out, pick && member >= 0 ? (std::uint32_t) member : kNone);
+    {
+        char text[16] = {};
+
+        std::snprintf(text, sizeof text, "%s", pick ? name.c_str() : "");
+        out.insert(out.end(), (const unsigned char *) text, (const unsigned char *) text + sizeof text);
+    }
+    PutWord(out, (std::uint32_t) quests.size());
+    PutWord(out, (std::uint32_t) bag.size());
+    PutWord(out, (std::uint32_t) state.size());
+    out.insert(out.end(), quests.begin(), quests.end());
+    out.insert(out.end(), bag.begin(), bag.end());
+    out.insert(out.end(), state.begin(), state.end());
+
+    if (out.size() > (std::size_t) kChunks * kChunkBytes) {
+        std::fprintf(stderr, "joinload: the load is %zu bytes, past the pieces' %d: player 2 links as before\n", out.size(), kChunks * kChunkBytes);
+        g_joinload.beside_session = peer.session;
+        out.clear();
+        return false;
+    }
+
+    // This copy's side of the pick now (she is apart: nothing of hers steps here until a merge, whose state set carries it).
+    if (pick && member >= 0 && member < 6) {
+        coop::SetPick(1, member, coop::MemberWhy::kNet);
+    }
+    if (pick && !bag.empty()) {
+        coop::ProfileBagsJoinTake(JoinerPlayer(), name, bag, true);
+    }
+
+    // Where the joiner is, as Begin learns it: a host told no address answers whoever said Hello (its load and Hellos go there).
+    if (NetSocketLearnsPeer()) {
+        std::fprintf(stderr, "joinload: player 2 is at %s\n", NetSocketAnswerHello());
+    }
+    if (const char *lan = NetSocketTakeLanSender()) {
+        g_punch.lan = true;
+        std::fprintf(stderr, "netplay: nat: player 2 joins over the LAN: it is at %s\n", lan);
+    }
+    g_joinload.sending = true;
+    g_joinload.to_session = peer.session;
+    g_joinload.to_id = peer.player_id;
+    g_joinload.began = std::chrono::steady_clock::now();
+    std::memset(g_joinload.held, 0, sizeof g_joinload.held);
+    NetSessionTo(NetSession::Apart, "a join loads in (coop-joinload)");
+    g_last_close_apart = true; // (its next link is a merge: the area's notice, not "has joined")
+    SetNotice(PeerName(g_link.peer_hello) + " has joined");
+    CoopWorldsJoinAsLoad(true, GAME_MODE_EDIT, town, -1);
+    std::fprintf(stderr, "joinload: player 2 (id %016llx, session %08x) loads in as a fresh load in town map %d, apart; player 1 plays on in mode %d map %d floor %d "
+                         "(no state set, no wait): its load %zu bytes (save, slots, bags %zu, quests %zu, pick %d '%s') [t %lld]\n",
+                 (unsigned long long) peer.player_id, (unsigned) peer.session, town, zone_mode, zone_map, zone_floor, out.size(), bag.size(), quests.size(),
+                 pick ? member : -1, pick ? name.c_str() : "", LogMs());
+    return true;
+}
+
+// The host, every frame while it listens: its load's pieces go until the joiner holds all of them (or says it has loaded).
+void JoinLoadHostTick() {
+    static PieceSender pieces; // (large: not on the stack)
+    static std::uint32_t for_session = 0;
+
+    if (!g_joinload.sending || g_link.player != 1) {
+        return;
+    }
+    if (for_session != g_joinload.to_session) {
+        for_session = g_joinload.to_session;
+        pieces = PieceSender{};
+    }
+    const std::uint32_t count = (std::uint32_t) ((g_joinload.out.size() + kChunkBytes - 1) / kChunkBytes);
+    std::uint32_t       held = 0;
+
+    for (std::uint32_t i = 0; i < count; i++) {
+        held += (g_joinload.held[i / 32] >> (i % 32)) & 1u;
+    }
+    const bool said_loaded = g_link.peer_hello.session == g_joinload.to_session && g_link.peer_hello.start_mode == kJoinLoaded;
+
+    if (held >= count || said_loaded) {
+        g_joinload.sending = false;
+        std::fprintf(stderr, "joinload: player 2 holds the load: %zu bytes in %u pieces, %u sent (%u again) in %lld ms\n", g_joinload.out.size(), count,
+                     pieces.sends, pieces.again,
+                     (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_joinload.began).count());
+        g_joinload.out.clear();
+        return;
+    }
+    SendPieces(pieces, g_joinload.out, g_joinload.held, kLoadBlobTick, kLoadPieceMagic);
+}
+
+// The joiner, all of the host's load in: it takes it as a save load takes a slot, and its town loads at the frame's end.
+void JoinLoadApply() {
+    const std::vector<unsigned char> &in = g_joinload.in;
+    std::size_t                       at = 0;
+
+    if (GetWord(in, at) != kLoadMark) {
+        std::fprintf(stderr, "joinload: the host's load does not read (no mark): this copy stays at its title\n");
+        return;
+    }
+    const int           town = (int) GetWord(in, at);
+    const int           host_mode = (int) GetWord(in, at);
+    const int           host_map = (int) GetWord(in, at);
+    const int           host_floor = (int) GetWord(in, at);
+    const std::uint32_t member = GetWord(in, at);
+    char                name[17] = {};
+
+    if (at + 16 <= in.size()) {
+        std::memcpy(name, in.data() + at, 16);
+    }
+    at += 16;
+    const std::uint32_t quests = GetWord(in, at);
+    const std::uint32_t bag = GetWord(in, at);
+    const std::uint32_t state_size = GetWord(in, at);
+
+    if (at + quests + bag + state_size > in.size() || state_size < sizeof(ResyncHeader) + sizeof(CSaveData) || town < 0 || town >= 200) {
+        std::fprintf(stderr, "joinload: the host's load does not read (%zu bytes, town %d): this copy stays at its title\n", in.size(), town);
+        return;
+    }
+    const unsigned char *quest_bytes = in.data() + at;
+    const std::vector<unsigned char> pick_bag(in.begin() + (std::ptrdiff_t) (at + quests), in.begin() + (std::ptrdiff_t) (at + quests + bag));
+    const std::vector<unsigned char> state(in.begin() + (std::ptrdiff_t) (at + quests + bag), in.begin() + (std::ptrdiff_t) (at + quests + bag + state_size));
+    ResyncHeader header;
+
+    std::memcpy(&header, state.data(), sizeof header);
+
+    // The host's settings, as a link takes them (Begin): the Hellos differ in settings alone, or the host would not have answered.
+    NetplayHello mine = NetplayHelloMake(g_link.player, g_link.delay, g_link.session, false);
+
+    if (!NetplayHelloCompare(mine, g_link.peer_hello).empty() && NetplayHelloSettingsOnly(mine, g_link.peer_hello)) {
+        NetplayHelloAdopt(g_link.peer_hello);
+        g_adopt_note = NetplayHelloAdoptNote(mine, g_link.peer_hello);
+        std::fprintf(stderr, "joinload: took the host's settings\n");
+    }
+
+    // A save load's part of the state alone: the save, the slots, the bags, the party's member, the flags a load keeps. Not
+    // the host's random state, cameras, event, place or map numbers: this copy's world is its own from here.
+    std::memcpy((void *) SaveData, state.data() + sizeof header, sizeof(CSaveData));
+    KeepOwnOptions("join load");
+    std::size_t   slots_at = sizeof header + sizeof(CSaveData);
+    std::uint32_t slots = 0;
+
+    for (int i = 0; i < 4 && slots_at + i < state.size(); i++) {
+        slots |= (std::uint32_t) state[slots_at + i] << (8 * i);
+    }
+    slots_at += 4;
+    if (slots_at + slots <= state.size()) {
+        NetplaySlotsPut(state.data() + slots_at, slots);
+    }
+    const std::size_t bag_at = slots_at + slots;
+
+    if (state.size() > bag_at) {
+        coop::InventoryRead(state.data() + bag_at, (header.carried_at > bag_at ? header.carried_at : state.size()) - bag_at);
+    }
+    GameClearFlag = header.game_clear;
+    DebugMode = header.debug_mode;
+    coop::SetPick(1, header.partner_choice, coop::MemberWhy::kNet);
+    QuestsPartPut(quest_bytes, quests);
+    if (member != kNone && member < 6) {
+        coop::SetPick(1, (int) member, coop::MemberWhy::kNet);
+    }
+    if (!pick_bag.empty()) {
+        coop::ProfileBagsJoinTake(JoinerPlayer(), name, pick_bag, false);
+    }
+    SaveData->SetMapNo(town); // (the save names the town it loads in, as one made there does)
+    coop::SpawnClearStand();
+    coop::SpawnClearToan();
+
+    g_joinload.loaded = true;
+    g_joinload.jump_due = true;
+    g_joinload.town = town;
+    g_link.restart_map = town;
+    g_last_close_apart = true;
+    NetSessionTo(NetSession::Apart, "loaded in from the host's game (coop-joinload)");
+    CoopWorldsJoinAsLoad(false, host_mode, host_map, host_floor);
+    SetNotice("Joined " + PeerName(g_link.peer_hello) + (g_adopt_note.empty() ? "" : ". The host's settings are used: " + g_adopt_note));
+    g_adopt_note.clear();
+    std::fprintf(stderr, "joinload: loaded in from player 1's game: town map %d as a save load (its start event), apart; player 1 in mode %d map %d floor %d; "
+                         "save %08x, player 2 plays %d (%s), bag %s, %u quest bytes [t %lld]\n",
+                 town, host_mode, host_map, host_floor, SaveSum(nullptr), coop::g_partner.choice, name[0] != '\0' ? name : "no profile",
+                 pick_bag.empty() ? "the host's" : "its profile's", quests, LogMs());
+}
+
+// The joiner: one of the host's load pieces (from its Receive, before the link's own filter).
+void JoinLoadPiece(const Chunk &chunk) {
+    if (g_link.player != 2 || g_joinload.loaded || g_link.up || chunk.session != g_link.peer_hello.session || g_link.peer_hello.start_mode != kJoinLoads ||
+        chunk.total == 0 || chunk.total > (std::uint32_t) kChunks * kChunkBytes || chunk.count == 0 || chunk.index >= chunk.count) {
+        return;
+    }
+    if (g_joinload.from_session != chunk.session || g_joinload.in.size() != chunk.total || g_joinload.in_count != chunk.count) {
+        g_joinload.from_session = chunk.session;
+        g_joinload.in.assign(chunk.total, 0);
+        g_joinload.in_count = chunk.count;
+        g_joinload.in_got = 0;
+        std::memset(g_joinload.in_held, 0, sizeof g_joinload.in_held);
+        std::fprintf(stderr, "joinload: the host's load comes: %u bytes in %u pieces [t %lld]\n", chunk.total, (unsigned) chunk.count, LogMs());
+    }
+    const std::uint32_t bit = 1u << (chunk.index % 32);
+
+    if ((g_joinload.in_held[chunk.index / 32] & bit) == 0) {
+        const std::size_t from = (std::size_t) chunk.index * kChunkBytes;
+        const std::size_t size = std::min<std::size_t>(kChunkBytes, chunk.total - from);
+
+        std::memcpy(g_joinload.in.data() + from, chunk.data, size);
+        g_joinload.in_held[chunk.index / 32] |= bit;
+        g_joinload.in_got++;
+    }
+
+    Ack ack{};
+
+    ack.magic = kLoadAckMagic;
+    ack.player = (std::uint32_t) g_link.player;
+    ack.session = g_link.session;
+    ack.tick = kLoadBlobTick;
+    std::memcpy(ack.held, g_joinload.in_held, sizeof ack.held);
+    NetSocketSend(&ack, sizeof ack);
+
+    if (g_joinload.in_got == g_joinload.in_count) {
+        JoinLoadApply();
+    }
+}
+
+// The host: the joiner's acknowledgement of the load's pieces.
+void JoinLoadAck(const Ack &ack) {
+    if (g_link.player != 1 || !g_joinload.sending || ack.session != g_joinload.to_session || ack.tick != kLoadBlobTick) {
+        return;
+    }
+    for (int i = 0; i < kChunks / 32; i++) {
+        g_joinload.held[i] |= ack.held[i];
+    }
+}
+
+// coop-p2boot part 2 (Jep's rc3 playtest 11-13: "P2 waits until P1 is done with the splash to start syncing instead of doing it
+// before, so it's done by the time the splash finishes"): the host's load of its first place (ModeInit, then retail's area card,
+// 6.6 s: gameloop.cpp's check_now_loading loop) ran no netplay at all, so a window's Hellos and its lobby answer waited for his
+// first tick there; and a host whose checkpoint's place is still loading links only at its tick 0 (Listen, coop-housemerge), so
+// she linked then and only then loaded his place (her load and short card, ~0.8 s past his card). A window that starts with
+// him (JoinLoadStartsWithHost: the lobby's handed window, Local's player 2; every such window alike, one per seat) asks for his
+// checkpoint before the link (kJoinBeside); the host, under its card too (NetplayUnderCard), sends it as pieces
+// (kPreloadBlobTick, the join's load channel) and never waits on her; with all of it she leaves her title for his place by it
+// (her own short load, under his card) and stands there black (ArrivalHoldNow) till the link at his tick 0 lands his state set
+// over her where she stands (CatchJoinTick's land_here, coop-snapjoin). Not there by his tick 0, the join goes as before.
+// DC_NETPLAY_MUTATE=beside_after_card (twin): no preload and no netplay under the card, as before.
+constexpr std::uint8_t  kJoinBeside = 4;      // the window's Hello: at its title, starts with the host: its checkpoint, please
+constexpr std::uint8_t  kJoinPreloads = 5;    // the host's Hello: take my checkpoint's pieces (no link yet)
+constexpr std::uint32_t kPreloadBlobTick = 2; // the pieces' tick word on the join's load channel
+
+struct Preload {
+    // The host: the checkpoint it sends, to whom (the window's Hello session), what the window holds.
+    bool                                  sending = false;
+    std::uint32_t                         to_session = 0;
+    std::uint32_t                         done_session = 0; // (one preload a window's session)
+    std::vector<unsigned char>            out;
+    std::uint32_t                         held[kChunks / 32] = {};
+    std::chrono::steady_clock::time_point began{};
+    // The window: the pieces as they come, whether it has left for the checkpoint's place, and its black's end.
+    std::uint32_t                         from_session = 0;
+    std::vector<unsigned char>            in;
+    std::uint32_t                         in_held[kChunks / 32] = {};
+    std::uint32_t                         in_count = 0;
+    std::uint32_t                         in_got = 0;
+    bool                                  left = false;
+    bool                                  shown = false;
+    std::int64_t                          left_at = 0;
+};
+
+Preload g_preload;
+
+void LeaveForState(const std::vector<unsigned char> &state, const char *cause, const char *site);
+
+bool PreloadOn() {
+    return !NetplayMutated("beside_after_card");
+}
+
+// A window that holds the host's checkpoint and its host, before their first link: Hellos every 50 ms, not 500, so the host's
+// first pass at its tick 0 hears one and links there (Listen hears only what came since its last pass: with 500 ms the link
+// came at his tick 18 to 24, its snapshot after). DC_NETPLAY_MUTATE=preload_slow_hello (twin): 500 ms, as before.
+bool PreloadWaitsLink() {
+    if (!PreloadOn() || NetplayMutated("preload_slow_hello") || g_link.up || g_links_up > 0) {
+        return false;
+    }
+    return g_link.player == 2 ? g_preload.left : g_preload.done_session != 0 && g_preload.done_session == g_link.peer_hello.session;
+}
+
+// coop-p2tick: this link joins a host and a window it started on this PC (the lobby's Multi screen seat): the window's
+// side (HandedWindow), or the host's, its peer the window that took its preload. Both send straight to 127.0.0.1.
+bool OwnWindowLink() {
+    if (HandedWindow()) {
+        return true;
+    }
+    return g_preload.done_session != 0 && g_preload.done_session == g_link.peer_hello.session;
+}
+
+// The window, left by the preload: black till the link has landed the host's state and its lockstep is on (20 s at most).
+bool PreloadBlack() {
+    if (!g_preload.left || g_preload.shown) {
+        return false;
+    }
+    const bool locked = g_links_up > 0 && g_link.up && !g_catch.active && !g_link.awaiting_sync;
+
+    if (locked || NowMs() - g_preload.left_at > 20000) {
+        g_preload.shown = true;
+        std::fprintf(stderr, "netplay: preload: this window shows its place (%s) [t %lld]\n", locked ? "linked, in lockstep" : "no link in 20 s",
+                     LogMs());
+        return false;
+    }
+    return true;
+}
+
+// The host (Listen, under its card too): a window's ask while its checkpoint's place still loads. True while it sends.
+bool PreloadHostAnswers() {
+    const NetplayHello &peer = g_link.peer_hello;
+
+    if (!PreloadOn() || g_link.player != 1 || !g_link.peer_hello_got || peer.start_mode != kJoinBeside || !(g_solo.due && !g_solo.on) ||
+        g_solo.checkpoint.empty() || g_solo.replay) {
+        return false;
+    }
+    // (sending to another seat's window: this one waits its turn, never taking the first's pieces away from it)
+    if (g_preload.sending) {
+        return true;
+    }
+    if (g_preload.done_session == peer.session) {
+        return false;
+    }
+    if (g_solo.checkpoint.size() > (std::size_t) kChunks * kChunkBytes) {
+        g_preload.done_session = peer.session;
+        std::fprintf(stderr, "netplay: preload: the checkpoint is %zu bytes, past the pieces' %d: the window links at this copy's tick 0 as before\n",
+                     g_solo.checkpoint.size(), kChunks * kChunkBytes);
+        return false;
+    }
+    g_preload.out = g_solo.checkpoint;
+    g_preload.sending = true;
+    g_preload.to_session = peer.session;
+    g_preload.began = std::chrono::steady_clock::now();
+    std::memset(g_preload.held, 0, sizeof g_preload.held);
+    g_link.hello_due = {}; // (its answer, kJoinPreloads, on the next pass)
+    std::fprintf(stderr, "netplay: preload: the window that starts with this copy (session %08x) takes its checkpoint now, %zu bytes, while this "
+                         "copy's place loads (mode %d map %d) [t %lld]\n",
+                 (unsigned) peer.session, g_preload.out.size(), (int) mode, (int) MapNo, LogMs());
+    return true;
+}
+
+// The host, every pass while it listens: the pieces go until the window holds them all, or this copy's tick 0 comes.
+void PreloadHostTick() {
+    static PieceSender   pieces; // (large: not on the stack)
+    static std::uint32_t for_session = 0;
+
+    if (!g_preload.sending || g_link.player != 1) {
+        return;
+    }
+    if (for_session != g_preload.to_session) {
+        for_session = g_preload.to_session;
+        pieces = PieceSender{};
+    }
+    const std::uint32_t count = (std::uint32_t) ((g_preload.out.size() + kChunkBytes - 1) / kChunkBytes);
+    std::uint32_t       held = 0;
+
+    for (std::uint32_t i = 0; i < count; i++) {
+        held += (g_preload.held[i / 32] >> (i % 32)) & 1u;
+    }
+    if (held >= count || g_solo.on || g_link.up) {
+        g_preload.sending = false;
+        g_preload.done_session = g_preload.to_session;
+        std::fprintf(stderr, "netplay: preload: %s: %u of %u pieces held, %u sent (%u again) in %lld ms [t %lld]\n",
+                     held >= count ? "the window holds the checkpoint" : "this copy's tick 0 came first (the join goes as before)", held, count,
+                     pieces.sends, pieces.again,
+                     (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_preload.began).count(), LogMs());
+        g_preload.out.clear();
+        // coop-p2tick: the window links at this copy's tick 0 and its join's state set waits for its preparation (the arenas'
+        // write watch reset and zero test, 60-70 ms on threads of their own after the load): made now, under the card, it is
+        // done before tick 0 (a write after the watch's reset, the rest of the load's among them, is named at the take, so the
+        // set is the same bytes). DC_NETPLAY_MUTATE=prep_at_link (twin): at the link, as before.
+        if (held >= count && !NetplayMutated("prep_at_link")) {
+            SnapshotTakePrepare();
+            std::fprintf(stderr, "catchup: the state set's preparation starts under the card: the window holding this checkpoint links at tick 0 [t %lld]\n",
+                         LogMs());
+        }
+        return;
+    }
+    SendPieces(pieces, g_preload.out, g_preload.held, kPreloadBlobTick, kLoadPieceMagic);
+}
+
+// The window: a piece of the host's checkpoint (its Receive, before the link's own filter).
+void PreloadPiece(const Chunk &chunk) {
+    if (g_link.player != 2 || g_preload.left || g_link.up || g_links_up > 0 || mode != GAME_MODE_TITLE || chunk.session != g_link.peer_hello.session ||
+        g_link.peer_hello.start_mode != kJoinPreloads || chunk.total == 0 || chunk.total > (std::uint32_t) kChunks * kChunkBytes || chunk.count == 0 ||
+        chunk.index >= chunk.count) {
+        return;
+    }
+    if (g_preload.from_session != chunk.session || g_preload.in.size() != chunk.total || g_preload.in_count != chunk.count) {
+        g_preload.from_session = chunk.session;
+        g_preload.in.assign(chunk.total, 0);
+        g_preload.in_count = chunk.count;
+        g_preload.in_got = 0;
+        std::memset(g_preload.in_held, 0, sizeof g_preload.in_held);
+        std::fprintf(stderr, "netplay: preload: the host's checkpoint comes before the link: %u bytes in %u pieces [t %lld]\n", chunk.total,
+                     (unsigned) chunk.count, LogMs());
+    }
+    const std::uint32_t bit = 1u << (chunk.index % 32);
+
+    if ((g_preload.in_held[chunk.index / 32] & bit) == 0) {
+        const std::size_t from = (std::size_t) chunk.index * kChunkBytes;
+        const std::size_t size = std::min<std::size_t>(kChunkBytes, chunk.total - from);
+
+        std::memcpy(g_preload.in.data() + from, chunk.data, size);
+        g_preload.in_held[chunk.index / 32] |= bit;
+        g_preload.in_got++;
+    }
+
+    Ack ack{};
+
+    ack.magic = kLoadAckMagic;
+    ack.player = (std::uint32_t) g_link.player;
+    ack.session = g_link.session;
+    ack.tick = kPreloadBlobTick;
+    std::memcpy(ack.held, g_preload.in_held, sizeof ack.held);
+    NetSocketSend(&ack, sizeof ack);
+
+    if (g_preload.in_got == g_preload.in_count && g_preload.in.size() >= sizeof(ResyncHeader)) {
+        g_preload.left = true;
+        g_preload.left_at = NowMs();
+        g_link.resync_state = g_preload.in; // (taken as its title ends: NetplayModeEnded, as a catch-up's checkpoint is)
+        LeaveForState(g_preload.in, "preload: the window leaves its title for the host's place by its checkpoint, under the host's card", "PreloadPiece");
+        std::fprintf(stderr, "netplay: preload: this window leaves for the checkpoint's map %lld before the link; black till the link lands [t %lld]\n",
+                     (long long) g_link.resync_target, LogMs());
+    }
+}
+
+// The host: the window's acknowledgement of the checkpoint's pieces.
+void PreloadAck(const Ack &ack) {
+    if (g_link.player != 1 || !g_preload.sending || ack.session != g_preload.to_session || ack.tick != kPreloadBlobTick) {
+        return;
+    }
+    for (int i = 0; i < kChunks / 32; i++) {
+        g_preload.held[i] |= ack.held[i];
+    }
+}
+
+// candfix1112 (Jep 11-12: "Local mode can't late join; player 1 and player 2 always load in at the same time and the same
+// way, so they always land next to each other"): a copy player 1's own copy started on this PC (Local's player 2, a lobby's
+// handed window or Multi seat: NetplayLocalSpawn gives each DC_NETPLAY_LOCAL_CLAIM, player 1's controller) is not a player
+// joining a game already running. It starts with him, from his save, and links by his state beside him, as before
+// coop-joinload: it never asks to load in, though it waits at its title. Every such window alike (one per seat).
+// DC_NETPLAY_MUTATE=local_joins_as_load (twin, read in the window; it inherits player 1's environment): it asks, as before.
+bool JoinLoadStartsWithHost() {
+    static const bool spawned = TestEnvInt("DC_NETPLAY_LOCAL_CLAIM", -1) >= 0;
+
+    return spawned && !NetplayMutated("local_joins_as_load");
+}
+
+// The joiner's Hello word (HelloMake): asking from its title, loaded in, or nothing.
+std::uint8_t JoinLoadHelloWord() {
+    if (g_link.player == 1) {
+        return g_joinload.sending ? kJoinLoads : g_preload.sending ? kJoinPreloads : 0; // (coop-p2boot: the preload's)
+    }
+    if (g_joinload.loaded) {
+        return kJoinLoaded;
+    }
+    if (JoinLoadStartsWithHost()) {
+        static bool said = false;
+
+        if (!said && g_links_up == 0 && mode == GAME_MODE_TITLE) {
+            said = true;
+            std::fprintf(stderr, "joinload: this copy is player 1's window on this PC (started with him): it links by his state beside him, no load-in\n");
+        }
+        // coop-p2boot: at its title before any link, it asks for his checkpoint (Preload*): his place loaded under his card.
+        return PreloadOn() && g_links_up == 0 && mode == GAME_MODE_TITLE && !g_preload.left ? kJoinBeside : 0;
+    }
+    return g_links_up == 0 && mode == GAME_MODE_TITLE ? kJoinAsks : 0;
+}
+
 void Close(const char *why) {
     SayGaveUp(); // coop-catchupdrop: under this link's session, before the new one below
+    JoinLoadNoteDrop(std::strncmp(why, "went apart", 10) == 0); // coop-joinload: the rejoin exception's floor
     g_went_down = true;
     // coop-quittitle: the host's Leave said its Quit Game ended the session (a copy that missed the quit's tick: still in its
     // catch-up, or the host's last pads lost on the way): this copy goes to the title too, as the quit's tick would take it.
@@ -1972,7 +3014,11 @@ void Close(const char *why) {
                      (long long) g_link.tick, g_link.player);
     }
     g_last_close_apart = std::strncmp(why, "went apart", 10) == 0 && !NetplayMutated("notice_area_as_link");
-    SetNotice(g_last_close_apart ? AreaNotice(false, g_apart_mover) : PeerName() + " has left");
+    if (g_last_close_apart) {
+        SetAreaNotice(AreaNotice(false, g_apart_mover));
+    } else {
+        SetNotice(PeerName(g_link.peer_hello) + " has left");
+    }
     g_apart_mover = 0;
     std::fprintf(stderr, "netplay: link down at tick %lld: %s; this copy plays on alone and waits for player %d\n", (long long) g_link.tick,
                  why, 3 - g_link.player);
@@ -1995,7 +3041,13 @@ void Close(const char *why) {
     // coop-floorsnap: the host left on a dungeon floor under control (player 2 went apart or dropped) takes a checkpoint
     // there and records on, so player 2 can come back onto this floor by its snapshot (the floor's own start was linked,
     // so it took none). DC_NETPLAY_MUTATE=no_leave_checkpoint (twin): as before.
-    if (g_link.player == 1 && mode == GAME_MODE_DUNGEON && gameTask == GAME_TASK_PLAY && UserStatus != nullptr && CatchupArmed() &&
+    // coop-resyncblack (tests): DC_NETPLAY_TEST_STAYER_BUSY=1: the stayer busy as the other leaves (Jep's rc1 run: his swap question up
+    // as she left his floor for Norune), so none is taken here; the merge's own place checkpoint (Begin, stayer_floor) is then the one.
+    static const bool stayer_busy = TestEnvOn("DC_NETPLAY_TEST_STAYER_BUSY");
+    if (stayer_busy && g_link.player == 1 && mode == GAME_MODE_DUNGEON) {
+        std::fprintf(stderr, "catchup: test: the stayer is busy as the other leaves: no checkpoint on the floor here\n");
+    }
+    if (g_link.player == 1 && mode == GAME_MODE_DUNGEON && CoopPlainPlay() && !stayer_busy && UserStatus != nullptr && CatchupArmed() &&
         !NetplayMutated("no_leave_checkpoint")) {
         g_floor_started = true;
         Checkpoint(UserStatus->cur_floor);
@@ -2178,6 +3230,30 @@ bool Begin(const NetplayHello &mine) {
     // until the other copy's ticks come.
     g_link.my_hello = mine;
     g_link.my_hello.link_source = g_link.player == 1 ? (std::uint8_t) word : 0;
+    // coop-entrwin: a join in a floor's entrance window: the lead (its walk-in role 1) is the merge's source and the walker (2)
+    // plays its own entrance at the lockstep. The host decides it from its role and her last Hello's, and says so in the Hello it
+    // links with; her copy goes by that word (as by link_source), so both copies play it or neither.
+    const int lead = mine.walk_in == 1 && g_link.peer_hello.walk_in == 2 ? g_link.player : mine.walk_in == 2 && g_link.peer_hello.walk_in == 1 ? 3 - g_link.player : 0;
+    const int entrance_word = g_link.player == 1 ? (lead != 0 && lead == (word == 2 ? 2 : 1) ? 3 - lead : 0) : g_link.peer_hello.entrance_walk;
+
+    g_link.my_hello.entrance_walk = g_link.player == 1 ? (std::uint8_t) entrance_word : 0;
+    // coop-b4arrive: a pick join (the arriver's own arrival under way as the merge forms, its Hello's arrival_cut): the host decides
+    // it from the arriver's Hello (the arriver: the source's other, 1 when her state is the source) and says it in the Hello it links
+    // with; her copy goes by that word, so both copies play the cut arrival or neither.
+    const int arriver = word == 2 ? 1 : 2;
+    const int cut_said = arriver == g_link.player ? mine.arrival_cut : g_link.peer_hello.arrival_cut;
+
+    g_link.cut_word = g_link.player == 1 ? (cut_said != 0 ? arriver : 0) : g_link.peer_hello.cut_walk;
+    g_link.my_hello.cut_walk = g_link.player == 1 ? (std::uint8_t) g_link.cut_word : 0;
+    if (mine.arrival_cut != 0 || g_link.peer_hello.arrival_cut != 0 || g_link.cut_word != 0) {
+        std::fprintf(stderr, "netplay: cut arrival: this copy (player %d) says %d, player %d's Hello %d, the host's word %d\n", g_link.player,
+                     (int) mine.arrival_cut, 3 - g_link.player, (int) g_link.peer_hello.arrival_cut, g_link.cut_word);
+    }
+    if (mine.walk_in != 0 || g_link.peer_hello.walk_in != 0) {
+        std::fprintf(stderr, "netplay: entrance window: this copy (player %d) says %d, player %d's Hello %d, the merge's source %d: %s\n", g_link.player,
+                     (int) mine.walk_in, 3 - g_link.player, (int) g_link.peer_hello.walk_in, word == 2 ? 2 : 1,
+                     entrance_word != 0 ? "the walker plays its own entrance at the lockstep" : "no entrance walk (a lead and a walker not both said, or the source not the lead)");
+    }
 
     // Test hook (DC_NETPLAY_TEST_LINK_HELLO_LOST=1, the host; coop-lossylink): a link after the first sends none of these five,
     // as when the loss took them all while her copy held back (x-pagediff-floor-lossy, train 50): only CatchHostTick's again.
@@ -2196,6 +3272,7 @@ bool Begin(const NetplayHello &mine) {
         std::snprintf(g_link.status, sizeof g_link.status, "Link refused: %s", refusal.c_str());
         g_link.last_peer_session = g_link.peer_hello.session;
         g_link.dead = !NetplayHelloSameBuild(mine, g_link.peer_hello) || g_link.peer_hello.protocol != mine.protocol || // coop-buildid
+                      !NetplayHelloSameRelease(mine, g_link.peer_hello) ||                                               // version-scheme
                       !NetplayHelloRegionsLink(mine, g_link.peer_hello);                                                 // release2
         return false;
     }
@@ -2292,6 +3369,7 @@ bool Begin(const NetplayHello &mine) {
         std::fprintf(stderr, "catchup: this copy takes the other's state and keeps its own %scheckpoint (taker_keeps_solo)\n", g_solo.place ? "place " : "");
     }
     const bool          merge = CoopWorldsApart() && mode == GAME_MODE_DUNGEON && !CoopWorldsMutated("catchup_merge") && !floor_join;
+    NetplayResyncEntranceMerge(merge); // coop-rc2: whether the resync this link may take is this merge's (the floor menu's split skips it)
 
     // coop-bldgsnap: a town or building merge with no recording here (the last link spent it, and player 2 alone went into a
     // building or out of one while this copy stayed: p2bags, outback) went by the resync, which reloaded the zone on both
@@ -2307,26 +3385,41 @@ bool Begin(const NetplayHello &mine) {
     const bool scene_send = g_link.source == g_link.player && mode == GAME_MODE_DUNGEON && floor_join && UserStatus != nullptr && CoopWorldsSceneJoining() == 1 &&
                             (!g_solo.on || CheckpointFloor(g_solo.checkpoint) >= 0) && !NetplayMutated("scene_join_resync");
 
+    // coop-resyncblack (Jep's rc1 playtest, 2026-11-13: P2 came back onto his floor a second time and both copies reloaded it by the
+    // resync, then her screen stayed black): his floor merge with no recording left (the first merge on the floor spent the one
+    // from the floor's start, EnterLockstep) records from a place checkpoint on the floor too, as hers did alone (her_floor), whichever player stayed, so every
+    // return to the floor, the first or a later one, catches up without touching the stayer; in a floor scene or event too (the
+    // state set waits for its quiet frame, as hers and scene_send's do). DC_NETPLAY_MUTATE=floor_stayer_no_checkpoint (twin):
+    // none, as before (the resync).
+    const bool stayer_floor = mode == GAME_MODE_DUNGEON && floor_join && UserStatus != nullptr && !NetplayMutated("floor_stayer_no_checkpoint");
+
     if (scene_send && g_solo.on) {
         g_solo = Solo{}; // (a checkpoint of an earlier floor: not where the scene is)
     }
-    if (SendsState() && !g_solo.on && !g_solo.replay && (CoopWorldsApart() || g_link.source == 2) && (mode == GAME_MODE_EDIT || her_floor || scene_send) &&
-        (gameTask == GAME_TASK_PLAY || g_link.source != 1 || scene_send) && Catchup() && SnapshotJoinOn() && SnapshotJoinHere() && !NetplayMutated("no_place_checkpoint") &&
+    if (SendsState() && !g_solo.on && !g_solo.replay && (CoopWorldsApart() || g_link.source == 2) && (mode == GAME_MODE_EDIT || her_floor || stayer_floor || scene_send) &&
+        (CoopPlainPlay() || g_link.source != 1 || scene_send || stayer_floor) && Catchup() && SnapshotJoinOn() && SnapshotJoinHere() && !NetplayMutated("no_place_checkpoint") &&
         !NetplayMutated("no_catchup")) {
-        Checkpoint(her_floor || scene_send ? UserStatus->cur_floor : -1, false, true);
+        Checkpoint(her_floor || stayer_floor || scene_send ? UserStatus->cur_floor : -1, false, true);
         if (g_solo.due) {
             g_solo.on = true;
             g_link.tick = 0;
             g_link.previous[0] = g_link.previous[1] = Neutral();
-            g_link.menu_owner = 1;
-            g_link.held = 0;
         }
+    }
+    // coop-resyncblack (tests): DC_NETPLAY_TEST_HOST_NO_RECORDING=1 (the host): no recording and no place checkpoint, as an
+    // earlier merge on this floor left it before stayer_floor (Jep's rc1 run): the merge goes by the resync (x-gate-flow -Spent).
+    // coop-rc2 (resyncblack x resyncmenu): once a run, for the first merge only: since resyncmenu the resync lands every player at
+    // their own floor menu, where they meet again; spent again there, each merge was a resync landing them apart again, endlessly.
+    static bool no_recording_done = false;
+    if (static const bool no_recording = TestEnvOn("DC_NETPLAY_TEST_HOST_NO_RECORDING");
+        no_recording && !no_recording_done && g_link.player == 1 && SendsState() && g_solo.on) {
+        no_recording_done = true;
+        g_solo = Solo{};
+        std::fprintf(stderr, "catchup: test: the host's recording is spent (as by an earlier merge on this floor)\n");
     }
     const bool          catch_join = SendsState() && g_solo.on && !g_solo.replay && !NetplayMutated("no_catchup") && !merge;
     const std::int64_t  solo_tick = g_link.tick;
     const InputPadState solo_previous[2] = {g_link.previous[0], g_link.previous[1]};
-    const int           solo_owner = g_link.menu_owner;
-    const std::uint16_t solo_held = g_link.held;
 
     g_catch = Catch{};
     g_snap = Snap{}; // coop-snapshot stage 4
@@ -2334,7 +3427,19 @@ bool Begin(const NetplayHello &mine) {
     // coop-arrivalfull: both copies know a floor join and who takes the state (the source's other), so both play its
     // arrival from the lockstep's first tick.
     // (coop-b1lesson: none for a join in the floor's opening scene: her arrival played before she waited, and the scene goes on.)
-    g_link.arrival_walk = floor_join && mode == GAME_MODE_DUNGEON && CoopWorldsSceneJoining() == 0 ? 3 - g_link.source : 0;
+    // coop-entrwin: a join in the floor's entrance window plays the walker's own entrance instead (EnterLockstep); the window's join
+    // counts as none of the opening scene's here, so both copies agree whatever role each latched (the host's word decides).
+    g_link.entrance_walk = floor_join && mode == GAME_MODE_DUNGEON && !CoopWorldsMutated("entrance_window_off") ? entrance_word : 0;
+    // (coop-entrance2 rule 3: the walker's gap from the walker's own Hello, so both copies read one number)
+    {
+        const int gap_byte = g_link.entrance_walk == 0 ? 255 : g_link.entrance_walk == g_link.player ? mine.walk_gap : g_link.peer_hello.walk_gap;
+
+        g_link.entrance_gap = gap_byte == 255 ? -1 : gap_byte;
+    }
+    g_link.arrival_walk = floor_join && mode == GAME_MODE_DUNGEON && g_link.entrance_walk == 0 && (CoopWorldsSceneJoining() == 0 || CoopWorldsSceneJoinIsWalkIn())
+                              ? 3 - g_link.source
+                              : 0;
+    g_link.arrival_cut = g_link.arrival_walk != 0 && g_link.cut_word == g_link.arrival_walk; // coop-b4arrive
 
     // A fresh session on tick 0.
     for (Slot &slot : g_link.local) {
@@ -2357,8 +3462,6 @@ bool Begin(const NetplayHello &mine) {
     g_link.shrink_wait = 0;
     g_link.synced[0] = g_link.synced[1] = g_link.previous[0] = g_link.previous[1] = Neutral();
     g_link.routed[0] = g_link.routed[1] = Neutral();
-    g_link.menu_owner = 1;
-    g_link.held = 0;
     g_link.last_checksum_frame = -1;
     g_link.desync_tick = -1;
     g_link.resync_tick = -1;
@@ -2373,6 +3476,9 @@ bool Begin(const NetplayHello &mine) {
     g_link.listening = false;
     g_link.up = true;
     g_links_up++;
+    g_link_floor_seed = g_link.player == 1 ? g_link.my_hello.session : g_link.peer_hello.session; // coop-floorrand
+    g_link_floor_seed_set = true;
+    NetplaySharedSettingsLinked(); // coop-soakjoin
     g_went_down = false;
     NetSessionTo(NetSession::Linked, g_links_up == 1 ? "the first link" : "linked again"); // coop-session
     if (g_links_up == 1) {
@@ -2382,6 +3488,7 @@ bool Begin(const NetplayHello &mine) {
         coop::lobby::LateJoin(g_link.peer_hello.player_id); // coop-lobby: the joiner's seat and member (plan 4.5)
     }
     g_link.peer_busy_at = {};
+    g_link.word_at = {}; // coop-falsedrop
     g_link.peer_left = false;
     g_link.peer_left_done = false;
     g_link.peer_gave_up = false;
@@ -2461,15 +3568,14 @@ bool Begin(const NetplayHello &mine) {
         g_link.tick = solo_tick;
         g_link.previous[0] = solo_previous[0];
         g_link.previous[1] = solo_previous[1];
-        g_link.menu_owner = solo_owner;
-        g_link.held = solo_held;
         g_link.resync_tick = -1;
         g_link.awaiting_sync = false;
         g_catch.active = true;
         g_catch.heard = std::chrono::steady_clock::now();
         g_catch.began = g_catch.heard;
         g_catches_begun++;
-        std::fprintf(stderr, "catchup: player %d joins by catching up to tick %lld; this copy plays on\n", 3 - g_link.player, (long long) solo_tick);
+        std::fprintf(stderr, "catchup: player %d joins by catching up to tick %lld; this copy plays on [t %lld; clock owes %lld, %lld ticks made up since tick 0]\n",
+                     3 - g_link.player, (long long) solo_tick, LogMs(), (long long) CoopPerfOwed(), (long long) (CoopPerfMadeUp() - g_tick0_made_up));
         TestSceneAtJoin(true);
     }
 
@@ -2479,13 +3585,11 @@ bool Begin(const NetplayHello &mine) {
                  alike ? "" : g_link.source == 1 ? "; the copies start apart, so the host sends its state first" : "; the copies start apart, so player 2 sends its state first");
     CatchReceiverTick(); // coop-joinbudget: the copy that takes the state reads it beside its game thread from here
     std::snprintf(g_link.status, sizeof g_link.status, "Linked: player %d", g_link.player);
-    // coop-pt1111o: the menus settings this game plays by (one per game: the host's), on both copies, for the tests and the log reader
-    std::fprintf(stderr, "netplay: menus in effect: game.coop_menus %s, game.coop_menu_panel %s\n", coop::MenusSetting() ? "on" : "off", coop::MenuPanelSetting() ? "on" : "off");
     if (g_last_close_apart) { // coop-uinotice: a merge
         // the arriver: player 1 when player 2 stayed (source 2), player 2 when he did (3); the host's state (1) says neither
-        SetNotice(AreaNotice(true, g_merge_word == 2 ? 1 : g_merge_word == 3 ? 2 : 0));
+        SetAreaNotice(AreaNotice(true, g_merge_word == 2 ? 1 : g_merge_word == 3 ? 2 : 0));
     } else {
-        SetNotice(g_link.player == 1 ? PeerName() + " has joined" : "Joined " + PeerName() + (g_adopt_note.empty() ? "" : ". The host's settings are used: " + g_adopt_note));
+        SetNotice(g_link.player == 1 ? PeerName(g_link.peer_hello) + " has joined" : "Joined " + PeerName(g_link.peer_hello) + (g_adopt_note.empty() ? "" : ". The host's settings are used: " + g_adopt_note));
         g_adopt_note.clear();
     }
     g_last_close_apart = false;
@@ -2497,6 +3601,12 @@ bool Begin(const NetplayHello &mine) {
 // so the host sends, and the host's state set is taken no sooner than link tick N (some 250-340 when it happens by itself).
 // coop-repinfix2 test hook (DC_NETPLAY_TEST_HOST_MENU=pretake, TestHostMenuFrame): the take waits for the host's menu to be open.
 bool g_test_take_held = false;
+
+int TakeHeldTestTick() { // coop-soakapart (TestMenuPresses)
+    static const int at = TestEnvInt("DC_NETPLAY_TEST_HOST_MENU_CLOSE_RECORDED", 0);
+
+    return at;
+}
 
 int LateJoinTestTick() {
     static const int at = TestEnvInt("DC_NETPLAY_TEST_LATE_JOIN", 0);
@@ -2530,7 +3640,7 @@ NetplayHello HelloMake(bool fresh) {
     // his state ever reached it), so the first link always goes by player 1's state, his loaded save; later links (a merge
     // after a split or a drop) still go by whoever was there first. DC_NETPLAY_MUTATE=first_link_hers (twin): her town as the
     // merge's source at a first link too, as before.
-    if (g_link.player == 2 && g_links_up == 0 && hello.stayer != 0 && !NetplayMutated("first_link_hers")) {
+    if (g_link.player == 2 && g_links_up == 0 && !g_joinload.loaded && hello.stayer != 0 && !NetplayMutated("first_link_hers")) { // (coop-joinload: her town loaded from his game is the session's)
         static bool said = false;
 
         if (!said) {
@@ -2539,7 +3649,9 @@ NetplayHello HelloMake(bool fresh) {
         }
         hello.stayer = 0;
     }
-    hello.first_link = g_links_up == 0 ? 1 : 0; // coop-session
+    // coop-joinload: a copy that loaded in from the host's game is in the session (its first link is a merge).
+    hello.first_link = g_links_up == 0 && !g_joinload.loaded ? 1 : 0; // coop-session
+    hello.start_mode = JoinLoadHelloWord();
     return hello;
 }
 
@@ -2680,6 +3792,9 @@ void Listen() {
     if (g_link.dead) {
         return;
     }
+    JoinLoadHostTick(); // coop-joinload: the host's load pieces to a joiner, while they go
+    PreloadHostTick();  // coop-p2boot: the checkpoint's pieces to a window that starts with this copy
+    JoinLoadTestTable(); // (its test hook)
 
     // The internet address arrived (STUN): the waiting line shows it.
     static bool wan_shown = false;
@@ -2770,7 +3885,7 @@ void Listen() {
         }
         NetSocketSend(&hello, sizeof hello);
         NetSocketLanBroadcast(&hello, sizeof hello);
-        g_link.hello_due = now + std::chrono::milliseconds(500);
+        g_link.hello_due = now + std::chrono::milliseconds(PreloadWaitsLink() ? 50 : 500);
         g_link.sent_hello = hello; // coop-linkdir
         g_link.sent_hello_set = true;
         g_hello_asked = false;
@@ -2778,6 +3893,26 @@ void Listen() {
 
     g_link.peer_hello_got = false;
     Receive();
+
+    // coop-p2tick (l-lobby-handed: his link at his tick 15 under load, 84 ms after his tick 0; 54 ms alone): a window that holds
+    // this copy's checkpoint (the preload) has said its Hello already, every 50 ms under the card, and nothing of it changes
+    // before the link; Listen heard only what came since its last pass, so the link waited for her next one, while this copy's
+    // clock repaid the load's owed ticks (up to kMaxOwed) as fast as it could. The link now goes on the Hello already heard, on
+    // this copy's first pass at its tick 0. DC_NETPLAY_MUTATE=link_next_hello (twin): her next Hello, as before.
+    // (Under load her next Hello came in this same pass at times: the link went on it, on the same pass, but the line was left
+    // out, and l-lobby-handed's check read that as a late link (load group, bin-r5). The line names either.)
+    if (g_link.player == 1 && PreloadWaitsLink() && g_solo.on && !NetplayMutated("link_next_hello")) {
+        const bool           fresh = g_link.peer_hello_got;
+        static std::uint32_t said = 0;
+
+        g_link.peer_hello_got = true;
+        RememberPeerName(); // coop-areanotice
+        if (said != g_link.peer_hello.session) {
+            said = g_link.peer_hello.session;
+            std::fprintf(stderr, "netplay: preload: this copy links on its first pass at its tick 0, on its window's Hello %s (session %08x) [t %lld]\n",
+                         fresh ? "come in this pass" : "already heard", (unsigned) g_link.peer_hello.session, LogMs());
+        }
+    }
 
     if (card_holds) {
         static bool told = false;
@@ -2814,6 +3949,9 @@ void Listen() {
     // linked, his never did, l-local-play -HouseEnter 2 runs of 5). DC_NETPLAY_MUTATE=host_waits_her_merge (twin): waits.
     const bool her_merge = g_link.peer_hello_got && g_link.peer_hello.stayer != 0 && !CoopWorldsSendsMerge() && StayerMergeOn() &&
                            !NetplayMutated("host_waits_her_merge");
+
+    // coop-p2boot: a window that starts with this copy takes the checkpoint now, its place loaded under this copy's card.
+    PreloadHostAnswers();
 
     if (g_link.player == 1 && g_link.peer_hello_got && (loading || no_place) && !her_merge && !g_solo.replay && Catchup() &&
         !NetplayMutated("join_while_loading")) {
@@ -2888,12 +4026,25 @@ void Listen() {
         return;
     }
 
+    // coop-joinload: the host answers a join from a title with its load (the joiner loads in apart; no link), before the
+    // worlds' link check (a new copy of a dropped player would be taken there as a rejoin by the host's state).
+    if (g_link.player == 1 && g_link.peer_hello_got && g_link.peer_hello.session != g_link.last_peer_session) {
+        const bool was_sending = g_joinload.sending;
+
+        if (JoinLoadHostAnswers(HelloMake(false))) {
+            if (!was_sending) {
+                g_link.hello_due = {}; // its answer (kJoinLoads) goes on the next pass, not half a second on
+            }
+            return;
+        }
+    }
     if (hello_now && g_link.peer_hello.session != g_link.last_peer_session && CoopWorldsMayLink()) { // coop-worlds
         if (after_piece && takes_next) {
             std::fprintf(stderr, "netplay: test: this copy links after %d of the host's pieces came [t %lld]\n", g_prelink_seen, LogMs());
         }
         held_hello = false;
         g_link.peer_hello_got = true; // (linked on the held Hello: the link's traffic filter reads it)
+        RememberPeerName(); // coop-areanotice
         g_prelink_seen = 0;
         Begin(HeardHello()); // coop-linkdir
     }
@@ -2905,6 +4056,41 @@ void Listen() {
 // budget before the joiner picked Join and end cleanly, and the joiner logged "joining player 1" and never linked
 // (2026-10-21, about 1 in 3 under load: n-debug-start, t-p2-town-pause, the Triangle menu thread's fast tier). The
 // held frames count again from the first link, or after N s. Mutation no_join_hold: the old budget (netplay-joinwait's twin).
+// coop-p2boot part 2: the host under its first place's card (coop_boot's CoopAreaCardWaited, each of the load's yields to the
+// card and its wait for the card's end; retail's town EditInit spins there mid-init): only what a window that starts with this
+// copy needs before the link, never a link (that waits for this copy's tick 0, Listen's coop-housemerge hold): its Hello, what
+// came in (the lobby's answer to her window, PlayingReceive), and the preload's answer and pieces. A host that has linked once,
+// or whose checkpoint's place is not the one loading, does nothing here. DC_NETPLAY_MUTATE=beside_after_card (twin): nothing.
+void UnderCardTick() {
+    if (!PreloadOn() || g_link.player != 1 || !g_link.started || g_link.up || !g_link.listening || g_link.dead || g_links_up > 0 ||
+        !(g_solo.due && !g_solo.on) || mode == GAME_MODE_TITLE) {
+        return;
+    }
+    static bool said = false;
+
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "netplay: under the card: this host hears its windows while its place loads (mode %d map %d) [t %lld]\n", (int) mode,
+                     (int) MapNo, LogMs());
+    }
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now >= g_link.hello_due) {
+        NetplayHello hello = HelloMake(false);
+
+        NetSocketSend(&hello, sizeof hello);
+        NetSocketLanBroadcast(&hello, sizeof hello);
+        g_link.hello_due = now + std::chrono::milliseconds(500);
+        g_link.sent_hello = hello;
+        g_link.sent_hello_set = true;
+    }
+    g_link.peer_hello_got = false;
+    Receive();
+    PreloadHostAnswers();
+    PreloadHostTick();
+    g_link.peer_hello_got = false; // (Listen hears the next one; nothing links here)
+}
+
 void HoldBudgetForJoin() {
     static const int wait_s = TestEnvInt("DC_NETPLAY_TEST_JOIN_WAIT_S", 0);
     static bool      done = false;
@@ -3041,6 +4227,15 @@ std::int64_t g_script_frame = -1;
 // coop-anchors: the script's own @tick and @event anchors hold it on top of the clocks above (input_anchors.hpp).
 std::int64_t NetplayTestInputFrame(std::int64_t frame) {
     static int released = 0;
+    // coop-loadharness (tests): DC_QA_TICK_EVERY=N names this copy's own game frame each N frames, linked or apart, so the
+    // test harness counts only frames the game really played (never a clock of its own; a slow PC is slow, not red).
+    static const int qa_every = TestEnvInt("DC_QA_TICK_EVERY", 0);
+    static std::int64_t qa_said = -1;
+
+    if (qa_every > 0 && frame % qa_every == 0 && frame != qa_said) {
+        qa_said = frame;
+        std::fprintf(stderr, "qa: game frame %lld\n", (long long) frame);
+    }
 
     g_script_frame = CoopInputAnchorsFrame(TestInputFrameBelowAnchors(frame));
     if (CoopInputAnchorsReleases() != released) {
@@ -3057,6 +4252,7 @@ void CatchReceiverStopAtExit(); // (coop-quitcrash: below, beside the receiver)
 // The socket, the keyboard filter and the diagnostics file; NetplayTick then shakes hands.
 bool Open() {
     const LinkSettings config = Settings();
+
 
     g_link.player = config.netplay;
     g_link.delay = config.delay;
@@ -3093,6 +4289,12 @@ bool Open() {
             NetplayStopThreads(); // coop-cand58: (done in main as RunGame returns; this for an exit that skips it)
             NetplayExitSaySends();
             SayLeaving();
+            // coop-hostquit: the game closing, in a session (linked or apart): every other player told on the worlds channel too,
+            // resent till acknowledged (at most 1 s), so a copy apart hears it as a linked one hears the Leave above.
+            // (Not a test's end on its --frames budget: no player left there.)
+            if (g_link.started && (g_link.up || CoopWorldsApart()) && !dc::app::GameFrameBudgetSpent()) {
+                CoopWorldsSayLeft(false, 2, 1000);
+            }
             CatchReceiverStopAtExit(); // coop-quitcrash
         });
     }
@@ -3124,7 +4326,7 @@ bool Open() {
     // (l-launcher-features). Catch-up is the host's only.
     std::fprintf(stderr, "netplay: features: worlds %s, menus %s, cameras %s, own bags %s, catch-up %s\n",
                  TestEnvIs("DC_COOP_WORLDS", "0") ? "off" : "on", coop::MenusOn() ? "on" : "off",
-                 coop::IndependentCamerasSetting(dc::platform::ConfigGet()) ? "on" : "off", coop::OwnBags() ? "on" : "off",
+                 coop::Enabled() ? "on" : "off", coop::OwnBags() ? "on" : "off",
                  Catchup() ? "on" : "off");
     return true;
 }
@@ -3158,6 +4360,8 @@ struct Parts {
     std::uint32_t view = 0;       // coop: cameras
     float         player[3] = {};
     float         partner[3] = {};
+    float         partner_frame[6] = {}; // cand1112d: her frame's place and turn (summed as partner_frame_sum)
+    std::uint32_t partner_frame_sum = 0;
     float         town[3] = {};
     std::uint32_t monsters = 0;
     std::uint32_t hits = 0; // coop-p2absent: the live hits (NowColData)
@@ -3169,14 +4373,21 @@ struct Parts {
     std::uint32_t event_sum = 0;
     int           heal = 0, weapon_fx = 0, melt_frame = 0, melt_pending = 0, melt_on = 0;
     std::uint32_t status = 0;
-    int           menu_owner = 1;
     std::uint32_t in_menu = 0; // coop-localmenu
     std::uint32_t present = 0; // coop-opt7
+    // coop-meltdesync2 (soak seed 20261118315: stage 1 alone parted, none of its printed parts): the rest of stage 1, said with a desync
+    int           rot_count = 0, held_out = 0, hand_motion = -1;
+    float         hand_time = 0.0f;
+    float         indoor[4] = {};
+    // coop-meltdesync2: each carried part's hash as this checksum read it (the desync's report printed them as they stood when the
+    // other copy's sum came in, a few ticks on: the melt timer, ticking, looked parted where the checksum had it alike)
+    std::uint32_t carried[16] = {};
     int           partner_chara = -1;
     int           partner_down = 0;
     int           partner_choice = -1;
     bool          georama_two = false;
     std::uint32_t p2_bag = 0; // coop-inventory
+    std::uint32_t fish_pools = 0; // coop-fishpools: each player's own fishing record and the save's view of them
     bool          combat_panel = false;
     int           combat_lock = -1;
     std::uint32_t menus = 0;  // coop-menus
@@ -3184,6 +4395,7 @@ struct Parts {
     std::uint32_t shots = 0; // pad 2's shots in the air
     std::uint32_t save = 0;  // the SaveData
     std::uint32_t town_modes = 0; // coop-town: CoopTownModeSum
+    std::uint32_t pond = 0;       // coop-pondfish: CoopPondHash
     float         town_cam[6] = {}; // coop-localfix: the town camera's eye and look (logged only, not summed)
     float         view_m[16] = {};  // coop-localfix: the view matrix summed as "view" (logged only)
 };
@@ -3224,7 +4436,8 @@ std::uint32_t SaveSum(const unsigned char *bytes = nullptr) {
     return sum.value;
 }
 
-std::uint32_t CarriedHash(); // coop-carried (below, with the list)
+std::uint32_t CarriedHash(std::uint32_t *each = nullptr); // coop-carried (below, with the list)
+void          CarriedSay(long long frame, const std::uint32_t *each); // coop-choosing: each carried part's hash, said with a desync (below)
 
 std::uint32_t Checksum() {
     CoopPerfScope perf(kCoopPerfChecksum); // coop: perf
@@ -3236,15 +4449,19 @@ std::uint32_t Checksum() {
     g_parts.task = gameTask;
     hash.Add(PortRandState());
 
-    // The camera's angle: the stick is read against it, so a camera turned on one copy alone (by the
-    // mouse) sends that copy's players another way.
+    // coop-wave3 (local-first Wave 3): the cameras are each player's own, out of the sum. The stick is read against its pad's steer
+    // row (coop::SteerAngle), never a camera, and the tick reads no view (logged below for a desync's report only).
+    // DC_NETPLAY_MUTATE=cameras_summed (twin): summed as before (his angle, her camera, the view, the town camera, the walk's swing).
+    const bool cameras_summed = NetplayMutated("cameras_summed");
     // The dungeon's state counts only in a dungeon: a copy that was on a floor before keeps it after it
     // has followed the host to a town where the host never fought.
     const bool dungeon = mode == GAME_MODE_DUNGEON;
 
     if (dungeon && NowCamera__3 != nullptr && CharaFrame != nullptr) {
         g_parts.camera = NowCamera__3->angle;
-        hash.Add(NowCamera__3->angle);
+        if (cameras_summed) {
+            hash.Add(NowCamera__3->angle);
+        }
     }
     // coop: cameras
     // The partner's own camera, while the cameras are independent: its stick is read against it.
@@ -3252,7 +4469,9 @@ std::uint32_t Checksum() {
 
     if (CoopPartnerCamera(&partner_camera[3], partner_camera)) {
         g_parts.camera2 = partner_camera[3];
-        hash.Add(partner_camera);
+        if (cameras_summed) {
+            hash.Add(partner_camera);
+        }
     }
 
     // The view the last draw left, which the tick's clip tests read (MGClipBox): a copy that drew from
@@ -3271,15 +4490,18 @@ std::uint32_t Checksum() {
     if (mode == GAME_MODE_EDIT) {
         CoopTownCameraNow(g_parts.town_cam, g_parts.town_cam + 3);
     }
-    hash.Add(view.value);
+    if (cameras_summed) {
+        hash.Add(view.value);
+    }
     if (dungeon) {
         hash.Add(gameTask);
+        hash.Add(viewMode__2); // coop-wave1a: his first-person view, his row (coop.hpp CoopEyeTask)
         hash.Add(BtEventMode);
     }
 
     // coop-carried: the parts a resync carries beside the save (CarriedParts: the settings, the place). The checksum reads
     // them through the list alone, so nothing it checks there can be left behind by a resync.
-    hash.Add(CarriedHash());
+    hash.Add(CarriedHash(g_parts.carried));
     g_parts.stages[0] = hash.value; // after the settings
 
     // The event script under way and what it asked for (BtEventInfo's pointers would differ between
@@ -3310,11 +4532,14 @@ std::uint32_t Checksum() {
     g_hits_text.clear();
     if (dungeon && UserStatus != nullptr) {
         Hash status;
+        // coop-settings: but for the dungeon map's status, each player's own Dungeon Map row (BlankOwnSaveParts)
+        const s32 minimap = std::exchange(UserStatus->minimap_status, 0);
 
         status.Add(UserStatus, sizeof *UserStatus);
         hash.Add(status.value);
         g_parts.status = status.value;
         g_status.assign((const unsigned char *) UserStatus, (const unsigned char *) UserStatus + sizeof *UserStatus);
+        UserStatus->minimap_status = minimap;
 
         // coop-p2absent: motionDrive's regeneration counter, a function static on the PS2 that no state
         // carries. Each copy's had counted its own ticks before a join, so the healing weapon's +1 HP
@@ -3350,9 +4575,11 @@ std::uint32_t Checksum() {
         g_parts.p2_bag = coop::InventoryHash();
         hash.Add(g_parts.p2_bag);
         coop::InventoryBytes(g_status);
+        g_parts.fish_pools = coop::FishPoolsHash(); // coop-fishpools
+        hash.Add(g_parts.fish_pools);
     }
 
-    // coop-menus: both players' overlays, only with game.coop_menus on (the checksum is unchanged off).
+    // coop-menus: the co-op menus' glue (coop_menu.cpp MenuHash), in co-op.
     if (coop::MenusOn()) {
         g_parts.menus = coop::MenuHash();
         hash.Add(g_parts.menus);
@@ -3369,10 +4596,15 @@ std::uint32_t Checksum() {
         hash.Add(position[2]);
         // coop-soakfix5: the walk's camera swing behind Toan (EdMoveChara's rot_count, ebattle.cpp), which the step turns the
         // town camera by: a copy left with its own showed only once the camera had turned, if it turned at all.
-        hash.Add(EdMoveCharaRotCount);
+        if (NetplayMutated("cameras_summed")) { // coop-wave3: the camera's own swing, out of the sum with the cameras
+            hash.Add(EdMoveCharaRotCount);
+        }
+        g_parts.rot_count = (int) EdMoveCharaRotCount;
 
         // coop-inbuild: inside a building, player 2's character too (both copies step her walk from the shared pad).
         if (float partner[3]; CoopTownIndoorPose(partner)) {
+            g_parts.indoor[0] = 1.0f;
+            std::memcpy(g_parts.indoor + 1, partner, sizeof partner);
             hash.Add(partner[0]);
             hash.Add(partner[1]);
             hash.Add(partner[2]);
@@ -3399,10 +4631,10 @@ std::uint32_t Checksum() {
     if (mode == GAME_MODE_EDIT) {
         g_parts.town_modes = CoopTownModeSum();
         hash.Add(g_parts.town_modes);
+        g_parts.pond = CoopPondHash(); // coop-pondfish: the boards' ponds, one for every fisher at a board
+        hash.Add(g_parts.pond);
     }
 
-    g_parts.menu_owner = g_link.menu_owner;
-    hash.Add(g_link.menu_owner);
     // coop-localmenu: every player's in-menu bits (the step reads them for standing still, the pause, the stand-aside).
     g_parts.in_menu = coop::ActorMenuBits();
     hash.Add(g_parts.in_menu);
@@ -3425,6 +4657,16 @@ std::uint32_t Checksum() {
     g_parts.partner_revive = (int) partner_state.revive;
     hash.Add(partner_state.down_left);
     hash.Add(partner_state.revive);
+    // coop-p2eyehand: her view's hand, which her shot starts from and goes by (EyeShotStart, EyeHandClock): whether it holds her
+    // weapon, its motion and its clock while her view steps it (out of the view it waits, hand_motion -1 on both copies).
+    hash.Add(partner_state.held_out);
+    hash.Add(partner_state.hand_motion);
+    g_parts.held_out = partner_state.held_out ? 1 : 0;
+    g_parts.hand_motion = partner_state.hand_motion;
+    if (partner_state.hand_motion >= 0 && partner_state.hand != nullptr) {
+        hash.Add(partner_state.hand->motion_type.state.time);
+        g_parts.hand_time = partner_state.hand->motion_type.state.time;
+    }
     g_parts.stages[1] = hash.value; // after the partner
     hash.Add(g_parts.georama_two);
 
@@ -3442,6 +4684,20 @@ std::uint32_t Checksum() {
     hash.Add(combat.charged_blow);
     hash.Add(combat.scale);
     hash.Add(combat.charges);
+    using coop::g_member_of;          // coop-rc2 (checksum lint): the read named as checksum-reads.txt declares it
+    using coop::g_member_restore_due;
+    hash.Add(g_member_of); // coop-swapcombo (A): the players' kept members
+    coop::MembersSelfTest(); // coop-memberowner: the members' invariant (no two players hold one member), read where they are summed
+    hash.Add(g_member_restore_due);
+    hash.Add(combat.combo_queued); // coop-swapcombo
+    hash.Add(combat.chain_hits);
+    hash.Add(combat.winding);
+    hash.Add(combat.release_step);
+    hash.Add(combat.release_two);
+    hash.Add(combat.jumping); // coop-comboaudio
+    hash.Add(combat.jump_vy);
+    hash.Add(combat.ground_height);
+    hash.Add(combat.swinging);
     hash.Add(combat.lock);
     hash.Add(combat.circle_ticks);
     hash.Add(combat.aiming);
@@ -3503,6 +4759,28 @@ std::uint32_t Checksum() {
         hash.Add(partner[0]);
         hash.Add(partner[1]);
         hash.Add(partner[2]);
+    }
+
+    // cand1112d (candfix2's draw-only desync, x-p2-lockpress): her frame's place and turn, which the simulation reads (CoopStep
+    // takes her turn from it, autoCamTrial her facing when locked) apart from g_partner.pos above. A copy whose draw alone wrote
+    // her frame (CCharacter::Draw, before candfix2) parted the copies there first; unsummed it showed only at her camera's lock
+    // swing, ticks later and named as the camera. DC_NETPLAY_MUTATE=partner_frame_unsummed (twin): not summed, as before.
+    if (dungeon && coop::g_partner.chara != nullptr && coop::g_partner.chara->frame != nullptr && coop::g_partner.loaded_chara >= 0 &&
+        !NetplayMutated("partner_frame_unsummed")) {
+        CFrame *frame = coop::g_partner.chara->frame;
+        float   turn[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        Hash    framed;
+
+        frame->GetRotation(turn);
+        g_parts.partner_frame[0] = frame->position[0];
+        g_parts.partner_frame[1] = frame->position[1];
+        g_parts.partner_frame[2] = frame->position[2];
+        g_parts.partner_frame[3] = turn[0];
+        g_parts.partner_frame[4] = turn[1];
+        g_parts.partner_frame[5] = turn[2];
+        framed.Add(g_parts.partner_frame);
+        g_parts.partner_frame_sum = framed.value;
+        hash.Add(framed.value);
     }
 
     Hash monsters;
@@ -3694,8 +4972,9 @@ std::uint32_t Checksum() {
     return hash.value;
 }
 
-// newest: the last input the packet carries (the kResend before it with it); this copy's newest by default.
-void Send(std::int64_t newest = -1) {
+// newest: the last input the packet carries (the kResend before it with it); this copy's newest by default. kept: a copy
+// of the packet sent (coop-gatelost: the leaver's last inputs, LingerAnswers).
+void Send(std::int64_t newest = -1, Packet *kept = nullptr) {
     // DC_NETPLAY_DROP_GROWTH: the packets of the tick the input delay first grew on are lost.
     if (g_link.drop_tick >= 0 && g_link.tick == g_link.drop_tick) {
         return;
@@ -3747,15 +5026,63 @@ void Send(std::int64_t newest = -1) {
         entry.ly = pad.left_y;
         entry.rx = pad.right_x;
         entry.ry = pad.right_y;
+        entry.steer = pad.steer; // coop-wave3
         entry.command = g_link.local[frame % kRing].command;
     }
 
     NetSocketSend(&packet, sizeof packet);
+    if (kept != nullptr) {
+        *kept = packet;
+    }
 
     // Until the other copy is past its handshake, it may still wait for this copy's Hello.
     if (!g_link.peer_ticking) {
         NetSocketSend(&g_link.my_hello, sizeof g_link.my_hello);
     }
+}
+
+// coop-gatelost (w-world-next-floor-harsh, 1 run in 3): the copy that goes apart at a split sent its last inputs twice and
+// went quiet (NetplayGoApart). The other copy, a few ticks behind, still needs them to play on to the split; at 10% loss
+// both copies of one were lost, it waited kWaitMs for that tick and dropped the link instead of splitting, so the pair
+// came apart in place and never merged where the floor change put them. Now the copy that left keeps its last packets and
+// its Leave for a while (2 x kWaitMs), and while the other copy's pads still come under the link it left (that copy waits
+// and resends, as a lockstep wait does every 20 ms), each one is answered with them again: never a wait here, only an
+// answer to what comes. DC_NETPLAY_MUTATE=leave_blind (twin): sent twice and gone, as before.
+struct Linger {
+    std::uint32_t                         peer_session = 0;
+    std::int64_t                          split = -1;
+    std::vector<Packet>                   packets;
+    Busy                                  leave{};
+    std::chrono::steady_clock::time_point until{}, last{};
+    int                                   answered = 0;
+};
+Linger g_linger;
+
+bool LingerAnswers(std::uint32_t session) {
+    if (g_linger.split < 0 || session != g_linger.peer_session) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now > g_linger.until) {
+        std::fprintf(stderr, "netplay: the link left at tick %lld: %d of the other copy's pads answered with this copy's last inputs, "
+                             "none heard since\n", (long long) g_linger.split, g_linger.answered);
+        g_linger = Linger{};
+        return false;
+    }
+    g_linger.answered++;
+    if (now - g_linger.last >= std::chrono::milliseconds(15)) {
+        g_linger.last = now;
+        for (const Packet &packet : g_linger.packets) {
+            NetSocketSend(&packet, sizeof packet);
+        }
+        NetSocketSend(&g_linger.leave, sizeof g_linger.leave);
+    }
+    if (g_linger.answered == 1) {
+        std::fprintf(stderr, "netplay: the other copy still plays the link this copy left at tick %lld: its last inputs (%zu packets) "
+                             "and its Leave sent again\n", (long long) g_linger.split, g_linger.packets.size());
+    }
+    return true;
 }
 
 void DumpStatus(std::int64_t frame, const std::vector<unsigned char> &status) {
@@ -3808,6 +5135,21 @@ void CompareChecksum(std::int64_t frame, std::uint32_t theirs) {
     if (frame <= g_link.resynced_at || g_link.awaiting_sync) {
         return;
     }
+    // coop-latepick test hook (DC_NETPLAY_TEST_RESYNC_AT=N, host): on the first compare of tick N or later, once, the host resyncs as a
+    // desync's compare does (the same resync tick and path), with no difference between the copies: a test reaches what a resync
+    // leaves (a dungeon's floor menu, each player picking there; DCO-134) without an OUT OF SYNC, which a test may not have.
+    static const std::int64_t resync_at = TestEnvInt("DC_NETPLAY_TEST_RESYNC_AT", -1);
+
+    if (resync_at >= 0 && frame >= resync_at && g_link.player == 1 && g_link.resync_tick < 0) {
+        static bool asked = false;
+
+        if (!asked) {
+            asked = true;
+            ResyncCause("test: a resync asked (DC_NETPLAY_TEST_RESYNC_AT), as a desync's", "CompareChecksum");
+            g_link.resync_tick = g_link.tick + g_link.delay + kResyncLeadTicks;
+            std::fprintf(stderr, "netplay: test: resync asked at compare tick %lld: resync at tick %lld\n", (long long) frame, (long long) g_link.resync_tick);
+        }
+    }
 
     // LOOSENED CHECK (Jep, coop-pilotfix; Jep's rule: named so): two ticks of the sync check are skipped, J and J+1 of a lockstep
     // that ends in a worlds merge, because the copies are apart there by design until the merge places in J+1. Anything that
@@ -3854,11 +5196,11 @@ void CompareChecksum(std::int64_t frame, std::uint32_t theirs) {
             const Parts &parts = g_parts_at[i];
             std::fprintf(stderr,
                          "netplay: this copy at tick %lld: random %08x task %d camera %.4f camera2 %.4f view %08x player (%.2f %.2f %.2f) "
-                         "partner (%.2f %.2f %.2f) monsters %08x status %08x menu player %d town (%.2f %.2f %.2f) "
+                         "partner (%.2f %.2f %.2f) monsters %08x status %08x town (%.2f %.2f %.2f) "
                          "in menu %08x partner member %d down %d choice %d georama player %d p2 bag %08x panel %d lock %d shots %08x save %08x stages %08x %08x %08x menus %08x floor %08x hits %08x town modes %08x\n",
                          (long long) frame, parts.rand, parts.task, parts.camera, parts.camera2, parts.view, parts.player[0], parts.player[1],
                          parts.player[2], parts.partner[0], parts.partner[1], parts.partner[2], parts.monsters, parts.status,
-                         parts.menu_owner, parts.town[0], parts.town[1], parts.town[2], parts.in_menu, parts.partner_chara, parts.partner_down,
+                         parts.town[0], parts.town[1], parts.town[2], parts.in_menu, parts.partner_chara, parts.partner_down,
                          parts.partner_choice, parts.georama_two ? 2 : 1, parts.p2_bag, parts.combat_panel ? 1 : 0, parts.combat_lock,
                          parts.shots, parts.save, parts.stages[0], parts.stages[1], parts.stages[2], parts.menus, parts.floor, parts.hits, parts.town_modes);
             // coop-localfix: the view in full and the town camera it should come from, so a "view" alone apart says which.
@@ -3871,8 +5213,16 @@ void CompareChecksum(std::int64_t frame, std::uint32_t theirs) {
                          parts.player[0], parts.player[1], parts.player[2], parts.partner[0], parts.partner[1], parts.partner[2]);
             std::fprintf(stderr, "netplay: this copy's partner at tick %lld: shown %.0f at (%.3f %.3f %.3f), down left %d, revive %d\n", (long long) frame, parts.partner_out[0], parts.partner_out[1], parts.partner_out[2],
                          parts.partner_out[3], parts.partner_left, parts.partner_revive);
+            std::fprintf(stderr, "netplay: this copy's partner frame at tick %lld: sum %08x at (%.3f %.3f %.3f) turn (%.4f %.4f %.4f)\n", (long long) frame,
+                         parts.partner_frame_sum, parts.partner_frame[0], parts.partner_frame[1], parts.partner_frame[2], parts.partner_frame[3],
+                         parts.partner_frame[4], parts.partner_frame[5]);
             std::fprintf(stderr, "netplay: this copy's stage 2 parts at tick %lld: event %08x heal %d weapon fx %d melt %d %d %d\n", (long long) frame, parts.event_sum,
                          parts.heal, parts.weapon_fx, parts.melt_frame, parts.melt_pending, parts.melt_on);
+            std::fprintf(stderr, "netplay: this copy's stage 1 parts at tick %lld: walk swing %d present %08x fish pools %08x pond %08x her hand %d %d %a indoors %.0f (%a %a %a) town (%a %a %a) her outdoors %.0f (%a %a %a)\n",
+                         (long long) frame, parts.rot_count, parts.present, parts.fish_pools, parts.pond, parts.held_out, parts.hand_motion, parts.hand_time, parts.indoor[0],
+                         parts.indoor[1], parts.indoor[2], parts.indoor[3], parts.town[0], parts.town[1], parts.town[2], parts.partner_out[0],
+                         parts.partner_out[1], parts.partner_out[2], parts.partner_out[3]);
+            CarriedSay((long long) frame, parts.carried);
                 std::fprintf(stderr,
                              "netplay: this copy's view at tick %lld: rows (%.4f %.4f %.4f %.4f) (%.4f %.4f %.4f %.4f) (%.4f %.4f %.4f %.4f) (%.3f %.3f %.3f %.4f); "
                              "town camera eye (%.3f %.3f %.3f) look (%.3f %.3f %.3f)\n",
@@ -3922,6 +5272,7 @@ void SendAckNow(std::uint32_t tick) {
     ack.player = (std::uint32_t) g_link.player;
     ack.session = g_link.session;
     ack.tick = tick;
+    ack.part = g_link.resync_in_part; // coop-joinstuck
     std::memcpy(ack.held, g_link.resync_held, sizeof ack.held);
     NetSocketSend(&ack, sizeof ack);
 }
@@ -4038,6 +5389,7 @@ void ReceiveTick(const Packet &packet) {
         slot.pad.left_y = entry.ly;
         slot.pad.right_x = entry.rx;
         slot.pad.right_y = entry.ry;
+        slot.pad.steer = entry.steer; // coop-wave3
         slot.command = entry.command;
     }
 
@@ -4051,6 +5403,8 @@ void ReceiveTick(const Packet &packet) {
         g_link.resync_tick = packet.resync_tick;
         std::memset(g_link.resync_held, 0, sizeof g_link.resync_held);
         g_link.resync_state.clear();
+        g_link.resync_in_part = 0; // coop-joinstuck
+        g_link.resync_in_last = false;
         std::fprintf(stderr, "netplay: the host resyncs at tick %lld\n", (long long) g_link.resync_tick);
     }
 }
@@ -4064,6 +5418,7 @@ InputPadState LinkPad(const InputPadState &pad) {
     out.left_y = pad.left_y;
     out.right_x = pad.right_x;
     out.right_y = pad.right_y;
+    out.steer = pad.steer; // coop-wave3
     return out;
 }
 
@@ -4122,6 +5477,31 @@ void NextCatchPieces() {
     g_catch.out_pieces.window = window;
     g_catch.out_pieces.pacer = pacer;
     g_catch.out_held_at = {};
+}
+
+// coop-joinstuck: the host: part g_catch.out_part of a blob past one blob's pieces (g_catch.out_whole) as the blob in flight, a blob id
+// of its own (as the state set's parts): kBlobPartMark, the part, the count, its length, then its bytes.
+void CatchBlobPart() {
+    std::vector<unsigned char> &out = g_catch.out;
+    const std::size_t           at = g_catch.out_part * kSnapPartBytes;
+    const std::size_t           length = std::min(kSnapPartBytes, g_catch.out_whole.size() - at);
+    auto put = [&](std::uint32_t value) {
+        for (int i = 0; i < 4; i++) {
+            out.push_back((unsigned char) (value >> (8 * i)));
+        }
+    };
+
+    out.clear();
+    put(kBlobPartMark);
+    put((std::uint32_t) g_catch.out_part);
+    put((std::uint32_t) g_catch.out_parts);
+    put((std::uint32_t) length);
+    out.insert(out.end(), g_catch.out_whole.begin() + (std::ptrdiff_t) at, g_catch.out_whole.begin() + (std::ptrdiff_t) (at + length));
+    g_catch.out_id++;
+    std::memset(g_catch.out_held, 0, sizeof g_catch.out_held);
+    NextCatchPieces();
+    std::fprintf(stderr, "catchup: blob %u: part %zu of %zu of a blob of %zu bytes, %zu bytes [t %lld]\n", g_catch.out_id, g_catch.out_part + 1, g_catch.out_parts,
+                 g_catch.out_whole.size(), out.size(), LogMs());
 }
 
 // The host: the next blob, its pads from..to (runs of one pad: count, buttons, sticks), the checkpoint first if asked,
@@ -4194,7 +5574,7 @@ void CatchBlob(std::int64_t from, std::int64_t to, bool checkpoint, std::int64_t
     if (join >= 0 && g_link.player == 1) {
         g_catch.pick_set = coop::lobby::JoinPickTake(g_catch.pick_member, g_catch.pick_name);
         if (g_catch.pick_set) {
-            coop::ProfileBagsJoinBag(g_catch.pick_name, g_catch.pick_bag);
+            coop::ProfileBagsJoinBag(JoinerPlayer(), g_catch.pick_name, g_catch.pick_bag);
         }
     }
     put(g_catch.pick_set ? (std::uint32_t) g_catch.pick_member : kNone, 4);
@@ -4206,6 +5586,17 @@ void CatchBlob(std::int64_t from, std::int64_t to, bool checkpoint, std::int64_t
     }
     put((std::uint32_t) g_catch.pick_bag.size(), 4);
     out.insert(out.end(), g_catch.pick_bag.begin(), g_catch.pick_bag.end());
+    // coop-b4arrive: the last blob of a join over the joiner's own arrival (the host's cut word): where both copies go on with it at
+    // J, the record's tick her screen had reached (her word, kEntranceShownMagic); 0 if it never came (her first frames again).
+    g_catch.entrance_from = join >= 0 && g_link.cut_word != 0 ? std::max(g_catch.entrance_shown, 0) : -1;
+    put(g_catch.entrance_from < 0 ? kNone : (std::uint32_t) g_catch.entrance_from, 4);
+    // coop-p2tick: the sender's merge word (EnterLockstep, CompareChecksum), in every blob (read with the last)
+    g_catch.join_merge = join >= 0 && CoopWorldsApart();
+    put(g_catch.join_merge ? 1u : 0u, 4);
+    if (g_catch.entrance_from >= 0) {
+        std::fprintf(stderr, "catchup: the last blob says player %d's arrival goes on from record tick %d at J (her word %d)\n", g_link.cut_word,
+                     g_catch.entrance_from, g_catch.entrance_shown);
+    }
     if (g_catch.pick_set) {
         std::fprintf(stderr, "catchup: the last blob carries the joiner's pick: %d (%s), its bag %s\n", g_catch.pick_member,
                      g_catch.pick_name.empty() ? "no profile" : g_catch.pick_name.c_str(), g_catch.pick_bag.empty() ? "not changed" : "given");
@@ -4228,16 +5619,46 @@ void CatchBlob(std::int64_t from, std::int64_t to, bool checkpoint, std::int64_t
         put(pad.left_y, 1);
         put(pad.right_x, 1);
         put(pad.right_y, 1);
+        put((std::uint32_t) pad.steer, 4); // coop-wave3: the steer row
         tick += run;
     }
 
+    g_catch.sent_to = to;
+    g_catch.join_tick = join;
+    g_catch.out_whole.clear();
+    g_catch.out_part = g_catch.out_parts = 0;
+    // coop-joinstuck: past one blob's pieces, in parts (CatchBlobPart; the next goes as the last is held, CatchOutHeld)
+    if (out.size() > (std::size_t) kChunks * kChunkBytes && !NetplayMutated("blob_one_part")) {
+        std::fprintf(stderr, "catchup: blob %u: ticks %lld to %lld%s, %zu bytes%s, past one blob's %d: in parts [t %lld]\n", g_catch.out_id + 1, (long long) from,
+                     (long long) to, checkpoint ? " with the checkpoint" : "", out.size(), join >= 0 ? ", the last: the lockstep starts there" : "",
+                     kChunks * kChunkBytes, LogMs());
+        g_catch.out_whole.swap(out);
+        g_catch.out_parts = (g_catch.out_whole.size() + kSnapPartBytes - 1) / kSnapPartBytes;
+        CatchBlobPart();
+        return;
+    }
     g_catch.out_id++;
     std::memset(g_catch.out_held, 0, sizeof g_catch.out_held);
     NextCatchPieces();
-    g_catch.sent_to = to;
-    g_catch.join_tick = join;
     std::fprintf(stderr, "catchup: blob %u: ticks %lld to %lld%s, %zu bytes%s [t %lld]\n", g_catch.out_id, (long long) from, (long long) to,
                  checkpoint ? " with the checkpoint" : "", out.size(), join >= 0 ? ", the last: the lockstep starts there" : "", LogMs());
+}
+
+// coop-soakapart2 (the v0.2 pre-soak, seed 1142 again: OUT OF SYNC at tick 60, his menu open on her copy alone): the recorded changes
+// the host's state set holds, which the joiner skips (the set has them). They were told by tick (those up to S), but a take at tick S
+// comes before changes recorded on S (his menu's close and melt, recorded at 2 after the take of 2): those were skipped and never
+// applied on her copy. The host now says how many of its recorded changes its set holds (g_snap.deltas, with each part), and the
+// joiner skips exactly those, in the host's order (its list is the host's: all with the checkpoint, then the newer).
+// DC_NETPLAY_MUTATE=snap_deltas_by_tick (twin): up to S by tick, as before.
+void SnapDeltasSkip(const char *when) {
+    const bool by_tick = NetplayMutated("snap_deltas_by_tick");
+
+    while (g_solo.next_delta < g_solo.deltas.size() &&
+           (by_tick ? g_solo.deltas[g_solo.next_delta].tick <= g_snap.in_tick : g_solo.next_delta < (std::size_t) g_snap.in_deltas)) {
+        std::fprintf(stderr, "catchup: change %zu (recorded at tick %lld) %s: in the state set of tick %lld (it holds %u), skipped\n", g_solo.next_delta,
+                     (long long) g_solo.deltas[g_solo.next_delta].tick, when, (long long) g_snap.in_tick, g_snap.in_deltas);
+        g_solo.next_delta++;
+    }
 }
 
 // The host: part `part` of `parts` of the snapshot as a blob (CatchBlob's header with kSnapMark).
@@ -4250,11 +5671,14 @@ void SnapBlob(std::size_t part, std::size_t parts, const unsigned char *data, st
     };
 
     out.clear();
+    g_catch.out_whole.clear(); // coop-joinstuck: no parted blob in flight
+    g_catch.out_part = g_catch.out_parts = 0;
     put(mark);
     put((std::uint32_t) part);
     put((std::uint32_t) parts);
     put((std::uint32_t) length);
     put((std::uint32_t) g_snap.tick);
+    put(g_snap.deltas); // coop-soakapart2
     out.insert(out.end(), data, data + length);
     g_catch.out_id++;
     std::memset(g_catch.out_held, 0, sizeof g_catch.out_held);
@@ -4272,7 +5696,8 @@ int PieceOverdueMs() {
 // The host: the pieces of `data` the joiner does not hold (`held`, from its acknowledgements), as many as the window
 // allows unacknowledged, each again only once its acknowledgement is overdue. Call it as often as you like: it sends
 // what the acknowledgements since the last call make room for.
-void SendPieces(PieceSender &out, const std::vector<unsigned char> &data, const std::uint32_t *held, std::uint32_t tick) {
+// coop-joinload: magic, the pieces' kind (kChunkMagic: a resync's or a catch-up's; kLoadPieceMagic: a join's load).
+void SendPieces(PieceSender &out, const std::vector<unsigned char> &data, const std::uint32_t *held, std::uint32_t tick, std::uint32_t magic = kChunkMagic) {
     using Clock = std::chrono::steady_clock;
 
     // coop-offthread: the game thread's time in this call (the blob's line says its longest)
@@ -4290,8 +5715,28 @@ void SendPieces(PieceSender &out, const std::vector<unsigned char> &data, const 
     auto              overdue = std::chrono::milliseconds(burst ? 30 : PieceOverdueMs());
     std::uint32_t     count = (std::uint32_t) ((data.size() + kChunkBytes - 1) / kChunkBytes);
 
+    // coop-joinstuck: a blob is kChunks pieces at most (the acknowledgement's bitmap, the joiner's checks, out's arrays): past it no
+    // piece goes (the joiner would drop each, and out's arrays end at kChunks), said once a blob. Its maker sends it in parts.
+    if (count > (std::uint32_t) kChunks) {
+        if (out.began == Clock::time_point{}) {
+            out.began = now;
+            std::fprintf(stderr, "pieces: a blob of %zu bytes is %u pieces, past one blob's %d: none sent (its maker sends such a blob in parts) [t %lld]\n",
+                         data.size(), count, kChunks, LogMs());
+        }
+        return;
+    }
+
     if (out.window == 0) {
         out.window = PieceWindowFirst();
+        static std::uint32_t told = 0; // coop-p2tick: once a link (the line whole in one write: this may be the send thread)
+
+        if (out.window == kChunks && told != g_link.peer_hello.session) {
+            char      line[160];
+            const int length = std::snprintf(line, sizeof line, "netplay: a link to a window of this PC: its first window %d pieces (a whole part)\n", out.window);
+
+            told = g_link.peer_hello.session;
+            std::fwrite(line, 1, (std::size_t) std::max(0, std::min(length, (int) sizeof line - 1)), stderr);
+        }
     }
     long long         since = out.paced == Clock::time_point{} ? kFixedBurst
                                                                : std::chrono::duration_cast<std::chrono::milliseconds>(now - out.paced).count() * kFixedPerMs;
@@ -4638,12 +6083,13 @@ void SendPieces(PieceSender &out, const std::vector<unsigned char> &data, const 
     static const bool tail_loss = NetplayMutated("tail_counts_loss");
     const bool        tail = direct && late && held_last < (std::int64_t) late_lo && out.again == out.tail_seen;
 
-    chunk.magic = kChunkMagic;
+    chunk.magic = magic;
     chunk.player = (std::uint32_t) g_link.player; // coop-localfix2: the sender (player 2 for her merge)
     chunk.session = g_link.session;
     chunk.tick = tick;
     chunk.total = (std::uint32_t) data.size();
     chunk.count = (std::uint16_t) count;
+    chunk.part = out.part;
 
     // coop-offthread: the send thread still sends an earlier call's pieces: none picked now (the game thread waited them out before)
     if (off_thread && PieceSends().Busy()) {
@@ -4758,6 +6204,15 @@ bool CatchOutHeld() {
             std::fprintf(stderr, "catchup: blob %u all held: its last round read as it ended (%u sends not read before)\n", g_catch.out_id, unread);
         }
     }
+    // coop-joinstuck: a parted blob is held once its last part is; the next part goes now
+    if (g_catch.out_part + 1 < g_catch.out_parts) {
+        g_catch.out_part++;
+        CatchBlobPart();
+        return false;
+    }
+    if (!g_catch.out_whole.empty()) {
+        g_catch.out_whole = {}; // (its last part held)
+    }
     return true;
 }
 
@@ -4774,9 +6229,44 @@ bool CatchOnePiece() {
     return g_catch.in.size() <= kChunkBytes && g_catch.in_pieces == 1 && g_catch.in_again == 0;
 }
 
+// coop-firsttick: this copy's arenas prepared for the state set's apply, once a link (SnapshotApplyPrepare): from the first pass
+// that knows it lands where it stands (blob 1's word that a set follows, ~100 ms before the set is whole), else at its landing.
+// DC_NETPLAY_MUTATE=apply_zeros_all (twin): none, every zero put, as before.
+void ApplyPrepareOnce() {
+    static std::uint32_t done_for = 0;
+
+    if (done_for != g_link.session && !NetplayMutated("apply_zeros_all")) {
+        done_for = g_link.session;
+        SnapshotApplyPrepare();
+    }
+}
+
 void CatchTake() {
     const std::vector<unsigned char> &in = g_catch.in;
     std::size_t                       at = 0;
+
+    // coop-joinstuck: a part of a blob past one blob's pieces: kept until the last, then the parts together are the blob taken
+    if (in.size() >= 16 && (std::uint32_t) (in[0] | in[1] << 8 | in[2] << 16 | (std::uint32_t) in[3] << 24) == kBlobPartMark) {
+        auto word = [&](std::size_t i) { return (std::uint32_t) in[i] | (std::uint32_t) in[i + 1] << 8 | (std::uint32_t) in[i + 2] << 16 | (std::uint32_t) in[i + 3] << 24; };
+        const std::size_t part = word(4), parts = word(8), length = std::min<std::size_t>(word(12), in.size() - 16);
+
+        if (part == 0) {
+            g_catch.in_whole.clear();
+            g_catch.in_whole_parts = 0;
+        }
+        if (part == g_catch.in_whole_parts) {
+            g_catch.in_whole.insert(g_catch.in_whole.end(), in.begin() + 16, in.begin() + (std::ptrdiff_t) (16 + length));
+            g_catch.in_whole_parts++;
+        }
+        std::fprintf(stderr, "catchup: took blob %u: part %zu of %zu of a blob (%zu bytes so far) [t %lld]\n", g_catch.in_id, part + 1, parts,
+                     g_catch.in_whole.size(), LogMs());
+        if (g_catch.in_whole_parts < parts) {
+            return;
+        }
+        g_catch.in.swap(g_catch.in_whole); // (in: the blob whole, taken below as any)
+        g_catch.in_whole.clear();
+        g_catch.in_whole_parts = 0;
+    }
     auto get = [&](int bytes) {
         std::uint32_t value = 0;
 
@@ -4805,7 +6295,8 @@ void CatchTake() {
 
     if (mark == kSnapMark || mark == kPageListMark || mark == kPageDiffMark) {
         std::size_t  part = (std::size_t) to, parts = join, length = checkpoint;
-        std::int64_t snap_tick = get(4);
+        std::int64_t        snap_tick = get(4);
+        const std::uint32_t snap_deltas = get(4); // coop-soakapart2
 
         if (part == 0) {
             if (g_catch.restart_waiting) { // coop-reds2: the fresh set asked for is coming
@@ -4817,6 +6308,7 @@ void CatchTake() {
             g_snap.in_parts = 0;
             g_snap.in_total = parts;
             g_snap.in_tick = snap_tick;
+            g_snap.in_deltas = snap_deltas;
             g_snap.in_mark = mark;
             g_snap.answered = g_snap.answered || mark != kPageListMark;
         }
@@ -4864,6 +6356,13 @@ void CatchTake() {
         g_solo.deltas.push_back(delta);
     }
 
+    // coop-soakapart (soak seed 1142, apart: OUT OF SYNC at tick 60, the carried melt timer): the host's own changes recorded
+    // between its checkpoint and its state set's take reach this copy in the blob after the state set; those the set holds are
+    // skipped here too, as the apply skips them (SnapDeltasSkip). DC_NETPLAY_MUTATE=late_deltas_applied (twin): applied, as before.
+    if (g_snap.applied && !NetplayMutated("late_deltas_applied")) {
+        SnapDeltasSkip("came after the state set");
+    }
+
     if (added > 0) {
         std::fprintf(stderr, checkpoint > 0 ? "catchup: the checkpoint comes with %u of player 2's changes from apart\n"
                                             : "catchup: blob %u brings %u more of player 2's changes from apart (from tick %lld)\n",
@@ -4900,6 +6399,20 @@ void CatchTake() {
     }
     g_catch.pick_set = pick_member != kNone;
     g_catch.pick_member = g_catch.pick_set ? (int) pick_member : -1;
+    // coop-b4arrive: the host's word of where this copy's own arrival goes on at J (CatchBlob), -1 none
+    {
+        const std::uint32_t entrance_from = get(4);
+
+        g_catch.entrance_from = entrance_from == kNone ? -1 : (int) entrance_from;
+        if (g_catch.entrance_from >= 0) {
+            std::fprintf(stderr, "catchup: the last blob says this copy's arrival goes on from record tick %d at J (its screen showed %d)\n",
+                         g_catch.entrance_from, g_catch.entrance_shown);
+        }
+    }
+    // coop-p2tick: the sender's word that its copy is apart at J (CatchBlob)
+    if (const std::uint32_t merge = get(4); join != kNone) {
+        g_catch.join_merge = merge != 0;
+    }
 
     if (from != g_catch.have_to && g_snap.in_total == 0) { // (after a snapshot the pads start at S, as they should)
         std::fprintf(stderr, "catchup: blob %u starts at tick %lld, not %lld\n", g_catch.in_id, (long long) from, (long long) g_catch.have_to);
@@ -4916,6 +6429,7 @@ void CatchTake() {
         pad.left_y = (std::uint8_t) get(1);
         pad.right_x = (std::uint8_t) get(1);
         pad.right_y = (std::uint8_t) get(1);
+        pad.steer = (std::int32_t) get(4); // coop-wave3
 
         for (std::uint32_t i = 0; i < run; i++) {
             g_solo.pads.push_back(g_link.source == 2 ? Neutral() : pad); // coop-localfix2: her merge's pads are player 2's
@@ -5206,15 +6720,29 @@ void ReceiveChunk(const Chunk &chunk) {
         return;
     }
 
-    if (g_link.resync_state.size() != chunk.total) {
-        g_link.resync_state.assign(chunk.total, 0);
+    // coop-joinstuck: the state's part p (Resync): the host sends part p only once this copy held all of part p - 1, so a piece of
+    // a later part starts it (the parts before kept); a piece of an earlier part is one sent again, already held.
+    const std::uint32_t part = chunk.part & ~kResyncPartLast;
+    const std::size_t   from = (std::size_t) part * kResyncPartBytes;
+
+    if (part < g_link.resync_in_part) {
+        return;
+    }
+    if (part > g_link.resync_in_part || g_link.resync_state.size() != from + chunk.total) {
+        if (part == 0) {
+            g_link.resync_state.assign(chunk.total, 0);
+        } else {
+            g_link.resync_state.resize(from + chunk.total);
+        }
+        g_link.resync_in_part = part;
         std::memset(g_link.resync_held, 0, sizeof g_link.resync_held);
     }
+    g_link.resync_in_last = (chunk.part & kResyncPartLast) != 0;
 
     std::size_t at = (std::size_t) chunk.index * kChunkBytes;
     std::size_t size = std::min<std::size_t>(kChunkBytes, chunk.total - at);
 
-    std::memcpy(g_link.resync_state.data() + at, chunk.data, size);
+    std::memcpy(g_link.resync_state.data() + from + at, chunk.data, size);
     g_link.resync_held[chunk.index / 32] |= 1u << (chunk.index % 32);
     SendAck(chunk.tick);
 }
@@ -5241,7 +6769,7 @@ void ReceiveAck(const Ack &ack) {
         return;
     }
 
-    if (g_link.player == 1 && (std::int64_t) ack.tick == g_link.resync_tick) {
+    if (g_link.player == 1 && (std::int64_t) ack.tick == g_link.resync_tick && ack.part == g_link.resync_out_part) {
         for (int i = 0; i < kChunks / 32; i++) {
             g_link.resync_held[i] |= ack.held[i];
         }
@@ -5917,6 +7445,25 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
             continue;
         }
 
+        // coop-joinload: a join's load pieces (the joiner) and their acknowledgements (the host), outside any link's session.
+        if (magic == kLoadPieceMagic && got == (int) sizeof(Chunk)) {
+            Chunk chunk;
+            std::memcpy(&chunk, buffer, sizeof chunk);
+            if (chunk.tick == kPreloadBlobTick) {
+                PreloadPiece(chunk); // coop-p2boot
+            } else {
+                JoinLoadPiece(chunk);
+            }
+            continue;
+        }
+        if (magic == kLoadAckMagic && got == (int) sizeof(Ack)) {
+            Ack ack;
+            std::memcpy(&ack, buffer, sizeof ack);
+            JoinLoadAck(ack);
+            PreloadAck(ack); // coop-p2boot (its own tick word)
+            continue;
+        }
+
         // coop-hellosize51 (train 51's x-protocol-refuse red): a Hello of another size is another protocol's (buildid's
         // protocol 16 grew it), so it is kept as far as it reaches, its protocol read, and the link refused as a different
         // version of the link, never dropped unheard (both copies listened on, 0 Hellos). A size that differs with the same
@@ -5926,7 +7473,11 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
         if (magic == kNetplayHelloMagic && got != (int) sizeof(NetplayHello) && got >= helloHead && !NetplayMutated("hello_size_exact")) {
             std::memset(&g_link.peer_hello, 0, sizeof g_link.peer_hello);
             std::memcpy(&g_link.peer_hello, buffer, std::min((std::size_t) got, sizeof g_link.peer_hello));
-            if (g_link.peer_hello.protocol == NetplayHelloProtocol()) {
+            // version-scheme: a later version's Hello (the protocol frozen at 28, its layout grown) says its version right after the
+            // protocol: kept, so the refusal names it; one of this version with another size is no Hello of ours (protocol 0).
+            const bool release_read = got >= (int) (offsetof(NetplayHello, release) + sizeof g_link.peer_hello.release);
+            if (g_link.peer_hello.protocol == NetplayHelloProtocol() &&
+                (!release_read || std::strncmp(g_link.peer_hello.release, NetplayHelloRelease(), sizeof g_link.peer_hello.release) == 0)) {
                 g_link.peer_hello.protocol = 0;
             }
             static int said = 0;
@@ -5936,6 +7487,7 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
                              (unsigned) g_link.peer_hello.protocol);
             }
             g_link.peer_hello_got = true;
+            RememberPeerName(); // coop-areanotice
             g_link.heard_hellos++;
             NetSocketKeepSender();
             continue;
@@ -5943,6 +7495,7 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
         if (magic == kNetplayHelloMagic && got == (int) sizeof(NetplayHello)) {
             std::memcpy(&g_link.peer_hello, buffer, sizeof g_link.peer_hello);
             g_link.peer_hello_got = true;
+            RememberPeerName(); // coop-areanotice
             g_link.heard_hellos++;
             NetSocketKeepSender();
             continue;
@@ -5986,7 +7539,18 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
             }
         }
 
-        if (!g_link.up || !g_link.peer_hello_got || session != g_link.peer_hello.session) {
+        if (!g_link.up && magic == kMagic && LingerAnswers(session)) {
+            continue;
+        }
+
+        // coop-gatelost: under the session this copy LINKED with (last_peer_session, set as the link came up), not the
+        // last Hello's. A copy that went apart at a split takes a new session and Hellos under it at once, and every
+        // Hello lands in peer_hello; the copy still playing on to that split took it, and from then dropped the link's own
+        // last inputs and Leave as another session's (gatelost2 probe, w-world-next-floor-lostleave on PC-02: 400+ of
+        // the leaver's LingerAnswers dropped, peer 66afec3d -> 1be6bab9 at tick 119, then the 5 s wait and a drop
+        // instead of the split). DC_NETPLAY_MUTATE=link_takes_last_hello (twin): the last Hello's, as before.
+        const std::uint32_t linked = NetplayMutated("link_takes_last_hello") ? g_link.peer_hello.session : g_link.last_peer_session;
+        if (!g_link.up || !g_link.peer_hello_got || session != linked) {
             // coop-replayload: a catch-up piece read and dropped says why (his merge's checkpoint lost 31 of its first 32).
             if (magic == kChunkMagic) {
                 std::fprintf(stderr, "catchup: a piece dropped unread: link %s, Hello %s, its session %08x, the Hello's %08x [t %lld]\n",
@@ -5997,6 +7561,49 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
 
         g_link.link_heard = true;
         g_catch.heard = std::chrono::steady_clock::now();
+
+        // coop-gatelost (tests): DC_NETPLAY_TEST_DEAF_FROM=F:MS: the other copy's pads from its frame F on, and its Leave,
+        // lost on the way for MS ms from the first of them (its last inputs before a split it plays first: the split at 120
+        // of w-world-next-floor, F 119, as 10% loss lost them in -harsh's 1 run in 3).
+        static const char *const deaf = TestEnv("DC_NETPLAY_TEST_DEAF_FROM");
+        static long long         deaf_from = -1;
+        static int               deaf_ms = 0;
+        static std::chrono::steady_clock::time_point deaf_began{};
+        static int               deaf_dropped = 0;
+
+        if (deaf != nullptr && deaf_from < 0 && std::sscanf(deaf, "%lld:%d", &deaf_from, &deaf_ms) != 2) {
+            deaf_from = -1;
+        }
+        if (deaf_from >= 0 && (magic == kMagic || magic == kLeaveMagic)) {
+            Packet head{};
+
+            std::memcpy(&head, buffer, std::min<std::size_t>((std::size_t) got, sizeof head));
+            const bool tail = magic == kLeaveMagic || (head.entries[0].frame != 0xFFFFFFFFu && (long long) head.entries[0].frame >= deaf_from);
+            const auto now = std::chrono::steady_clock::now();
+
+            if (tail && deaf_began == std::chrono::steady_clock::time_point{}) {
+                deaf_began = now;
+                std::fprintf(stderr, "netplay: test: the other copy's pads from its frame %lld and its Leave are lost for %d ms (at link tick %lld)\n",
+                             deaf_from, deaf_ms, (long long) g_link.tick);
+            }
+            if (tail && now - deaf_began < std::chrono::milliseconds(deaf_ms)) {
+                deaf_dropped++;
+                continue;
+            }
+            // Only once the window is over: a packet of older frames inside it (the other copy's resends of what it sent
+            // before frame F, NetplayGoApart's rounds among them) passes but must not end it, or the frames from F on
+            // that follow it pass too (PC-02 gatelost2: 6 lost, then its blind resend's older packet ended it at tick 119
+            // and the twin passed).
+            if (deaf_began != std::chrono::steady_clock::time_point{} && deaf_dropped > 0 &&
+                now - deaf_began >= std::chrono::milliseconds(deaf_ms)) {
+                std::fprintf(stderr, "netplay: test: %d of the other copy's packets were lost; its next heard (link tick %lld)\n", deaf_dropped,
+                             (long long) g_link.tick);
+                deaf_dropped = 0;
+                deaf_from = 1LL << 40; // (once)
+            }
+        }
+
+        g_link.word_at = std::chrono::steady_clock::now(); // coop-falsedrop: any word of the link's (past the test's deaf window)
 
         if (magic == kMagic && got == (int) sizeof(Packet)) {
             Packet packet;
@@ -6050,6 +7657,7 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
                 g_snap.taken = false;
                 g_snap.due_at = std::chrono::steady_clock::now();
                 g_snap.due_drawn = g_frames_drawn;
+                SnapshotTakePrepare(); // jointake: the take's arena test and room ahead, off the game thread
                 g_snap.parts = g_snap.sent = 0;
                 g_snap.mark = kSnapMark;
                 g_snap.page_step = 0;
@@ -6065,6 +7673,13 @@ void ReceivePass(std::chrono::steady_clock::time_point pass_from) {
             Busy caught;
             std::memcpy(&caught, buffer, sizeof caught);
             g_catch.caught = std::max(g_catch.caught, (std::int64_t) caught.unused);
+        } else if (magic == kEntranceShownMagic && got == (int) sizeof(Busy)) { // coop-b4arrive
+            Busy shown;
+            std::memcpy(&shown, buffer, sizeof shown);
+            if (g_catch.entrance_shown != (int) shown.unused) {
+                std::fprintf(stderr, "catchup: player %u's own arrival showed %u record ticks before the state set landed\n", shown.player, shown.unused);
+            }
+            g_catch.entrance_shown = (int) shown.unused;
         } else if (magic == kAckMagic && got == (int) sizeof(Ack)) {
             Ack ack;
             std::memcpy(&ack, buffer, sizeof ack);
@@ -6132,6 +7747,24 @@ void SettingsPartPut(const unsigned char *data, std::size_t size) {
     if (NetplayHelloSettingsDiffer(mine, host)) {
         NetplayHelloAdopt(host);
         std::fprintf(stderr, "netplay: carried: the host's settings taken (settings hash %08x now)\n", NetplaySettingsHash());
+    }
+}
+
+// coop-settings: every player's own options (g_player_options), as every copy runs them.
+std::uint32_t OwnOptionsPartHash() {
+    std::uint32_t hash = 2166136261u;
+
+    for (const std::uint8_t row : g_player_options) {
+        hash = (hash ^ row) * 16777619u;
+    }
+    return hash;
+}
+void OwnOptionsPartTake(std::vector<unsigned char> &out) {
+    out.insert(out.end(), g_player_options, g_player_options + coop::kMaxPlayers);
+}
+void OwnOptionsPartPut(const unsigned char *data, std::size_t size) {
+    if (size == sizeof g_player_options) {
+        std::memcpy(g_player_options, data, size);
     }
 }
 
@@ -6226,8 +7859,10 @@ void ToanStepPartPut(const unsigned char *data, std::size_t size) {
 // MainCamera is carried and put before the load (as the dungeon's MainCamera__4 in the header), so the load starts from
 // one camera on every copy; the hash reads its eye and look-at in a town (what the view reads).
 // DC_NETPLAY_MUTATE=town_camera_own (twin): each copy keeps its own, as before.
+// coop-wave3: out of the sum (each player's camera is its own; the tick reads no view): carried still, so a load starts from the
+// host's (DC_NETPLAY_MUTATE=cameras_summed: summed as before).
 std::uint32_t TownCameraPartHash() {
-    if (mode != GAME_MODE_EDIT) {
+    if (mode != GAME_MODE_EDIT || !NetplayMutated("cameras_summed")) {
         return 0u;
     }
     sceVu0FVECTOR eye_ref[2];
@@ -6321,19 +7956,115 @@ void QuestsPartPut(const unsigned char *data, std::size_t size) {
     }
 }
 
+// coop-rc2 (swapcombo (A) x a town merge's resync): each player's kept member (coop::g_member_of) and the floor's restore armed
+// (g_member_restore_due), which the checksum reads. The snapshot's state set carries them (build\snapshot-allow.txt); a
+// resync carries the save and these parts only, so a copy that kept a member apart (player 2's 1, on her floor) kept it
+// across every resync while the host's said none: OUT OF SYNC 60 ticks after each one, 1312 resyncs in town
+// (w-world-merge-town, -seen). Carried here, the host's on every copy. DC_NETPLAY_MUTATE=members_uncarried (twin): not carried.
+std::uint32_t MembersPartHash() {
+    std::uint32_t hash = 2166136261u;
+    const auto   *bytes = reinterpret_cast<const unsigned char *>(coop::g_member_of);
+
+    for (std::size_t i = 0; i < sizeof coop::g_member_of; i++) {
+        hash = (hash ^ bytes[i]) * 16777619u;
+    }
+    return (hash ^ (coop::g_member_restore_due ? 1u : 0u)) * 16777619u;
+}
+void MembersPartTake(std::vector<unsigned char> &out) {
+    const auto *bytes = reinterpret_cast<const unsigned char *>(coop::g_member_of);
+
+    out.insert(out.end(), bytes, bytes + sizeof coop::g_member_of);
+    out.push_back(coop::g_member_restore_due ? 1 : 0);
+}
+void MembersPartPut(const unsigned char *data, std::size_t size) {
+    if (NetplayMutated("members_uncarried") || size != sizeof coop::g_member_of + 1) {
+        return;
+    }
+    if (std::memcmp(coop::g_member_of, data, sizeof coop::g_member_of) != 0) {
+        std::fprintf(stderr, "netplay: carried: the players' kept members differ here: the host's taken\n");
+    }
+    // coop-memberowner: through the members' one writer (why net: the host's word, also none), one line for each that changes.
+    for (int player = 0; player < coop::kMaxPlayers; player++) {
+        int member = -1;
+
+        std::memcpy(&member, data + player * sizeof member, sizeof member);
+        coop::SetMember(player, member, coop::MemberWhy::kNet);
+    }
+    coop::g_member_restore_due = data[sizeof coop::g_member_of] != 0;
+}
+// coop-meltdesync (x-dungeon-suite-gate-p1-menu's second round): the bag's melt timer (ItemVolumeStep), which the checksum reads
+// (stage 2's parts). The snapshot's state set carries it (a global); a resync carries the save and these parts only. Apart, each
+// copy's floor menu steps its own timer for as long as that copy sits in it (menu_dungeon.cpp DunEnterMenuLoop: LoopStep(60)
+// each tick, retail's), so two players who meet again at a dungeon's entrance reach the merge's resync with two timers (6/15 here,
+// 1/36 hers: 1255 ticks apart), and the first checksum after it (tick 60) said OUT OF SYNC. The whole timer is carried (its
+// per-character slots feed CheckItemVolume), the host's on every copy. DC_NETPLAY_MUTATE=melt_uncarried (twin): not carried.
+// (its hash: the three fields the checksum's stage 2 reads already, no more: the part adds no new compare)
+std::uint32_t MeltPartHash() {
+    std::uint32_t hash = 2166136261u;
+
+    for (const std::uint32_t word : {(std::uint32_t) ItemVolumeStep.frame, (std::uint32_t) ItemVolumeStep.pending_volume, (std::uint32_t) ItemVolumeStep.enabled}) {
+        hash = (hash ^ word) * 16777619u;
+    }
+    return hash;
+}
+void MeltPartTake(std::vector<unsigned char> &out) {
+    const auto *bytes = reinterpret_cast<const unsigned char *>(&ItemVolumeStep);
+
+    out.insert(out.end(), bytes, bytes + sizeof ItemVolumeStep);
+}
+void MeltPartPut(const unsigned char *data, std::size_t size) {
+    if (NetplayMutated("melt_uncarried") || size != sizeof ItemVolumeStep) {
+        return;
+    }
+    std::remove_cv_t<decltype(ItemVolumeStep)> host;
+
+    std::memcpy(&host, data, sizeof host);
+    std::fprintf(stderr, "netplay: carried: the melt timer here %d %d %d, the host's %d %d %d (frame, pending, on): %s\n", (int) ItemVolumeStep.frame,
+                 (int) ItemVolumeStep.pending_volume, (int) ItemVolumeStep.enabled, (int) host.frame, (int) host.pending_volume, (int) host.enabled,
+                 std::memcmp(&host, &ItemVolumeStep, sizeof host) != 0 ? "differs, the host's taken" : "alike");
+    std::memcpy(&ItemVolumeStep, &host, sizeof host);
+}
 const CarriedPart kCarried[] = {
     {"settings", SettingsPartHash, SettingsPartTake, SettingsPartPut},
     {"place", PlacePartHash, PlacePartTake, PlacePartPut},
     {"toan step", ToanStepPartHash, ToanStepPartTake, ToanStepPartPut},
     {"town camera", TownCameraPartHash, TownCameraPartTake, TownCameraPartPut},
     {"quests", QuestsPartHash, QuestsPartTake, QuestsPartPut}, // coop-pt1111e
+    {"members", MembersPartHash, MembersPartTake, MembersPartPut}, // coop-rc2 (swapcombo (A))
+    {"melt timer", MeltPartHash, MeltPartTake, MeltPartPut},       // coop-meltdesync
+    {"fish pools", coop::FishPoolsHash, coop::FishPoolsTake, coop::FishPoolsPut}, // coop-fishpools: each player's own fishing record (a resync carries the save, not the state set)
+    {"own options", OwnOptionsPartHash, OwnOptionsPartTake, OwnOptionsPartPut}, // coop-settings
 };
 
-std::uint32_t CarriedHash() {
+// coop-choosing (x-back-half -Away's desync, stage 0 apart with its camera, view and task alike): each carried part's hash.
+void CarriedSay(long long frame, const std::uint32_t *each) {
+    std::string line;
+    char        one[48];
+    float       partner_camera[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (CoopPartnerCamera(&partner_camera[3], partner_camera)) {
+        std::fprintf(stderr, "netplay: this copy's partner camera at tick %lld: (%a %a %a) %a, rand %08x\n", frame, partner_camera[0], partner_camera[1],
+                     partner_camera[2], partner_camera[3], (unsigned) PortRandState());
+    }
+
+    for (std::size_t i = 0; i < std::size(kCarried); i++) { // (as the checksum read them: Parts::carried)
+        std::snprintf(one, sizeof one, "%s%s %08x", line.empty() ? "" : ", ", kCarried[i].name, each[i]);
+        line += one;
+    }
+    std::fprintf(stderr, "netplay: this copy's carried parts at tick %lld: %s\n", frame, line.c_str());
+}
+
+std::uint32_t CarriedHash(std::uint32_t *each) {
+    static_assert(std::size(kCarried) <= sizeof(Parts::carried) / sizeof(std::uint32_t));
     std::uint32_t hash = 2166136261u;
 
-    for (const CarriedPart &part : kCarried) {
-        hash = (hash ^ part.hash()) * 16777619u;
+    for (std::size_t i = 0; i < std::size(kCarried); i++) {
+        const std::uint32_t one = kCarried[i].hash();
+
+        if (each != nullptr) {
+            each[i] = one;
+        }
+        hash = (hash ^ one) * 16777619u;
     }
     return hash;
 }
@@ -6516,7 +8247,7 @@ std::vector<unsigned char> TakeState(bool keep_stands = true) {
     std::memcpy(state.data(), &header, sizeof header);
     std::memcpy(state.data() + sizeof header, (const void *) SaveData, sizeof(CSaveData));
     // Then the host's save slots, with their length, and pad 2's own bag, which the session reset keeps.
-    std::vector<unsigned char> slots = NetplaySlotsTake();
+    std::vector<unsigned char> slots = NetplaySlotsTake(true); // coop-joinstuck: packed
 
     for (int i = 0; i < 4; i++) {
         state.push_back((unsigned char) (slots.size() >> (8 * i)));
@@ -6638,6 +8369,7 @@ void TakeState(const std::vector<unsigned char> &state, bool own = false) {
     // The own_load twin (on the joiner): a load the host made leaves this copy's SaveData as it was.
     if (!(header.loaded_tick >= 0 && g_link.player == 2 && NetplayMutated("own_load"))) {
         std::memcpy((void *) SaveData, state.data() + sizeof header, sizeof(CSaveData));
+        KeepOwnOptions("resync");
     }
 
     if (header.loaded_tick >= 0) {
@@ -6772,7 +8504,7 @@ void TakeState(const std::vector<unsigned char> &state, bool own = false) {
         CoopTownMenuParkCarriedForResync();
     }
     if (!NetplayMutated("no_session_reset")) {
-        CoopResetForSession();
+        CoopResetForSession(own && !NetplayMutated("leave_checkpoint_shuts_menu")); // coop-menushut: a self-take keeps its own local menu
     }
     if (!own) {
         coop::ActorMenusResetForResync();
@@ -6797,7 +8529,7 @@ void TakeState(const std::vector<unsigned char> &state, bool own = false) {
         std::memset((void *) NowColData, 0, sizeof *NowColData);
     }
 
-    coop::g_partner.choice = header.partner_choice;
+    coop::SetPick(1, header.partner_choice, coop::MemberWhy::kNet);
 
     // coop-spawn: the host's stand for player 2 after the merge, or none (both copies alike).
     if (header.stand_set) {
@@ -6841,8 +8573,6 @@ void LeaveForState(const std::vector<unsigned char> &state, const char *cause, c
     ResyncHeader header;
 
     std::memcpy(&header, state.data(), sizeof header);
-    g_link.menu_owner = 1;
-    g_link.held = 0;
     g_link.state_due = true;
     int target = header.has_next ? header.leave_map : RestartTarget(header.mode, header.map_no, header.select_map_no);
 
@@ -6858,6 +8588,25 @@ void LeaveForState(const std::vector<unsigned char> &state, const char *cause, c
 
 // The resync tick, before its inputs: the host sends its state until the joiner holds all of it, the
 // joiner waits for it; both then take it alike. False when the other copy stops answering.
+// coop-joinstuck: the host: part `part` of its resync state (g_link.resync_state) as the pieces in flight, a new window's pieces
+// (the last part's window kept) with its part word; none held yet.
+void ResyncPartOut(PieceSender &pieces, std::uint32_t part) {
+    const std::size_t from = std::min(g_link.resync_state.size(), (std::size_t) part * kResyncPartBytes);
+    const std::size_t to = g_link.resync_out_parts == 1 ? g_link.resync_state.size() : std::min(g_link.resync_state.size(), from + kResyncPartBytes);
+    const int         window = pieces.window;
+
+    g_link.resync_out_part = part;
+    g_link.resync_part.assign(g_link.resync_state.begin() + (std::ptrdiff_t) from, g_link.resync_state.begin() + (std::ptrdiff_t) to);
+    std::memset(g_link.resync_held, 0, sizeof g_link.resync_held);
+    pieces = PieceSender{};
+    pieces.window = window;
+    pieces.part = (std::uint16_t) (part | (part + 1 >= g_link.resync_out_parts ? kResyncPartLast : 0u));
+    if (g_link.resync_out_parts > 1) {
+        std::fprintf(stderr, "netplay: resync state part %u of %u: %zu bytes (the state %zu bytes, past one blob's %d)\n", part + 1, g_link.resync_out_parts,
+                     g_link.resync_part.size(), g_link.resync_state.size(), kChunks * kChunkBytes);
+    }
+}
+
 bool Resync() {
     std::int64_t tick = g_link.resync_tick;
     auto         start = std::chrono::steady_clock::now();
@@ -6871,6 +8620,11 @@ bool Resync() {
         std::memset(g_link.resync_held, 0, sizeof g_link.resync_held);
 
         CarriedTake(g_link.resync_state); // coop-carried: every checked part the save does not hold
+        // coop-joinstuck: in parts past one blob's pieces (the joiner puts them together); DC_NETPLAY_MUTATE=resync_one_part (twin):
+        // one whole, as before (SendPieces refuses it past kChunks pieces: the resync does not complete)
+        g_link.resync_out_parts =
+            NetplayMutated("resync_one_part") ? 1u : (std::uint32_t) std::max<std::size_t>(1, (g_link.resync_state.size() + kResyncPartBytes - 1) / kResyncPartBytes);
+        ResyncPartOut(pieces, 0);
 
         // coop-p2absent: test hook (DC_NETPLAY_STALE_HIT=1): a hit of the host's own going into the resync,
         // as a monster's blow from its solo play was (far off, harmless, long-lived).
@@ -6893,10 +8647,20 @@ bool Resync() {
     for (;;) {
         Receive();
 
-        std::uint32_t count = (std::uint32_t) ((g_link.resync_state.size() + kChunkBytes - 1) / kChunkBytes);
+        // coop-joinstuck: the part in flight (the host's) or arriving (the joiner's); the whole is held with its last part
+        const std::size_t   part_bytes = g_link.player == 1 ? g_link.resync_part.size()
+                                                            : g_link.resync_state.size() - std::min(g_link.resync_state.size(), (std::size_t) g_link.resync_in_part * kResyncPartBytes);
+        std::uint32_t       count = (std::uint32_t) ((part_bytes + kChunkBytes - 1) / kChunkBytes);
+        const bool          last = g_link.player == 1 ? g_link.resync_out_part + 1 >= g_link.resync_out_parts : g_link.resync_in_last;
 
-        if (!g_link.resync_state.empty() && AllHeld(count)) {
-            break;
+        if (!g_link.resync_state.empty() && part_bytes > 0 && AllHeld(count)) {
+            if (last) {
+                break;
+            }
+            if (g_link.player == 1) {
+                ResyncPartOut(pieces, g_link.resync_out_part + 1);
+                continue;
+            }
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -6913,7 +8677,7 @@ bool Resync() {
         // The host sends the pieces the joiner lacks, paced (SendPieces); both keep the link's inputs going every
         // 30 ms meanwhile.
         if (g_link.player == 1) {
-            SendPieces(pieces, g_link.resync_state, g_link.resync_held, (std::uint32_t) tick);
+            SendPieces(pieces, g_link.resync_part, g_link.resync_held, (std::uint32_t) tick);
         }
 
         if (now - sent > std::chrono::milliseconds(30)) {
@@ -6944,6 +8708,24 @@ bool Resync() {
         CarriedPut(g_link.resync_state); // coop-carried
     }
     g_link.resync_cause[0] = '\0'; // coop-stable1: the cause went into the state (the joiner reads it there)
+
+    // coop-resyncblack (Jep's rc1 playtest, 2026-11-13: P2 came back onto his floor, the copies were not alike, the link
+    // resynced instead of catching up, and her screen stayed black 95 s, until his split, while she played): an arrival's black
+    // (NetplayArrivalHold: floor_arrival, arriving, a stayer merge's source) ended only at a catch-up's lockstep (EnterLockstep);
+    // a resync that replaces the catch-up never got there. The resync's state is the host's, on every copy alike: the arrival
+    // is over and the host's again, as at that lockstep. Its replayed walk is a catch-up's (the resync's state already stands
+    // the arriver where the host put it). DC_NETPLAY_MUTATE=resync_keeps_arrival (twin): kept, as before.
+    if (!NetplayMutated("resync_keeps_arrival") && (g_link.floor_arrival || g_link.arriving || g_link.source != 1)) {
+        std::fprintf(stderr, "netplay: the resync ends this copy's arrival (floor arrival %d, arriving %d, source %d): the host's state, the lockstep goes on from it\n",
+                     (int) g_link.floor_arrival, (int) g_link.arriving, g_link.source);
+        g_link.floor_arrival = false;
+        g_link.arriving = false;
+        g_link.stayer_merge = false;
+        g_link.source = 1;
+        g_link.arrival_walk = 0;
+        g_link.arrival_cut = false;
+        g_link.entrance_walk = 0;
+    }
 
     for (std::int64_t &frame : g_link.sums_frame) {
         frame = -1;
@@ -7027,6 +8809,8 @@ void TestMenuPresses() {
     // Circle on his agreed pad each 16 ticks till it closes (a page's own Circle first, then the ring's).
     // =N: from N ticks after the lockstep (a hit's row keeps the menu up till it came).
     static const int host_menu_close = TestEnvInt("DC_NETPLAY_TEST_HOST_MENU_CLOSE", -1);
+    // coop-ports2: =N: only from N ticks after the menu's write was applied (the same link tick on both copies), not by the clock from the lockstep.
+    static const int host_menu_after_write = TestEnvInt("DC_NETPLAY_TEST_HOST_MENU_CLOSE_AFTER_WRITE", -1);
 
     // DC_NETPLAY_TEST_MENU_PLAYER=P: player P's menu and pad, not player 1's (x-floor-hermenu).
     static const int host_menu_player = TestEnvInt("DC_NETPLAY_TEST_MENU_PLAYER", 1);
@@ -7042,6 +8826,7 @@ void TestMenuPresses() {
     }
 
     if (host_menu_close >= 0 && host_menu_stage < 2 && g_link.up && !g_catch.active && g_test_lockstep_from >= 0 && g_link.tick >= g_test_lockstep_from + host_menu_close &&
+        (host_menu_after_write < 0 || (coop::FullMenuTestWriteTick() >= 0 && g_link.tick >= coop::FullMenuTestWriteTick() + host_menu_after_write)) &&
         (coop::PlayerInMenu(host_menu_player, coop::kActorMenuLocal) || (mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && ::GameMode == ED_MODE_GEORAMA_MENU)) && g_link.tick % 16 < 4) { // (coop-p1parts: or his parts menu)
         g_link.synced[host_menu_player - 1].buttons |= kInputCircle;
     }
@@ -7163,10 +8948,11 @@ void TestMenuPresses() {
         start = g_test_lockstep_from;
         std::fprintf(stderr, "netplay: test: menu presses count from tick %lld (the lockstep)\n", (long long) start);
     }
-    if (start < 0 && ((gameTask == GAME_TASK_PLAY && CoopPartnerTarget(partner, nullptr, nullptr, nullptr)) || coop::MenuTownWalk())) {
+    if (start < 0 && ((CoopPlainPlay() && CoopPartnerTarget(partner, nullptr, nullptr, nullptr)) || coop::MenuTownWalk())) {
         start = g_link.tick;
         std::fprintf(stderr, "netplay: test: menu presses count from tick %lld\n", (long long) start);
         coop::InventoryTestSeed(); // coop-itemsend: DC_COOP_BAGSEED
+        coop::InventoryTestQuick(); // coop-p2controls: DC_COOP_TEST_QUICK
     }
     if (start < 0) {
         return;
@@ -7290,7 +9076,12 @@ void TestMenuPresses() {
         const std::uint64_t bit = index < 64 ? (std::uint64_t) 1 << index : 0;
         const bool          replay = bit != 0 && (spent & bit) != 0 && spent_resyncs[index] != g_link.resyncs && !NetplayMutated("press_replay");
 
-        if (parsed && since == when && bit != 0 && !replay) {
+        // coop-latepick: spent only by a press into the shared lockstep. A copy apart presses on its own clock (its link ticks
+        // start over), so its presses are its alone: player 1's copy, apart at its floor menu, pressed his Cross at clocks 100,
+        // 160 and 220 again, hers (whose pads are not his apart) none, and after a resync on the floor his skipped 220 as
+        // "before the resync" while hers pressed it: OUT OF SYNC on the next compare (dun1-f1 descent, her pick 180 frames
+        // late, DC_NETPLAY_TEST_DESYNC_AT=340: tick 1140, 3 of 3). DC_NETPLAY_MUTATE=press_spent_apart (twin): apart too.
+        if (parsed && since == when && bit != 0 && !replay && (!CoopWorldsApart() || NetplayMutated("press_spent_apart"))) {
             spent |= bit;
             spent_resyncs[index] = g_link.resyncs;
         }
@@ -7319,6 +9110,7 @@ void TestMenuPresses() {
                                    : std::strcmp(base, "l1") == 0     ? kInputL1
                                    : std::strcmp(base, "r2") == 0     ? kInputR2 // coop-dranscheat: the cheat's chord
                                    : std::strcmp(base, "l2") == 0     ? kInputL2
+                                   : std::strcmp(base, "l3") == 0     ? kInputL3 // coop-entrance: a member swap (the next free member)
                                                                       : 0;
 
             g_link.synced[player - 1].buttons |= button;
@@ -7989,19 +9781,11 @@ void ApplyCommand(int player, const NetCommand &command, std::int64_t tick) {
 void Route() {
     TestMenuPresses();
 
-    // Start alone: pad 2's Triangle is the partner's own item panel (coop_combat.cpp), which does not
-    // pause. Player 1's Triangle, which opens the game's item menu, keeps player 2 from taking the port
-    // on that tick.
-    // coop-menus: the overlays' test twin (DC_COOP_MUTATE=menuclaim) makes Triangle a claim again. With the
-    // overlay off (game.coop_menu_panel) her Triangle is a claim too: it opens her game menu beside the world,
-    // her Start the pause. DC_COOP_MUTATE=triangleclaim (menu-triangle's twin): Start only.
-    // coop-pause: with each player's own pause (coop::PauseOn) her Start is her pause, no claim: Triangle alone.
-    const bool              triangle_claims = coop::Mutated("menuclaim") || (!coop::MenuPanelOn() && !coop::Mutated("triangleclaim"));
-    const std::uint16_t     kClaimButtons = !triangle_claims                                 ? kInputStart
-                                            : coop::PauseOn() && !coop::Mutated("menuclaim") ? kInputTriangle
-                                                                                             : kInputStart | kInputTriangle;
-    constexpr std::uint16_t kMenuButtons = kInputStart | kInputTriangle;
-
+    // coop-wave2 (localaudit 3.6, design for three): player 2's claim of port 1 (her Start or Triangle took retail's menu, menu_owner
+    // 2, a 2-player single field) is retired. Linked play is always co-op, where each player's Triangle opens their own local menu
+    // (coop_fullmenu.cpp) and Start their own pause (coop_pause.cpp): the claim's buttons were all masked off there, so port 1 was
+    // player 1's every tick; it now is by rule. (Its twins DC_COOP_MUTATE=menuclaim/triangleclaim and DC_NETPLAY_MUTATE=menu_claim/
+    // fullmenu_owner go with it.)
     // coop-arrivalfull: the arriver's pad, while its arrival plays again (coop::ArrivalWalkPlayer), is neutral on both copies.
     if (const int walker = coop::ArrivalWalkPlayer(); walker == 1 || walker == 2) {
         g_link.synced[walker - 1] = Neutral();
@@ -8009,58 +9793,32 @@ void Route() {
     PadProbe(); // coop-padswap test hook
     MesPresses(); // coop-closetitem test hook
     DransCheatPads(); // coop-dranscheat
-    const InputPadState    &one = g_link.synced[0];
-    const InputPadState    &two = g_link.synced[1];
-    std::uint16_t           pressed_one = one.buttons & ~g_link.previous[0].buttons;
-    std::uint16_t           pressed_two = two.buttons & ~g_link.previous[1].buttons;
-    float                   partner[4];
-    bool                    free_play = gameTask == GAME_TASK_PLAY && !coop::FullMenuLive() && CoopPartnerTarget(partner, nullptr, nullptr, nullptr);
-    if (g_link.menu_owner == 1) {
-        // coop-localmenu 3b: with local menus her Triangle opens her own menu on her copy (coop_fullmenu.cpp), no claim of port 1.
-        // coop-menulocal: her Start too with game.coop_menu_panel on (the menu's button then; FullMenuLocalButton). Her Start
-        // claimed port 1 beside his local menu (FullMenuLive is false for local menus): her pad walked the world under his menu,
-        // the game's menu opened as a second one and the copies parted. DC_NETPLAY_MUTATE=claim_beside_local: Start claims, as
-        // before (the twin).
-        const std::uint16_t local_button = NetplayMutated("claim_beside_local") ? kInputTriangle : coop::FullMenuLocalButton();
-        const std::uint16_t claims = kClaimButtons & (coop::FullMenuLocalOn() ? (std::uint16_t) ~local_button : (std::uint16_t) 0xFFFF);
+    const InputPadState &one = g_link.synced[0];
+    const InputPadState &two = g_link.synced[1];
+    std::uint16_t        pressed_one = one.buttons & ~g_link.previous[0].buttons;
+    std::uint16_t        pressed_two = two.buttons & ~g_link.previous[1].buttons;
 
-        if (free_play && (pressed_two & claims) != 0 && (pressed_one & kMenuButtons) == 0 && !NetplayMutated("menu_claim")) {
-            g_link.menu_owner = 2;
-            g_link.menu_tick = g_link.tick;
-            g_link.menu_seen = false;
-            g_link.held = two.buttons & ~kClaimButtons;
-            std::fprintf(stderr, "netplay: player 2 takes the menu at tick %lld\n", (long long) g_link.tick);
-        }
-    } else if (coop::FullMenuLive() && !NetplayMutated("fullmenu_owner")) {
-        // coop-fullmenu: her game menu is open beside the running world (the task is play): still hers.
-        g_link.menu_seen = true;
-    } else if (gameTask == GAME_TASK_PAUSE || (gameTask >= GAME_TASK_MENU_OPEN && gameTask <= GAME_TASK_MENU_CLOSE)) {
-        g_link.menu_seen = true;
-    } else if (gameTask != GAME_TASK_PLAY || g_link.menu_seen || g_link.tick > g_link.menu_tick + 2) {
-        // Back on the floor; or the game never opened the menu (Triangle while moving), or something
-        // else started on the same tick (an event, a chest), which player 1 answers.
-        g_link.menu_owner = 1;
-        g_link.held = one.buttons;
-        std::fprintf(stderr, "netplay: menu back to player 1 at tick %lld\n", (long long) g_link.tick);
-    }
+    g_link.routed[0] = one;
+    g_game_pad_player = 1; // coop-scriptmenus
+    g_link.routed[0].buttons &= ~coop::PlayerWheelMask(); // coop-wheelcrash: his ring's buttons are the ring's
+    if (coop::ElementRingOpen(1)) {
+        // coop-p2controls3: his element ring is a menu of his: he stands while it is open, as in his own menu
+        const InputPadState still = Neutral();
 
-    const InputPadState &owner = g_link.menu_owner == 1 ? one : two;
-
-    g_link.held &= owner.buttons;
-    g_link.routed[0] = owner;
-    g_game_pad_player = g_link.menu_owner == 1 ? 1 : 2; // coop-scriptmenus
-    g_link.routed[0].buttons &= ~g_link.held;
-    if (g_link.menu_owner == 1) {
-        g_link.routed[0].buttons &= ~coop::PlayerWheelMask(); // coop-wheelcrash: his ring's buttons are the ring's
+        g_link.routed[0].left_x = still.left_x;
+        g_link.routed[0].left_y = still.left_y;
+        g_link.routed[0].right_x = still.right_x;
+        g_link.routed[0].right_y = still.right_y;
     }
     // coop-fullmenu: her pad reaches the world while she has no menu of her own (the first menu shut while his second
     // stays open gives it back; her second menu beside his first keeps it).
-    g_link.routed[1] = (g_link.menu_owner == 1 || coop::FullMenuFirstClosed()) && !coop::FullMenuRunsFor(2) ? two : Neutral();
+    g_link.routed[1] = !coop::FullMenuRunsFor(2) ? two : Neutral();
     // coop-sceneowner: her floor's opening scene, joined, is hers to the end: the game's pad (port 1, the scene's text and its
     // player) is hers, and his reaches nothing while he watches (there is no partner of his on the floor yet).
     // (The handover is in the state set: the same on both copies, a catch-up's replay included.)
     // (coop-stage4 4e part 2: so too her own talk or event carried through her merge, till its swap)
-    if ((CoopWorldsSceneOwner() == 2 || CoopTownSwapDeferred()) && g_link.menu_owner == 1) {
+    // swapduel: so too a Toan story scene she plays for player 1 (CoopWorldsStoryOwner: the roles swapped for it).
+    if ((CoopWorldsSceneOwner() == 2 || CoopTownSwapDeferred() || CoopWorldsStoryOwner() == 2)) {
         g_link.routed[0] = two;
         g_game_pad_player = 2; // coop-scriptmenus
         g_link.routed[1] = Neutral();
@@ -8070,13 +9828,19 @@ void Route() {
             g_link.routed[0].buttons |= kInputCross;
         }
     }
+    // swapduel test hook (DC_WORLDS_TEST_STORY_CROSS=1, x-story-role, both copies alike): a Cross every 8 ticks on the game's pad while
+    // a dungeon event plays (its text; game.qte_always_win wins its duel), so a row's scene reaches its end.
+    static const bool story_cross = TestEnvOn("DC_WORLDS_TEST_STORY_CROSS");
+    if (story_cross && mode == GAME_MODE_DUNGEON && BtEventMode != 0 && g_link.tick % 8 < 3) {
+        g_link.routed[0].buttons |= kInputCross;
+    }
     // coop-localmenu stage 3a: a player in a menu of their own copy (the bit, the same on every copy) reaches the world with
     // nothing; the menu's engine reads their agreed pad itself.
     for (int p = 0; p < 2; p++) {
         // (coop-stage4: twins DC_COOP_MUTATE=townmenu_walks / p1townmenu_walks, both copies: her / his pad reaches the town under
         // the town menu, as before)
         // (coop-opt7: so too a player in a presentation of their own; its engine reads their agreed pad)
-        if ((coop::PlayerPresenting(p + 1) || (coop::PlayerInMenu(p + 1, coop::kActorMenuLocal) && (p == 1 || g_link.menu_owner == 1) &&
+        if ((coop::PlayerPresenting(p + 1) || (coop::PlayerInMenu(p + 1, coop::kActorMenuLocal) &&
             !(coop::PlayerInMenu(p + 1, coop::kActorMenuTown) && coop::Mutated(p == 1 ? "townmenu_walks" : "p1townmenu_walks"))))) {
             g_link.routed[p] = Neutral();
             (p == 0 ? pressed_one : pressed_two) = 0;
@@ -8089,8 +9853,7 @@ void Route() {
     g_link.previous[1] = two;
 
     if (g_link.desync_tick < 0 && g_link.tick >= g_link.resynced_status_until) {
-        std::snprintf(g_link.status, sizeof g_link.status,
-                      g_link.menu_owner == 1 ? "Linked: player %d" : "Linked: player %d (player 2 has the menu)", g_link.player);
+        std::snprintf(g_link.status, sizeof g_link.status, "Linked: player %d", g_link.player);
     }
 }
 
@@ -8497,6 +10260,7 @@ void Checkpoint(int floor, bool building, bool place) {
                : building || place ? (mode == GAME_MODE_EDIT && MapNo >= 0 && MapNo < 200 ? MapNo : -1)
                : NextMapNo >= 0 ? NextMapNo : mode == GAME_MODE_EDIT && MapNo >= 0 && MapNo < 200 ? MapNo : -1;
     const bool goes_on = floor >= 0 || building || place; // the mode plays on: the self-take keeps the main loop's map numbers
+    const auto took_from = std::chrono::steady_clock::now(); // coop-resyncblack: what a place checkpoint holds the game thread
 
     if (next < 0 || next >= 300) {
         return;
@@ -8548,6 +10312,8 @@ void Checkpoint(int floor, bool building, bool place) {
     if (place) {
         std::fprintf(stderr, "catchup: place checkpoint in map %d%s%s (no recording: the join goes by snapshot from here, %zu bytes)\n", (int) header.map_no,
                      header.building > 0 ? ", inside building " : "", header.building > 0 ? header.building_name : "", g_solo.checkpoint.size());
+        std::fprintf(stderr, "catchup: the place checkpoint held the game thread %.0f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - took_from).count());
     } else if (floor >= 0) {
         std::fprintf(stderr, "catchup: checkpoint at the start of floor %d in map %d (for map %d, %zu bytes)\n", floor + 1, (int) header.map_no,
                      (int) header.leave_map, g_solo.checkpoint.size());
@@ -8647,7 +10413,7 @@ bool InCheckpointZone() {
     static const bool town_task_counts = NetplayMutated("town_quiet_task");
     const bool        town = mode == GAME_MODE_EDIT && !town_task_counts;
 
-    if (g_solo.checkpoint.size() < sizeof header || (gameTask != GAME_TASK_PLAY && !town && !knocked_out && !arriving)) {
+    if (g_solo.checkpoint.size() < sizeof header || (!CoopPlainPlay() && !town && !knocked_out && !arriving)) {
         return false;
     }
     std::memcpy(&header, g_solo.checkpoint.data(), sizeof header);
@@ -8714,7 +10480,7 @@ void TestExit() {
     static std::int64_t       alone = 0;
 
     if (exit_at >= 0 && alone++ == exit_at) {
-        if (mode == GAME_MODE_DUNGEON && gameTask == GAME_TASK_PLAY) {
+        if (mode == GAME_MODE_DUNGEON && CoopPlainPlay()) {
             gameTask = GAME_TASK_EXIT_FADE_START;
             std::fprintf(stderr, "catchup: test: the host takes the dungeon's way out\n");
         } else {
@@ -8751,10 +10517,10 @@ std::uint32_t TripChecksum() {
 
         std::fprintf(stderr,
                      "trip-parts tick %lld sum %08x rand %08x task %d cam %.4f cam2 %.4f view %08x player (%.3f %.3f %.3f) partner (%.3f %.3f %.3f) "
-                     "monsters %08x hits %08x stages %08x %08x %08x status %08x owner %d pchara %d pdown %d pchoice %d geo2 %d bag %08x panel %d lock %d "
+                     "monsters %08x hits %08x stages %08x %08x %08x status %08x pchara %d pdown %d pchoice %d geo2 %d bag %08x panel %d lock %d "
                      "menus %08x floor %08x shots %08x save %08x\n",
                      (long long) g_link.tick, sum, p.rand, p.task, p.camera, p.camera2, p.view, p.player[0], p.player[1], p.player[2], p.partner[0],
-                     p.partner[1], p.partner[2], p.monsters, p.hits, p.stages[0], p.stages[1], p.stages[2], p.status, p.menu_owner, p.partner_chara,
+                     p.partner[1], p.partner[2], p.monsters, p.hits, p.stages[0], p.stages[1], p.stages[2], p.status, p.partner_chara,
                      p.partner_down, p.partner_choice, (int) p.georama_two, p.p2_bag, (int) p.combat_panel, p.combat_lock, p.menus, p.floor, p.shots,
                      p.save);
     }
@@ -8765,13 +10531,15 @@ std::uint32_t TripChecksum() {
 // diff to the first tick they part. `kind` marks a catch-up's recorded or replayed tick (coop-p1follows).
 static void TickTrace(std::int64_t tick, const char *kind) {
     Checksum();
-    std::printf("netplay-tick %lld:%s rand %08x player (%.3f %.3f) partner (%.3f %.3f) monsters %08x status %08x floor %08x shots %08x hp %d next %d save %08x town mode %d clock %.4f view %08x swing %d\n",
+    CoopPartnerCameraTrace((long long) tick);
+    std::printf("netplay-tick %lld:%s rand %08x player (%.3f %.3f) partner (%.3f %.3f) monsters %08x status %08x floor %08x shots %08x hp %d next %d save %08x town mode %d clock %.4f view %08x swing %d pframe %08x\n",
                 (long long) tick, kind, g_parts.rand, g_parts.player[0], g_parts.player[2], g_parts.partner[0], g_parts.partner[2], g_parts.monsters,
                 g_parts.status, g_parts.floor, g_parts.shots, UserStatus != nullptr ? (int) UserStatus->hp[0] : -1,
                 UserStatus != nullptr ? (int) UserStatus->next_hp[0] : -1, g_parts.save, mode == GAME_MODE_EDIT ? (int) ::GameMode : -1,
                 SaveData != nullptr ? SaveData->GetNowTime() : -1.0f, // coop-stable1: the town's clock too (the post-resync desync)
                 g_parts.view, // coop-repinfix1: the view (a resync's town event draws from its own camera on its first ticks)
-                EdMoveCharaRotCount); // coop-repinfix1: the town walk's camera swing (test_leave_1031_town_swing reads it a tick)
+                EdMoveCharaRotCount, // coop-repinfix1: the town walk's camera swing (test_leave_1031_town_swing reads it a tick)
+                g_parts.partner_frame_sum); // cand1112d: her frame's place and turn as summed (x-p2-lockpress -FrameSum reads the first tick apart)
     // What the player's hit check reads beside the hits (BtCheckDamageProc): recoil, invincibility, action, member.
     std::printf("netplay-tick %lld:   act recoil %d inv %d action %d chara %d task %d mode %d pads %04x %d %d / %04x %d %d\n", (long long) tick,
                 (int) BtActStatus.recoil_frames, (int) BtActStatus.invincible_frames, (int) BtActStatus.action_on,
@@ -8943,10 +10711,18 @@ void SoloTick() {
         ControllersOnly();
         g_link.tick = 0;
         g_link.synced[0] = g_link.synced[1] = g_link.previous[0] = g_link.previous[1] = Neutral();
-        g_link.menu_owner = 1;
-        g_link.held = 0;
-        std::fprintf(stderr, g_solo.replay ? "catchup: replay from tick 0 in map %d%s\n" : "catchup: recording from tick 0 in map %d%s\n", (int) MapNo,
-                     CheckpointFloor(g_solo.checkpoint) >= 0 ? " (the floor's start)" : "");
+        // coop-p2tick: with the clock's owed boundaries (a load's last slow ticks, repaid as a burst of ticks after it)
+        g_tick0_made_up = CoopPerfMadeUp();
+        // coop-p2tick: a window that holds this checkpoint links on this tick (Listen), and its join's state set waits for its
+        // preparation (the arenas' watch and zero test, 60-70 ms on threads of their own): made under the card (PreloadHostTick),
+        // or here, not at the link.
+        // DC_NETPLAY_MUTATE=prep_at_link (twin): at the link, as before.
+        if (!g_solo.replay && PreloadWaitsLink() && !SnapshotTakePrepHeld() && !NetplayMutated("prep_at_link")) {
+            SnapshotTakePrepare(); // (none made under the card)
+            std::fprintf(stderr, "catchup: the state set's preparation starts at tick 0: a window holding this checkpoint links now\n");
+        }
+        std::fprintf(stderr, g_solo.replay ? "catchup: replay from tick 0 in map %d%s [t %lld; clock owes %lld]\n" : "catchup: recording from tick 0 in map %d%s [t %lld; clock owes %lld]\n",
+                     (int) MapNo, CheckpointFloor(g_solo.checkpoint) >= 0 ? " (the floor's start)" : "", LogMs(), (long long) CoopPerfOwed());
 
         // coop-localfix2 (the room merge's OUT OF SYNC, w-town-apart -Case samebuilding, on main too): a building-start
         // checkpoint is taken as the room starts, and the room's own start rolls the random state before the recording's tick
@@ -8967,7 +10743,7 @@ void SoloTick() {
     // take it, she merged inside the house while he stood in Norune, then a resync). The recording ends; the merge goes
     // by a place checkpoint and the host's snapshot where snapshots are on, else by the resync.
     // DC_NETPLAY_MUTATE=keep_building_recording (twin): kept, as before.
-    if (g_link.player == 1 && !g_solo.replay && !g_catch.active && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && gameTask == GAME_TASK_PLAY &&
+    if (g_link.player == 1 && !g_solo.replay && !g_catch.active && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && CoopPlainPlay() &&
         CheckpointBuilding(g_solo.checkpoint) > 0 && !NetplayMutated("keep_building_recording")) {
         std::fprintf(stderr, "catchup: out of the building the recording started in (at tick %lld): the recording ends\n", (long long) g_link.tick);
         g_solo = Solo{};
@@ -9049,6 +10825,7 @@ void SoloTick() {
         const int own = g_link.source == 2 && g_link.player == 2 ? 1 : 0;
 
         g_link.synced[own] = LinkPad(OwnInput(own + 1));
+        g_link.synced[own].steer = OwnSteer(own); // coop-wave3: its camera's yaw goes in the record with its stick
         g_link.synced[1 - own] = Neutral();
         g_solo.pads.push_back(g_link.synced[0]);
         g_solo.pads.push_back(g_link.synced[1]);
@@ -9089,21 +10866,15 @@ void SoloTick() {
 // the state set, so it is kept with the state and put back with it, and the tick goes back to T.
 void TripFrameStart() {
     static InputPadState trip_previous[2];
-    static int           trip_owner = 1;
-    static std::uint16_t trip_held = 0;
 
     switch (SnapshotTripFrame()) {
     case SnapshotStep::Taken:
         trip_previous[0] = g_link.previous[0];
         trip_previous[1] = g_link.previous[1];
-        trip_owner = g_link.menu_owner;
-        trip_held = g_link.held;
         break;
     case SnapshotStep::Restored:
         g_link.previous[0] = trip_previous[0];
         g_link.previous[1] = trip_previous[1];
-        g_link.menu_owner = trip_owner;
-        g_link.held = trip_held;
         g_link.tick = SnapshotTripFrom();
         break;
     default:
@@ -9124,7 +10895,15 @@ void LogHoldEnd() {
 }
 
 void EnterLockstep(std::int64_t join) {
-    g_link.joined_at = CoopWorldsApart() ? join : -1; // coop-pilotfix (CompareChecksum): a catch-up that ends in a worlds merge
+    // coop-pilotfix (CompareChecksum): a catch-up that ends in a worlds merge leaves J and J+1 out of the compare.
+    // coop-p2tick (l-lobby-join-card OUT OF SYNC at tick 60, about 1 lobby join in 15): each copy went by its own CoopWorldsApart(),
+    // and a lobby joiner, reset to together for the host's state, compared J while the host (apart) left it out: a J on a
+    // checksum tick read his unmerged sum against hers. Both copies now go by the sender's word with the last blob
+    // (g_catch.join_merge). DC_NETPLAY_MUTATE=join_skip_own (twin): each copy by its own, as before.
+    const bool merge = NetplayMutated("join_skip_own") ? CoopWorldsApart() : g_catch.join_merge;
+    g_link.joined_at = merge ? join : -1;
+    std::fprintf(stderr, "netplay: the lockstep from tick %lld %s (the sender's word %d, this copy apart %d)\n", (long long) join,
+                 merge ? "ends in a worlds merge: J and J+1 not compared" : "compares from J", g_catch.join_merge ? 1 : 0, CoopWorldsApart() ? 1 : 0);
     // WS5: his dozen lines here to the merge go out as one write, two ticks on: a test copy's log file beside a full PC costs
     // some 10 ms a line on this thread, in the first ticks whose pads she waits on. DC_NETPLAY_MUTATE=lockstep_lines (twin): line by line.
     if (TakesState() && !NetplayMutated("lockstep_lines")) {
@@ -9154,8 +10933,20 @@ void EnterLockstep(std::int64_t join) {
     g_link.floor_arrival = false; // coop-dungeonjoin: caught up (NetplayArrivalHold)
     // coop-arrivalfull: the arriver's arrival on the floor, from its start, on both copies (the one there first plays on).
     if (g_link.arrival_walk != 0) {
-        coop::ArrivalWalkStart(g_link.arrival_walk);
+        // (coop-b4arrive: a cut one goes on from the last blob's word, alike on both copies)
+        coop::ArrivalWalkStart(g_link.arrival_walk, g_link.arrival_cut, std::max(g_catch.entrance_from, 0));
         g_link.arrival_walk = 0;
+        g_link.arrival_cut = false;
+    }
+    // coop-entrwin: the walker's own entrance, from its start, at its entrance spot beside the lead, on both copies.
+    if (g_link.entrance_walk != 0) {
+        // (its walker number by the window's plan: the lead began first, this walker after it, within its walk-in)
+        const coop::EntranceArrival arrivals[2] = {{3 - g_link.entrance_walk, 0}, {g_link.entrance_walk, 1}};
+        int                         plan[2] = {0, 0};
+
+        coop::EntrancePlan(arrivals, 2, 2, plan);
+        coop::EntranceWalkStart(g_link.entrance_walk, plan[1] >= 2 ? plan[1] : 2, g_link.entrance_gap);
+        g_link.entrance_walk = 0;
     }
     JoinStateTaken(join); // coop-p2skin: a catch-up join's replay showed nothing (NetplayCatchingUp)
     coop::FullMenuFullToLocal(); // coop-soakfix4: his menu beside the world, opened during the catch-up, as a local menu
@@ -9164,10 +10955,10 @@ void EnterLockstep(std::int64_t join) {
     if (g_catch.pick_set) {
         g_catch.pick_set = false;
         if (g_catch.pick_member >= 0 && g_catch.pick_member < 6) {
-            coop::g_partner.choice = g_catch.pick_member;
+            coop::SetPick(1, g_catch.pick_member, coop::MemberWhy::kNet);
         }
         if (!g_catch.pick_bag.empty()) {
-            coop::ProfileBagsJoinTake(g_catch.pick_name, g_catch.pick_bag, !TakesState());
+            coop::ProfileBagsJoinTake(JoinerPlayer(), g_catch.pick_name, g_catch.pick_bag, !TakesState());
         }
         std::fprintf(stderr, "catchup: the joiner's pick at tick %lld: player 2 plays %d (%s)\n", (long long) join, coop::g_partner.choice,
                      g_catch.pick_name.empty() ? "no profile" : g_catch.pick_name.c_str());
@@ -9674,6 +11465,9 @@ bool CatchHostTick() {
             g_snap.take_due = true;
             g_snap.due_at = std::chrono::steady_clock::now();
             g_snap.due_drawn = g_frames_drawn;
+            if (!SnapshotTakePrepHeld() || NetplayMutated("prep_at_link")) { // (coop-p2tick: one made at tick 0 is kept)
+                SnapshotTakePrepare(); // jointake: the take's arena test and room ahead, off the game thread
+            }
             std::fprintf(stderr, "catchup: the join goes by snapshot: the checkpoint first, the state set once a quiet frame comes\n");
         } else {
             CatchBlob(0, tick, true, -1);
@@ -9700,6 +11494,8 @@ bool CatchHostTick() {
             CatchBlob(0, tick, false, -1);
             std::fprintf(stderr, "catchup: the joiner refused the snapshot: the pads from tick 0 instead\n");
         }
+    } else if (g_catch.join_tick < 0 && g_catch.test_close_at > tick && TestEnvOn("DC_NETPLAY_TEST_CLOSE_ON_CHECKSUM")) {
+        // coop-p2tick test hook: held for its checksum tick (above)
     } else if (host_streams || (g_catch.join_tick < 0 && CatchOutHeld() && g_catch.test_close_at == tick) || g_catch.join_tick < 0 && CatchOutHeld() &&
                (g_catch.caught >= g_catch.sent_to || (g_link.source == 2 && !NetplayMutated("stayer_wide_gap") && tick - g_catch.sent_to >= 2))) {
         // coop-localfix2: her merge's pads go on as they come (a blob each 2 ticks once the last is held, his word of how far he is each 8 ms while he waits), not only once he
@@ -9732,6 +11528,33 @@ bool CatchHostTick() {
         const bool         heard_word = g_catch.caught >= 0 || NetplayMutated("close_on_no_word");
         // (a fresh set under way: no close by the usual gaps on his 50 ms words of the replay it replaces)
         bool               last = (heard_word && tick - g_catch.caught <= gap && (fallback || g_catch.restarts == 0)) || g_catch.test_close_at == tick;
+
+        // coop-p2tick test hook (DC_NETPLAY_TEST_CLOSE_ON_CHECKSUM=1, the sender): a close due off a checksum tick moves to the next
+        // one (no blob till then), so J falls on a compared tick every run, not 1 join in 15 (l-lobby-join-sumtick).
+        if (static const bool on_sum = TestEnvOn("DC_NETPLAY_TEST_CLOSE_ON_CHECKSUM"); on_sum && last && tick % kChecksumTicks != 0) {
+            g_catch.test_close_at = (tick / kChecksumTicks + 1) * kChecksumTicks;
+            last = false;
+            std::fprintf(stderr, "catchup: test: the close due at tick %lld moved to checksum tick %lld\n", (long long) tick, (long long) g_catch.test_close_at);
+        }
+
+        // coop-b9arrive test hook (DC_NETPLAY_TEST_CLOSE_AFTER_FLOOR=1, x-entrwin -Case p2late): her merge's close (she sends) held
+        // until her walk-in is over and she has played 2 ticks: her walk-in ends between the merge's start and its lockstep, as on Jep's
+        // rc1 B9 (his arrival late in her walk-in over the internet: her floor start fell inside the catch-up).
+        if (static const bool after_floor = TestEnvOn("DC_NETPLAY_TEST_CLOSE_AFTER_FLOOR"); after_floor && SendsState() && g_link.stayer_merge && last) { // (the stayer's own close: she sends)
+            static std::int64_t started_at = -1;
+
+            if (mode != GAME_MODE_DUNGEON || !CoopPlainPlay() || BtEventMode != 0) { // (her walk-in, its script, still on)
+                started_at = -1;
+                last = false;
+            } else if (started_at < 0 || tick < started_at) {
+                started_at = tick;
+                last = false;
+            } else if (tick < started_at + 2) {
+                last = false;
+            } else {
+                std::fprintf(stderr, "catchup: test: her close held past her walk-in (tick %lld, her play from %lld)\n", (long long) tick, (long long) started_at);
+            }
+        }
 
         // (coop-joinbudget: a blob of pads sent before her word reached the last one's end, x-floor-join -Seamless's check of
         // the stream; with pads_wait_replay none is)
@@ -9778,6 +11601,15 @@ void SayCaught(std::int64_t tick) {
     caught.unused = (std::uint32_t) tick;
     NetSocketSend(&caught, sizeof caught);
     g_catch.said = std::chrono::steady_clock::now();
+    // coop-b4arrive: and, with each, what this copy's screen showed of its own arrival before the state set landed (the host's
+    // close needs a word of hers first, so the last blob has it)
+    if (g_catch.entrance_shown >= 0) {
+        Busy shown = caught;
+
+        shown.magic = kEntranceShownMagic;
+        shown.unused = (std::uint32_t) g_catch.entrance_shown;
+        NetSocketSend(&shown, sizeof shown);
+    }
 }
 
 // The joiner, each tick of a catch-up: leave for the checkpoint once it is whole; from the first tick there, the host's
@@ -9908,6 +11740,7 @@ bool CatchJoinTick() {
         const bool land_here = g_snap.expected && InCheckpointZone() && !NetplayMutated("snap_land_reload");
 
         if (land_here && g_snap.in_total == 0 && g_catch.have_to <= 0) {
+            ApplyPrepareOnce(); // coop-firsttick: it lands here, the set to come: prepared while its parts come
             g_solo.left = false;
             g_solo.due = false;
             return false;
@@ -9971,9 +11804,10 @@ bool CatchJoinTick() {
         g_floor_started = false;
         g_link.tick = 0;
         g_link.synced[0] = g_link.synced[1] = g_link.previous[0] = g_link.previous[1] = Neutral();
-        g_link.menu_owner = 1;
-        g_link.held = 0;
         std::fprintf(stderr, "catchup: replay from tick 0 in map %d%s\n", (int) MapNo, CheckpointFloor(g_solo.checkpoint) >= 0 ? " (the floor's start)" : "");
+        if (g_snap.expected) { // coop-firsttick: landed after a load, the set to come (ApplyPrepareOnce)
+            ApplyPrepareOnce();
+        }
 
         // coop-localfix2: the random state the host's recording had at its tick 0 (SoloTick puts it in the checkpoint).
         if (g_solo.checkpoint.size() >= sizeof(ResyncHeader) && !NetplayMutated("tick0_rand_own")) {
@@ -10245,7 +12079,9 @@ void NetplayHelloSaysStayer() {
 
     NetplayHello hello = HelloMake(false);
 
-    if (g_link.sent_hello_set && g_link.sent_hello.session == hello.session && g_link.sent_hello.stayer == hello.stayer) {
+    // (coop-entrwin: and its place in a floor's entrance window, which the host's entrance word reads from this Hello)
+    if (g_link.sent_hello_set && g_link.sent_hello.session == hello.session && g_link.sent_hello.stayer == hello.stayer &&
+        g_link.sent_hello.walk_in == hello.walk_in && g_link.sent_hello.walk_gap == hello.walk_gap && g_link.sent_hello.arrival_cut == hello.arrival_cut) {
         return;
     }
 
@@ -10291,6 +12127,22 @@ bool NetplayPeerLinking() {
     return !stale || NetplayMutated("stale_peer_linking");
 }
 
+// coop-firsttick (l-lobby-handed as played: the taker's last part took at 123-146 ms after his first play tick, its apply began
+// 14-16 ms later): the apply waits for the next frame start (SnapFrameStart: no game frame on the stack), and the frame that took
+// the last part first waited out its clock's tick like any other, on a copy that plays no tick till the set is in (black). That
+// frame now ends without the wait, so the next one starts, and applies, at once (CoopPerfCatchingUp, as a late frame does).
+// DC_NETPLAY_MUTATE=apply_next_tick (twin): the wait, as before.
+bool NetplayStateSetDue() {
+    static const bool twin = NetplayMutated("apply_next_tick");
+    const bool        due = TakesState() && g_snap.apply_due && g_solo.on && g_catch.active && !twin; // (SnapFrameStart's apply condition)
+
+    if (static std::int64_t said = -1; due && said != (std::int64_t) g_link.session * 1000003 + g_snap.in_tick) {
+        said = (std::int64_t) g_link.session * 1000003 + g_snap.in_tick;
+        std::fprintf(stderr, "catchup: the state set is whole: this frame ends without its clock's wait, the apply next [t %lld]\n", LogMs());
+    }
+    return due;
+}
+
 bool NetplayCatchingUp() {
     // Test hook (DC_NETPLAY_TEST_SLOW_LAST_BLOB=1): the last blob (J known) replays at the game's own pace, as a slow PC's
     // would, so the host's first lockstep ticks, and a split among them, come while this copy is still replaying
@@ -10301,9 +12153,42 @@ bool NetplayCatchingUp() {
            !(slow_last && g_catch.join_tick >= 0);
 }
 
+// coop-b4arrive: this copy joins the other's floor over its own arrival as it plays (a pick join: before the link
+// CoopWorldsArrivalCut, after it the host's cut word naming this copy): 1 while its screen shows that arrival live (the game's
+// floor entrance, on its own copy, until the state set lands), 2 from the apply to the lockstep (its last frame held: the replay's
+// frames are the other's, not shown), 0 none. At the lockstep both copies go on with it from the record's tick its screen had
+// reached (the last blob's word). DC_NETPLAY_MUTATE=cut_arrival_black (twin): none (black, as before).
+// An arrival whose first ticks went by in another black of this copy's (before 11-14 an entrance window's wait for its merge,
+// x-entrwin -Case closed; that wait shows live now, ArrivalHoldNow's window_wait, so its twin window_wait_black alone comes here):
+// none of it was shown, so it is not shown from the middle: black through the sync, and both copies play it from its start
+// (its word 0). The floor's key, -1000 none (NetplayArrivalHold notes it).
+static int g_own_black_key = -1000;
+
+static int OwnFloorKey() {
+    return UserStatus != nullptr ? selectMapNo * 256 + UserStatus->cur_floor : -1000;
+}
+
+static int OwnArrivalPhase() {
+    if (NetplayMutated("cut_arrival_black") || !TakesState() && g_link.up || g_own_black_key == OwnFloorKey()) {
+        return 0;
+    }
+    if (!g_link.up) {
+        return CoopWorldsArrivalCut() ? 1 : 0;
+    }
+    if (g_link.cut_word == 0 || g_link.cut_word != g_link.player || !g_link.floor_arrival) {
+        return 0;
+    }
+    return g_snap.applied ? 2 : 1;
+}
+
 bool NetplayHoldsJoinFrame() {
     if (!TakesState() || !g_link.up) {
         return false;
+    }
+    // coop-b4arrive: its own arrival shown live through the state set's transfer, its last frame held from the apply to the lockstep
+    if (const int own = OwnArrivalPhase(); own != 0) {
+        (own == 2 ? g_join_hold.held : g_join_hold.shown)++;
+        return own == 2;
     }
 
     const bool before = g_link.awaiting_sync && g_join_hold.state_tick < 0;
@@ -10334,7 +12219,24 @@ bool NetplayReplaying() {
 // pads go from tick 0), the taker's as it replays them after the set (or from tick 0). The pair is still apart in them
 // (CoopWorldsTick waits for the lockstep), so what goes by the pair's link alone (her own town menu and pause) may run there
 // too, the same on both copies. The sender's ticks before the take are in no replay: the set carries their end alone.
+std::int64_t NetplayCatchupStateTick() {
+    if (!g_link.up || !g_catch.active) {
+        return -1;
+    }
+    // (the host's from the take's own tick, not once its pack is done a few frames on: the hooks reading it act on one tick on both)
+    return SendsState() ? (g_snap.on && g_snap.tick >= 0 ? (std::int64_t) g_snap.tick : -1) : (g_snap.applied ? (std::int64_t) g_snap.in_tick : -1);
+}
+
 bool NetplayCatchupStepsAlike() {
+    // coop-soakapart (soak seed 1259: her copy's 0xC0000005 reading 0x38 in CommonIconDraw, his Georama parts menu's Atla page): a
+    // catch-up that ends in a worlds merge goes into the lockstep at J still apart, the merge placing at J+1 (EnterLockstep). The
+    // catch-up was over there (g_catch.active false), so for those ticks this said the copies did not step alike, the town's menus
+    // were not linked (coop_townmenu Linked), and his parts menu, open through the merge, stepped on her copy's engine too
+    // (CoopP1PartsMenuStep: retail's EditMenuLoop), whose Atla board pointers had never been made there (PerBoardPt null). The
+    // lockstep steps alike from J on, as the catch-up's ticks before it did. DC_NETPLAY_MUTATE=merge_lockstep_apart (twin): as before.
+    if (g_link.up && g_link.joined_at >= 0 && g_link.tick >= g_link.joined_at && !NetplayMutated("merge_lockstep_apart")) {
+        return true;
+    }
     if (!g_link.up || !g_catch.active || !g_solo.on) {
         return false;
     }
@@ -10492,6 +12394,7 @@ constexpr std::uint64_t kExtraTalks = 0xC0000008u;      // opt8: every player's 
 constexpr std::uint64_t kExtraScriptMenu = 0xC0000009u; // coop-small2 (9 in train 56: opt8 has 8): a script's menu open, carried local (CoopScriptMenuSyncBytes)
 constexpr std::uint64_t kExtraQuests = 0xC000000Au;     // coop-pt1111e: the quests' progress (QuestsPartTake's text, its length first)
 constexpr std::uint64_t kExtraDialog = 0xC000000Bu;     // coop-pt1111e: the dialog framework's sessions and windows (SnapDialogFill)
+constexpr std::uint64_t kExtraUraOpen = 0xC000000Cu;    // coop-choosing: the floors whose back half is unlocked (coop::UraOpenBytes)
 
 // coop-splashmove (Jep's 2026-10-26 case: Xiao walking about Norune while his copy showed its splash): the pads the link
 // routed on the tick before the state set's. Her town step reads the routed pads at the frame's start, before this tick's
@@ -10655,6 +12558,13 @@ std::vector<SnapshotExtra> SnapExtras() {
 
         extras.push_back({kExtraOpenGates, gates, gates_size});
     }
+    // coop-choosing: the back halves unlocked, as the open gates.
+    {
+        std::size_t    ura_size = 0;
+        unsigned char *ura = coop::UraOpenBytes(&ura_size);
+
+        extras.push_back({kExtraUraOpen, ura, ura_size});
+    }
     return extras;
 }
 
@@ -10664,9 +12574,19 @@ std::vector<SnapshotExtra> SnapExtras() {
 // while it recorded alone, so the objects' contents carry nothing (the lockstep's start loads her anew).
 bool g_state_file_applying = false; // coop-fx51c: a state file (a fixture) is being put back (StateFileApply)
 
+namespace coop {
+void OwnSoundApplyBefore(); // coop-soundset (coop_ownlook.cpp): the special sound set, each copy's own across an apply
+void OwnSoundApplyAfter();
+void OwnSoundFrame();
+void OwnLookApplyBefore(); // coop-wave4 (coop_ownlook.cpp): the message look, each copy's own across an apply
+void OwnLookApplyAfter();
+void OwnLookFrame();
+} // namespace coop
+
 bool StateSetApplyCore(const std::vector<unsigned char> &unpacked, std::string &why, std::size_t *regions, std::size_t *bytes) {
     coop::Partner &partner = coop::g_partner;
     CCharacter    *own_chara = partner.chara, *own_weapon = partner.weapon;
+    CCharacter    *own_hand = partner.hand; // coop-p2eyehand
     CTexAnimeData *own_tex_anime = partner.tex_anime;
     u_int         *own_pack = partner.pack, *own_ex_pack = partner.ex_pack;
     u_char        *own_model = partner.model, *own_ex_model = partner.ex_model;
@@ -10680,24 +12600,18 @@ bool StateSetApplyCore(const std::vector<unsigned char> &unpacked, std::string &
 
     coop::MenuWorkCensus(&menu_held, &menu_total, &menu_before);
     CoopScriptMenuSyncClear(); // coop-small2: a set without a script's menu open leaves this copy's as it is
-    // coop-pt1111m: DC_COOP_MUTATE=menusoff_menu_out (twin): a link's apply leaves this copy's own menu working globals, as since e57647e7
-    std::vector<unsigned char> menu_own;
-    const bool                 menu_kept = !g_state_file_applying && coop::MenuWorkInSet() && coop::MenuWorkKeptMutated();
-
-    if (menu_kept) {
-        coop::MenuWorkSave(menu_own);
-    }
+    coop::UsePromptApplyBefore(); // coop-clownchest (its twin)
+    coop::OwnSoundApplyBefore(); // coop-soundset
+    coop::OwnLookApplyBefore();  // coop-wave4
+    CoopTownTalkKeepBefore();    // coop-wave2: this copy's own talk window is its own
+    coop::WheelApplyBefore();    // coop-seed324 (its twin)
     const bool applied = SnapshotApplyBytes(unpacked.data(), unpacked.size(), why, regions, bytes, SnapExtras());
-    if (menu_kept) {
-        coop::MenuWorkRestore(menu_own);
-    }
+    coop::WheelApplyAfter();
+    coop::UsePromptApplyAfter();
+    coop::OwnSoundApplyAfter();
+    coop::OwnLookApplyAfter();
+    CoopTownTalkKeepAfter();
     coop::MenuWorkCensus(&menu_held, &menu_total, &menu_after);
-    // coop-pt1111m (x-town-stayermenu-*-menusoff reads it against the sender's take line): with the menus in the lockstep the taker
-    // steps the sender's menus from here, on the sender's menu state
-    if (!g_state_file_applying && coop::MenuWorkInSet()) {
-        std::fprintf(stderr, "catchup: the menus are in the lockstep (game.coop_menus off): the menu's working globals after the apply %08x%s\n", coop::MenuWorkHash(),
-                     menu_kept ? " (test: this copy's own kept)" : "");
-    }
     // (x-town-stayermenu reads it: his menu open as she takes his set, her menu's globals stay hers)
     std::fprintf(stderr, "catchup: the state set holds %zu of the menu's %zu working globals; this copy's others across the apply: %08x before, %08x after\n",
                  menu_held, menu_total, menu_before, menu_after);
@@ -10736,6 +12650,7 @@ bool StateSetApplyCore(const std::vector<unsigned char> &unpacked, std::string &
 
     partner.chara = own_chara;
     partner.weapon = own_weapon;
+    partner.hand = own_hand;
     partner.tex_anime = own_tex_anime;
     partner.pack = own_pack;
     partner.ex_pack = own_ex_pack;
@@ -10774,7 +12689,7 @@ void StateSetAfterApply() {
                      r.images, r.palettes, r.targets, r.moved, r.skipped);
         // coop-joinatla (diagnostic, DC_COOP_TEXLOG=1): every texture slot the table holds now, and where its pixels are.
         if (TestEnv("DC_COOP_TEXLOG") != nullptr) {
-            for (int i = 0; i < 196; i++) {
+            for (int i = 0; i < kTextureCount; i++) {
                 const CTexture &tex = TexManager.textures[i];
 
                 if (tex.name[0] == 0) {
@@ -10788,14 +12703,18 @@ void StateSetAfterApply() {
             }
         }
     }
+    coop::MembersStateSetApplied(); // coop-memberowner (tests: the members are the set's from here)
     dc::render::Draw3DStateSetApplied(); // coop-pond: each draw record checked once against its model's bytes (a town's dug ground)
     coop::DrawBlocksSnapshotApplied(); // coop-keydoor: the mod's own draw blocks load again from this copy's files
     if (mode == GAME_MODE_EDIT) {
         CoopTownSnapshotApplied();
+        // jointake: the texture slots after the apply and her model's load again (as the sender's at its take)
+        std::fprintf(stderr, "catchup: the texture slots after the state set's apply %08x\n", CoopTownTextureSlotsHash());
     } else if (mode == GAME_MODE_DUNGEON) {
         coop::PartnerSnapshotApplied();
     }
     coop::AudioSnapshotApplied(); // coop-pt1109c: the set's music on this copy's sound driver
+    KeepOwnOptions("state set"); // coop-settings
 }
 
 // coop-joinfix test hook (DC_NETPLAY_TEST_FOREIGN_CLUT=1, x-floor-join -ForeignClut; item 37b): the taking copy, on a floor,
@@ -10810,7 +12729,7 @@ static void ForeignClutTestTick() {
         return;
     }
     done = true;
-    for (int i = 0; i < 196; i++) {
+    for (int i = 0; i < kTextureCount; i++) {
         CTexture &tex = TexManager.textures[i];
 
         if (tex.name[0] == 0 || tex.block < 0 || tex.block >= 72 || tex.clut == nullptr || !SnapshotStateHolds(tex.clut)) {
@@ -10837,6 +12756,17 @@ static void ForeignClutTestTick() {
 void SnapFrameStart() {
     CostScope cost{g_costs.take_ms}; // (the take's frame start: all of it, the take with the town and Atla takes)
     SnapJobPoll(); // coop-offthread: a pack done off the game thread
+    // jointake (the coordinator's option B, 11-12): a host with no partner in town loads her model on the frame between the state
+    // set's checkpoint and its take (the take waits for two drawn frames after it), in a model set of its own, unused till the
+    // take's TownLoad swaps it in (CoopTownPreloadForTake); one no take took up is let go (CoopTownPreloadDrop).
+    if (SendsState() && g_snap.on && g_snap.take_due) {
+        if (mode == GAME_MODE_EDIT && g_frames_drawn >= g_snap.due_drawn + 1 && g_frames_drawn < g_snap.due_drawn + 2 && !NetplayMutated("snap_same_frame") &&
+            CoopTownPreloadForTake()) {
+            CoopPerfSayTick("her model loaded ahead of the state set's take");
+        }
+    } else {
+        CoopTownPreloadDrop("no state set's take due");
+    }
     coop::DunTestAloneFrame(); // coop-soakfix3: DC_COOP_DUNTEST_ALONE (a host alone, before a join)
     // coop-soakfix3 test line (DC_NETPLAY_TEST_PLACE_LINE=1, tests/test_fixture_join.py::test_host_sits): this copy's place each time
     // it changes (game mode, the dungeon's task, the town's mode, the room's mode), so a row sees him go into a state a player
@@ -10942,9 +12872,31 @@ void SnapFrameStart() {
     // for a frame drawn after the checkpoint, so the two halves fall in two frames. DC_NETPLAY_MUTATE=snap_same_frame (twin):
     // at once, as before.
     const bool drawn_since = g_frames_drawn >= g_snap.due_drawn + 2 || NetplayMutated("snap_same_frame");
+    // coop-takeprep (the stayer's take held her game thread 13-16 ms at x-gate-flow-picker-p1-returns3's merges, Jep's rc1 run his
+    // 53 ms): the take came two drawn frames after its checkpoint whether its preparation (SnapshotTakePrepare: the arenas' watch
+    // and zero test, the set's room, 11-15 ms on threads of its own) was done or not; when not ("not prepared ahead": fast frames,
+    // a loaded PC) the game thread tested every page (287 MB) and laid out fresh room itself. The take now waits for it as for the
+    // drawn frames (the stayer plays on; only the joiner's black is the longer), kTakePrepWaitMs at most (then unprepared, said).
+    // DC_NETPLAY_MUTATE=take_unprepared_ok (twin): no wait, as before.
+    constexpr int kTakePrepWaitMs = 500;
+    const bool    prep_waited = std::chrono::steady_clock::now() - g_snap.due_at > std::chrono::milliseconds(kTakePrepWaitMs);
+    const bool    prep_ready = SnapshotTakePrepDone() || prep_waited || NetplayMutated("take_unprepared_ok");
 
-    if (SendsState() && g_snap.on && g_snap.take_due && drawn_since && SnapshotQuietTick(menu_ok) && (LateJoinTestTick() == 0 || g_link.tick >= LateJoinTestTick()) &&
-        !g_test_take_held) {
+    if (SendsState() && g_snap.on && g_snap.take_due && drawn_since && SnapshotQuietTick(menu_ok) && !prep_ready) {
+        if (static std::int64_t said_due = -1; said_due != g_snap.due_drawn) {
+            said_due = g_snap.due_drawn;
+            std::fprintf(stderr, "catchup: the state set's take waits for its preparation (%lld drawn frames after its checkpoint)\n",
+                         (long long) (g_frames_drawn - g_snap.due_drawn));
+        }
+    }
+    if (static std::int64_t late_said = -1; SendsState() && g_snap.on && g_snap.take_due && drawn_since && prep_ready && !SnapshotTakePrepDone() &&
+                                           !NetplayMutated("take_unprepared_ok") && late_said != g_snap.due_drawn) {
+        late_said = g_snap.due_drawn;
+        std::fprintf(stderr, "catchup: the state set's preparation not done after %d ms: the take goes on unprepared\n", kTakePrepWaitMs);
+    }
+
+    if (SendsState() && g_snap.on && g_snap.take_due && drawn_since && prep_ready && SnapshotQuietTick(menu_ok)&& (LateJoinTestTick() == 0 || g_link.tick >= LateJoinTestTick()) &&
+        g_link.tick >= TakeHeldTestTick() && !g_test_take_held) {
         std::string why;
         auto        start = std::chrono::steady_clock::now();
 
@@ -10982,11 +12934,20 @@ void SnapFrameStart() {
             std::fprintf(stderr, "catchup: the state set is taken mid-scene (script %d, task %d, tick %lld)\n", (int) BtEventInfo.running_script_no,
                          (int) gameTask, (long long) g_link.tick);
         }
-        if (coop::MenuWorkInSet()) { // coop-pt1111m (the rows' line, against the taker's after its apply)
-            std::fprintf(stderr, "catchup: the menus are in the lockstep (game.coop_menus off): the menu's working globals at the take %08x\n", coop::MenuWorkHash());
-        }
-        if (SnapshotTakeBytes(g_snap.bytes, why, SnapExtras())) {
+        // jointake: each step's share of the game thread said (the hooks above, the extras, the copy, after it)
+        const auto                       hooked = std::chrono::steady_clock::now();
+        const std::vector<SnapshotExtra> extras = SnapExtras();
+        const auto                       extras_at = std::chrono::steady_clock::now();
+        const bool                       took = SnapshotTakeBytes(g_snap.bytes, why, extras);
+        const auto                       took_at = std::chrono::steady_clock::now();
+
+        if (took) {
             g_snap.tick = g_link.tick;
+            g_snap.deltas = (std::uint32_t) g_solo.deltas.size(); // coop-soakapart2: the recorded changes the set holds
+            CoopPerfSayTick("the state set's take", SnapshotLastTake().check_ms); // jointake: the take's whole tick (the take, sim, draw)
+            if (mode == GAME_MODE_EDIT) { // jointake: the texture slots as taken (the taker says its own after the apply)
+                std::fprintf(stderr, "catchup: the texture slots at the state set's take %08x\n", CoopTownTextureSlotsHash());
+            }
             // coop-offthread: the copy alone on the game thread; the pack and the page list on a SnapJob's (taken up by SnapJobPoll)
             // (coop-reds2's fresh set, a fallback's, comes through here too: off the game thread like the first)
             auto job = std::make_shared<SnapJob>();
@@ -10997,10 +12958,26 @@ void SnapFrameStart() {
 
             job->kind = 1;
             job->began = start;
-            job->tick_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            if (const SnapshotTakeStats taken = SnapshotLastTake(); true) {
-                std::fprintf(stderr, "catchup: the state set's copy: %zu regions, %zu MB scanned, %zu MB kept; listing %.0f ms, copying %.0f ms\n", taken.regions,
-                             taken.scanned >> 20, taken.kept >> 20, taken.list_ms, taken.copy_ms);
+            const SnapshotTakeStats taken = SnapshotLastTake();
+            // (a test's write watch check is left out: it is said apart)
+            job->tick_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() - taken.check_ms;
+            {
+                auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                    return std::chrono::duration<double, std::milli>(b - a).count();
+                };
+
+                std::fprintf(stderr, "catchup: the state set's copy: %zu regions, %zu MB scanned, %zu MB kept; listing %.0f ms, copying %.0f ms (its zero test %.1f ms on %u threads)\n",
+                             taken.regions, taken.scanned >> 20, taken.kept >> 20, taken.list_ms, taken.copy_ms, taken.scan_ms, taken.scan_threads);
+                std::fprintf(stderr, "catchup: the take's steps on the game thread: hooks %.2f ms, extras %.2f ms, list %.2f ms, write watch %.2f ms (%zu MB of arenas watched), "
+                             "zero test %.2f ms (%zu MB tested), layout %.2f ms, copy out %.2f ms, the take's end %.2f ms, after %.2f ms; %s\n",
+                             ms(start, hooked), ms(hooked, extras_at), taken.list_ms, taken.watch_ms, taken.watched >> 20, taken.scan_ms,
+                             taken.tested >> 20, taken.layout_ms, taken.emit_ms - taken.layout_ms,
+                             ms(extras_at, took_at) - taken.list_ms - taken.copy_ms - taken.check_ms, ms(took_at, std::chrono::steady_clock::now()),
+                             taken.prepared ? ("prepared ahead in " + std::to_string((int) (taken.prep_ms + 0.5)) + " ms on threads of its own").c_str()
+                                            : "not prepared ahead");
+                if (taken.check_missed >= 0) {
+                    std::fprintf(stderr, "catchup: write watch check: %lld untested pages not zero (%.1f ms, not counted)\n", taken.check_missed, taken.check_ms);
+                }
             }
             job->by_pages = g_catch.restarts == 0 && PageDiffLink(); // coop-pagediff (coop-reds2: a fresh set goes whole)
             job->raw_send = NetplayMutated("snap_raw");
@@ -11091,14 +13068,23 @@ void SnapFrameStart() {
         std::fprintf(stderr, "catchup: before the apply: task %d, event mode %d, script %d, scene flags 103 %d 100 %d\n", (int) gameTask,
                      (int) BtEventMode, (int) BtEventInfo.running_script_no, SaveData != nullptr ? (int) SaveData->GetGameFlag(103) : -1,
                      SaveData != nullptr ? (int) SaveData->GetGameFlag(100) : -1);
+        // coop-b4arrive: a join over this copy's own arrival (the host's cut word names it): how far its screen showed it, the
+        // state set about to land over it (said to the host with each word of the replay: SayCaught)
+        if (g_link.cut_word != 0 && g_link.cut_word == g_link.player) {
+            g_catch.entrance_shown = g_own_black_key == OwnFloorKey() ? 0 : coop::ArrivalOwnShown(); // (none shown: from its start)
+            std::fprintf(stderr, "catchup: this copy's own arrival showed %d record ticks before the state set landed\n", g_catch.entrance_shown);
+        }
         // coop-localfix2: the state set came packed (SnapshotPack); unpacked here, or refused as broken.
         std::vector<unsigned char> unpacked;
         const bool                 whole = SnapshotUnpack(g_snap.in, unpacked);
+        const auto                 unpacked_at = std::chrono::steady_clock::now(); // (coop-p2tick: the apply's steps, said below)
 
         if (!whole) {
             why = "the packed state set did not unpack";
         }
+        CoopTownOwnCameraBefore(whole && g_catch.land_here); // coop-housecam2: the arriver's own town camera, its own screen's
         const bool applied = whole && StateSetApplyCore(unpacked, why, &regions, &bytes);
+        const auto core_at = std::chrono::steady_clock::now();
 
         if (applied) {
             g_snap.applied = true;
@@ -11116,16 +13102,12 @@ void SnapFrameStart() {
                 std::memcpy(g_link.previous, g_snap_pads.previous, sizeof g_link.previous);
                 std::memcpy(g_link.routed, g_snap_pads.routed, sizeof g_link.routed);
             }
-            g_link.menu_owner = 1;
-            g_link.held = 0;
             if (g_solo.pads.size() < (std::size_t) g_snap.in_tick * 2) {
                 g_solo.pads.resize((std::size_t) g_snap.in_tick * 2, Neutral());
             }
             g_catch.have_to = std::max<std::int64_t>(g_catch.have_to, g_snap.in_tick);
             g_catch.lag_at_from = -1; // coop-reds2: the lag window starts again from here
-            while (g_solo.next_delta < g_solo.deltas.size() && g_solo.deltas[g_solo.next_delta].tick <= g_snap.in_tick) {
-                g_solo.next_delta++; // coop-worlds: progress the host applied before S is in the state set already
-            }
+            SnapDeltasSkip("held at the apply"); // coop-worlds: progress the host applied before its take is in the state set already
             CoopWorldsFloorLayoutAgain(); // the tests' layout line: the host's floor is here now
             CoopWorldsMergeStateIn();     // coop-localfix: from here this copy's player is player 1's
 
@@ -11138,6 +13120,16 @@ void SnapFrameStart() {
             // textures out of the table before the registry is made again (they named this copy's pixels at the host's addresses:
             // only her shadow drew), and her town model loaded again after it.
             StateSetAfterApply();
+            CoopTownOwnCameraAfter();
+            {
+                const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
+                const SnapshotApplyStats stats = SnapshotLastApply(); // coop-firsttick
+
+                std::fprintf(stderr, "catchup: the apply's steps: unpack %.1f ms, the regions %.1f ms, after them %.1f ms; %zu MB of zero pages left as they were (%s)\n",
+                             ms(start, unpacked_at), ms(unpacked_at, core_at), ms(core_at, std::chrono::steady_clock::now()), stats.left_zero >> 20,
+                             stats.prepared ? "its arenas prepared" : "not prepared");
+            }
             g_arrival.apply_to = NowMs(); // coop-offthread
             g_arrival.apply_from = g_arrival.apply_to - (std::int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             std::fprintf(stderr, "catchup: snapshot of tick %lld applied: %zu regions, %zu bytes (%lld ms); replaying from tick %lld [t %lld]\n",
@@ -11147,6 +13139,21 @@ void SnapFrameStart() {
             // coop-fringefix: both clocks as the set leaves them (NowTime, the save's now_time), for the clock desync after a merge
             std::fprintf(stderr, "catchup: clock after the state set: NowTime %.3f, the save's %.3f\n", NowTime,
                          SaveData != nullptr ? SaveData->GetNowTime() : -1.0f);
+            // coop-reversestart (tests): the floor-start scene flags as the state set leaves them. A copy that lands where it
+            // stands (coop-snapjoin's land_here: no landing marks) holds only its own floor's flags before the apply, which its
+            // own arrival sets some ten ticks in, so its "before the apply" line is a race with the set's arrival (x-floor-join
+            // -StartJoin, coop-choosing 4 of 6 red): the scene counts as seen by the flags the set brings. DC_NETPLAY_MUTATE=
+            // snap_scene_flags_lost (twin): the cave's floor 1 scene flag (103) cleared on this copy after the apply, as a set
+            // that did not bring it.
+            if (NetplayMutated("snap_scene_flags_lost") && SaveData != nullptr) {
+                CoopWorldsLocalFlags(true);
+                SaveData->SetGameFlag(103, 0);
+                CoopWorldsLocalFlags(false);
+                std::fprintf(stderr, "catchup: test: game flag 103 cleared after the apply (snap_scene_flags_lost)\n");
+            }
+            std::fprintf(stderr, "catchup: after the apply: task %d, event mode %d, script %d, scene flags 103 %d 100 %d\n", (int) gameTask, (int) BtEventMode,
+                         (int) BtEventInfo.running_script_no, SaveData != nullptr ? (int) SaveData->GetGameFlag(103) : -1,
+                         SaveData != nullptr ? (int) SaveData->GetGameFlag(100) : -1);
         } else {
             std::fprintf(stderr, "catchup: the snapshot could not be applied (%s): asking for the pads from tick 0\n", why.c_str());
             g_snap.said_refused = true;
@@ -11219,11 +13226,11 @@ void StatePartsLine(const char *what) {
     std::fprintf(stderr,
                  "coop-state: %s parts: rand %08x task %d camera %.4f camera2 %.4f view %08x player (%.2f %.2f %.2f) partner (%.2f %.2f %.2f) "
                  "town (%.2f %.2f %.2f) town_modes %08x status %08x save %08x p2_bag %08x menus %08x floor %08x monsters %08x stages %08x %08x %08x "
-                 "town_cam (%.1f %.1f %.1f / %.1f %.1f %.1f) partner_chara %d down %d choice %d menu_owner %d town_partner %d (%.2f %.2f %.2f) party %d\n",
+                 "town_cam (%.1f %.1f %.1f / %.1f %.1f %.1f) partner_chara %d down %d choice %d town_partner %d (%.2f %.2f %.2f) party %d\n",
                  what, p.rand, p.task, p.camera, p.camera2, p.view, p.player[0], p.player[1], p.player[2], p.partner[0], p.partner[1], p.partner[2],
                  p.town[0], p.town[1], p.town[2], p.town_modes, p.status, p.save, p.p2_bag, p.menus, p.floor, p.monsters, p.stages[0], p.stages[1],
                  p.stages[2], p.town_cam[0], p.town_cam[1], p.town_cam[2], p.town_cam[3], p.town_cam[4], p.town_cam[5], p.partner_chara, p.partner_down,
-                 p.partner_choice, p.menu_owner, shown ? 1 : 0, outdoors[0], outdoors[1], outdoors[2],
+                 p.partner_choice, shown ? 1 : 0, outdoors[0], outdoors[1], outdoors[2],
                  UserStatus != nullptr ? (int) UserStatus->party_size : -1); // (coop-fixtures: the party a recipe made, fixture-recipe-proof)
 }
 
@@ -11378,6 +13385,14 @@ bool StateFileApply(const std::string &path, const char *place, const std::vecto
     // StandsAtCheckpointStart, reads it; the load kept the jump's own, the loader against the maker)
     if (mode == GAME_MODE_DUNGEON) {
         g_floor_started = true;
+    }
+    // coop-meltdesync test hook (DC_NETPLAY_TEST_MELT_ON=1, every copy: the load's tick is one link tick on all): the bag's melt
+    // timer started as a menu's close starts it (retail's ExitBattleMenu: Initialize), the state of any player who has shut a
+    // dungeon menu once; the fixtures were made before any. w-world-split -MeltOn.
+    if (TestEnvOn("DC_NETPLAY_TEST_MELT_ON")) {
+        ItemVolumeStep.Initialize();
+        std::fprintf(stderr, "netplay: test: the melt timer started at the load (tick %lld): %d %d %d\n", (long long) g_link.tick, (int) ItemVolumeStep.frame,
+                     (int) ItemVolumeStep.pending_volume, (int) ItemVolumeStep.enabled);
     }
     GlobalsDumpAfterLoad();
     StateFileExitAfterLoad();
@@ -12001,7 +14016,7 @@ void TestHostMenuFrame() {
         }
         return;
     }
-    if (!(town && ::GameMode == ED_MODE_WALK) && !(room && CoopTownIndoorWalks()) && !(floor && gameTask == GAME_TASK_PLAY && BtGameModeFlag == BT_GAME_MODE_PLAY)) {
+    if (!(town && ::GameMode == ED_MODE_WALK) && !(room && CoopTownIndoorWalks()) && !(floor && CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY)) {
         return;
     }
 
@@ -12098,8 +14113,6 @@ void StateFileFrameStart() {
             g_solo.on = true;
             g_link.tick = 0;
             g_link.synced[0] = g_link.synced[1] = g_link.previous[0] = g_link.previous[1] = Neutral();
-            g_link.menu_owner = 1;
-            g_link.held = 0;
             if (town_alone) {
                 std::fprintf(stderr, "coop-state: this host alone: the loaded state is its checkpoint (town %d), a join catches up to it\n", (int) MapNo);
             } else {
@@ -12123,8 +14136,10 @@ void StateFileFrameStart() {
         std::fprintf(stderr, "coop-test: limited zone %d: the dungeon's message %d raised (timer %d) on the load, link tick %lld\n", zone,
                      (int) DngMessMan.message, (int) DngMessMan.timer, (long long) g_link.tick);
     }
-    load_packed.clear();
-    load_packed.shrink_to_fit();
+    if (!TestEnvIs("DC_COOP_TEST_PRESENT_RELOAD", "file")) { // coop-tripwires3: that test loads the file again later
+        load_packed.clear();
+        load_packed.shrink_to_fit();
+    }
 }
 } // namespace
 
@@ -12141,11 +14156,15 @@ bool NetplayStateFileChecked() {
 void NetplayFrameStart() {
     // (the copy's own frames on its lines, linked or apart: the link tick stands still while apart, fx51d 2026-11-05)
     TestLogFrame((long long) dc::app::GameFrameCount());
+    CoopViewTickStart(); // coop-camflash2: this tick's floor draw not yet made
     GlobalsDumpFrame(); // coop-fx51a: DC_QA_GLOBALS_DUMP
     TownAgainFrame();   // coop-fx51a: DC_COOP_TEST_TOWN_AGAIN
     QaStopSeen();          // coop-qastop (DC_QA_STOP_FILE)
     StateFileFrameStart(); // coop-stateload
     ServeFrameStart();     // coop-serve
+    coop::WhereIsFrame();  // coop-whereis: its test lines (DC_COOP_TEST_WHEREIS)
+    coop::OwnSoundFrame(); // coop-soundset: its test hooks (DC_COOP_TEST_SOUND_LOAD, DC_COOP_TEST_SOUND_TRACE)
+    coop::OwnLookFrame();  // coop-wave4: its test hooks (DC_COOP_TEST_LOOK_SCRAMBLE, DC_COOP_TEST_LOOK_TRACE)
     if (static bool checked = false; !checked) {
         checked = true;
         if (TestEnvInt("DC_NETPLAY_NAT_CHECK", 0) != 0) {
@@ -12168,6 +14187,11 @@ void NetplayFrameStart() {
             held_since = {};
             std::fprintf(stderr, "netplay: resync load done: the lockstep goes on from tick %lld (player %d, %s)\n", (long long) g_link.tick, g_link.player,
                          there ? "in the resync's place" : "the wait ran out");
+            // coop-resyncblack (tests): DC_COOP_SHOT_AFTER_RESYNC=N with DC_COOP_SHOT_PATH: the frame N ticks after the resync's load.
+            if (static const int shot_resync = TestEnvInt("DC_COOP_SHOT_AFTER_RESYNC", -1); shot_resync >= 0 && TestEnv("DC_COOP_SHOT_PATH") != nullptr) {
+                g_shot_due = g_link.tick + shot_resync;
+                std::fprintf(stderr, "netplay: test: the frame %d ticks after the resync's load is due at tick %lld\n", shot_resync, (long long) g_shot_due);
+            }
         }
     }
     TripFrameStart(); // coop-snapshot
@@ -12274,6 +14298,49 @@ void ApplyQuit(int player, const NetCommand &, std::int64_t tick) {
     std::fflush(stderr);
 }
 
+// coop-hostquit: netplay.hpp. The host's quit as Close takes a Leave that says it ended the session (kLeaveEnded); another
+// player's as Close takes a Leave or a drop: the notice, and this copy plays on alone, the pair as a dropped link leaves it.
+void NetplayPeerLeftWord(int player, bool ended) {
+    if (!g_link.up || player != 3 - g_link.player || g_link.peer_left) {
+        return;
+    }
+    g_link.peer_left = true;
+    g_link.peer_ended = ended && player == 1;
+    std::fprintf(stderr, "netplay: player %d's leaving heard on the worlds channel at tick %lld: taken as its Leave\n", player, (long long) g_link.tick);
+    std::fflush(stderr);
+}
+
+void NetplayPeerQuitApart(int player, bool ended, const char *why) {
+    if (ended && player == 1) {
+        if (g_quit_title) {
+            return;
+        }
+        g_quit_title = true;
+        g_quit_ends = true;
+        g_quit_tick = -1;
+        g_quit_note = "The host quit: the session has ended";
+        std::fprintf(stderr, "netplay: quit: the host (player 1) quit while apart, the session over (heard %lld ticks after the split, the link's last tick %lld): this copy (player %d) goes to the title\n",
+                     CoopWorldsApartTicks(), (long long) g_link.tick, g_link.player);
+        std::fflush(stderr);
+        return;
+    }
+    NetplayPeerGoneApart(player, why);
+}
+
+void NetplayPeerGoneApart(int player, const char *why) {
+    if (g_link.up) {
+        return;
+    }
+    SetNotice(PeerName(g_link.peer_hello) + " has left");
+    std::fprintf(stderr, "netplay: apart: player %d left (%s) %lld ticks after the split, the link's last tick %lld; this copy plays on alone and waits for player %d\n",
+                 player, why, CoopWorldsApartTicks(), (long long) g_link.tick, player);
+    std::fflush(stderr);
+    if (NetSessionNow() == NetSession::Apart) {
+        NetSessionTo(NetSession::Dropped, why);
+    }
+    CoopWorldsPeerGone();
+}
+
 // coop-quittitle: set as this copy's session ended (NetplayTakeQuitToTitle); its first tick at the title says so, once.
 bool g_quit_at_title_due = false;
 
@@ -12305,6 +14372,18 @@ static void JoinCancelTick() {
     if (!JoinMenu() || !g_join_picked || !g_link.started || g_link.up || !g_link.listening || g_role != 2 || g_catch.active ||
         (NetSessionNow() != NetSession::Joining && !NetplayMutated("cancel_apart") && !NetSessionOff()) || (down & (kInputCircle | kInputTriangle)) == 0 ||
         NetplayMutated("join_no_cancel") || (coop::lobby::GuestIn() && !NetplayMutated("lobby_cancel"))) {
+        return;
+    }
+    // coop-p2boot (Jep's rc3 playtest 11-13): the lobby's handed window is the seat itself, not a join its player picked: her
+    // Circle there gave the join up and left her window on a title that takes none of her presses (the lobby's Quit or P1's
+    // Quit Game ends the seat). DC_NETPLAY_MUTATE=handed_live_title (twin): cancelled, as before.
+    if (HandedWindow() && !NetplayMutated("handed_live_title")) {
+        static bool said = false;
+
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "netplay: local: the handed window's join is the lobby's seat: her Circle or Triangle does not give it up\n");
+        }
         return;
     }
     JoinGiveUp("cancelled", nullptr);
@@ -12354,6 +14433,123 @@ static void NatLostTick() {
                  std::chrono::duration<double>(now - heard_at).count(), kNote);
 }
 
+// coop-falsedrop (a landing's 17 copies at once: copy A dropped copy B at tick 181 while B's game was held by its state set's
+// save, B's keepalive silent 5.5 s on the loaded PC; it passes unloaded): the wait for the other copy's tick gave the link up
+// on silence alone, 5 s with no Busy, though the other was still there. Jep's rule (2026-11-17): never a drop from silence
+// alone; a slow PC, a long load or a save must never drop anyone. Now, as the apart check-in does (coop_worlds.cpp
+// QuietWatchTick): quiet for kCheckInAfterMs, this copy checks in: kCheckProbes probes (its own pads sent again, which the other's
+// link answers with its own, or its keepalive's Busy while its game is held), the gaps growing, and any word of the link's at
+// any point ends the check. Unanswered, the transport is asked (NetSocketPeerTransport): gone only when it says the connection
+// is closed (Steam's session closed or failed; the system's word that a datagram found no one at the other's UDP port; or,
+// where UDP cannot tell, nothing at all heard for kCheckUnknownSilentMs), or when the other's own Hellos say its side of the
+// link is closed (a new session). A connection that still says open keeps the check going: a new round, never a drop.
+constexpr int kCheckInAfterMs = 2000;
+constexpr int kCheckProbes = 5;
+constexpr int kCheckGapMs[kCheckProbes] = {500, 1000, 2000, 4000, 2000}; // after each probe; the last: the wait for its answer
+constexpr int kCheckUnknownSilentMs = 30000;
+
+struct LinkCheck {
+    int                                   probes = 0; // probes sent this round (0 with rounds 0: no check under way)
+    int                                   rounds = 0; // rounds the transport said open
+    long long                             resets = 0, heard = 0;
+    std::chrono::steady_clock::time_point next{}, heard_at{}, began{};
+};
+
+// True: the other copy is gone (said why). quiet: ms since its last word (a datagram of the link's, or its Busy).
+bool LinkedCheckIn(LinkCheck &c, std::int64_t tick, long long quiet, int after) {
+    const int  other = 3 - g_link.player;
+    const auto now = std::chrono::steady_clock::now();
+    const auto since = [&](std::chrono::steady_clock::time_point at) {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(now - at).count();
+    };
+
+    if (quiet <= after) {
+        if (c.probes > 0 || c.rounds > 0) {
+            std::fprintf(stderr, "netplay: player %d answered the check-in (a word of its link's) after %d probes, %lld ms: still here\n", other,
+                         c.rounds * kCheckProbes + c.probes, since(c.began));
+        }
+        c = LinkCheck{};
+        return false;
+    }
+    if (c.probes == 0 && c.rounds == 0) {
+        NetSocketPeerTransport(c.resets, c.heard);
+        c.began = now;
+        c.heard_at = now - std::chrono::milliseconds(quiet);
+        c.next = now;
+        std::fprintf(stderr, "netplay: player %d not heard for %lld ms in the wait for its tick %lld: checking in\n", other, quiet, (long long) tick);
+    }
+    if (g_link.peer_hello.session != 0 && g_link.peer_hello.session != g_link.last_peer_session) {
+        std::fprintf(stderr, "netplay: player %d's Hellos say a new session (%08x, the link's %08x): its side of the link closed: gone\n", other,
+                     (unsigned) g_link.peer_hello.session, (unsigned) g_link.last_peer_session);
+        return true;
+    }
+    if (now < c.next) {
+        return false;
+    }
+    if (c.probes < kCheckProbes) {
+        CatchSend();
+        Send();
+        c.next = now + std::chrono::milliseconds(kCheckGapMs[c.probes]);
+        c.probes++;
+        return false;
+    }
+
+    // Every probe unanswered: what the transport says.
+    long long  resets = 0, heard = 0;
+    const int  steam = NetSocketPeerTransport(resets, heard);
+    const bool reset = resets > c.resets;
+
+    if (heard != c.heard) {
+        c.heard = heard;
+        c.heard_at = now;
+    }
+
+    const long long silent = since(c.heard_at);
+    const char     *closed = steam == 4   ? "Steam says the other closed the session"
+                             : steam == 5 ? "Steam says the session failed"
+                             : steam == 0 ? "Steam has no session with the other"
+                             : steam == -2 && reset ? "the system says no one is at the other's port"
+                             : steam == -2 && silent >= kCheckUnknownSilentMs ? "nothing at all heard over UDP for 30 s"
+                                                                              : nullptr;
+
+    if (closed != nullptr) {
+        std::fprintf(stderr, "netplay: player %d answered none of %d probes (%lld ms quiet) and %s: gone\n", other, c.rounds * kCheckProbes + c.probes, quiet,
+                     closed);
+        return true;
+    }
+    std::fprintf(stderr, "netplay: player %d answered none of %d probes (%lld ms quiet) but the connection does not say closed (%s): checking again\n", other,
+                 c.rounds * kCheckProbes + c.probes, quiet, steam == -2 ? "UDP" : steam == 3 ? "Steam: connected" : steam < 0 ? "Steam: unknown" : "Steam: connecting");
+    c.rounds++;
+    c.probes = 1; // (that round's first probe counts as sent now: the gaps go on from the longest)
+    c.next = now + std::chrono::milliseconds(kCheckGapMs[kCheckProbes - 2]);
+    CatchSend();
+    Send();
+    return false;
+}
+
+// coop-falsedrop (test hook DC_NETPLAY_TEST_FREEZE=synced:MS): on the tick of the link's first compare after a state file's load,
+// this copy freezes whole for MS: its game thread sleeps and its keepalive says nothing (g_test_frozen_until_ms), as a starved
+// or paging PC's process does (the landing's copy B). Logged before and after.
+void FreezeTest(std::int64_t tick) {
+    static const char *const spec = TestEnv("DC_NETPLAY_TEST_FREEZE");
+    static bool              done = false;
+
+    if (spec == nullptr || done || std::strncmp(spec, "synced:", 7) != 0 || !NetplayStateFileChecked()) {
+        return;
+    }
+    done = true;
+
+    const int ms = std::atoi(spec + 7);
+
+    std::fprintf(stderr, "netplay: test: this copy (player %d) freezes whole for %d ms at link tick %lld (its game and its keepalive)\n", g_link.player, ms,
+                 (long long) tick);
+    std::fflush(stderr);
+    g_test_frozen_until_ms = NowMs() + ms;
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    std::fprintf(stderr, "netplay: test: this copy (player %d) was frozen %d ms: playing again\n", g_link.player, ms);
+    std::fflush(stderr);
+}
+
 void NetplayTick() {
     CostScope      cost{g_costs.tick_ms}; // coop-ws5left
     TickPartsScope parts; // coop-small1b
@@ -12378,6 +14574,19 @@ void NetplayTick() {
         NetplaySetCommandHandler(kCmdQuit, ApplyQuit);
     }
     QuitAtTitleTick(); // coop-quittitle: the line once this copy, its session over, stands at the title
+    // coop-rehost test hook (DC_NETPLAY_TEST_QUIT_ON=regex[>>regex...], l-rehost): once, on the first tick after this copy's
+    // log has said those lines (input_anchors.hpp CoopLogEventAdd), its player's Quit Game is sent as the in-game menu's Yes
+    // sends it (coop_fullmenu.hpp FullMenuQuitSent): no menu walk, no tick count.
+    if (static const char *quit_on = TestEnv("DC_NETPLAY_TEST_QUIT_ON"); quit_on != nullptr && quit_on[0] != '\0') {
+        static int  event = CoopLogEventAdd(quit_on);
+        static bool sent = false;
+
+        if (!sent && mode != GAME_MODE_TITLE && CoopLogEventSeen(event)) {
+            sent = true;
+            std::fprintf(stderr, "netplay: test: Quit Game on its lines (DC_NETPLAY_TEST_QUIT_ON)\n");
+            coop::FullMenuQuitSent();
+        }
+    }
     // coop-testspeed2 (Jep, 2026-10-30): DC_HEADLESS_PACED=alone (headless tests): the game's own pace while this copy plays
     // without its partner (a catch-up join needs the host in real time), as fast as the pair can once both play in lockstep
     // (the lockstep keeps them together). 15 of a day's 22 hours of game rows were paced from start to end.
@@ -12394,6 +14603,14 @@ void NetplayTick() {
             std::fprintf(stderr, "netplay: test: headless clock %s at tick %lld\n", unbounded ? "unbounded (partner linked)" : "paced (alone)",
                          (long long) g_link.tick);
             paced_now = unbounded;
+        }
+        // coop-owed1112: the twin's own line, once, when the partner is linked and the clock stays paced (its stop: line, so
+        // the twin ends on its mutation instead of running a real-time row to the twin deadline).
+        static bool kept_said = false;
+
+        if (!kept_said && unbounded == 0 && NetplayPartnerLinked()) {
+            kept_said = true;
+            std::fprintf(stderr, "netplay: test: headless clock kept paced with the partner linked (paced_always) at tick %lld\n", (long long) g_link.tick);
         }
     }
     // Test hook (DC_NETPLAY_TEST_ALONE_LOG=1, net-quit): after the link went down, a line each 600 ticks this copy plays
@@ -12590,6 +14807,7 @@ void NetplayTick() {
     // state: a joiner knows its join is a catch-up only from the first chunk, and took the ticks before it as the merge held,
     // then "did not hold" as the catch-up began and went apart again mid-catch-up (w-floor-pick, 2026-10-24).
     CoopWorldsTick(g_link.up && !g_catch.active && !g_link.awaiting_sync, g_link.tick);
+    NetplayTestSwapInCatchup(g_link.tick); // coop-mergeload (a test's: DC_COOP_TEST_P1_SWAP_IN_CATCHUP)
 
     if (!g_link.up && g_link.listening) {
         TickPart("Listen");
@@ -12701,8 +14919,20 @@ void NetplayTick() {
     if (frame > g_link.newest) {
         const bool    scripted = ScriptReads();
         InputPadState input = scripted ? ScriptInputFor(frame, tick) : OwnInput(g_link.player);
+        // coop-wave3: the steer row, read once for every frame this read fills (the camera as this copy's player sees it now)
+        const std::int32_t steer = OwnSteer(g_game_pad_player == g_link.player ? 0 : 1);
 
         input.connected = true;
+        input.steer = steer;
+        // coop-wave3 test hook (DC_COOP_TEST_CAMERA_TURN=1): the tick this copy's right stick first leaves the centre, as read
+        static const bool turn_trace = TestEnvOn("DC_COOP_TEST_CAMERA_TURN");
+        static bool       turn_said = false;
+
+        if (turn_trace && !turn_said && input.right_x != kInputAxisCentre) {
+            turn_said = true;
+            std::fprintf(stderr, "coop-wave3: test: player %d's right stick read at link tick %lld (for tick %lld, input delay %d)\n",
+                         g_link.player, (long long) tick, (long long) frame, (int) g_link.delay);
+        }
 
         if (Latency() && (input.buttons & ~g_link.last_input.buttons) != 0) {
             g_link.presses[frame % 16] = Link::Press{tick, frame, std::chrono::steady_clock::now()};
@@ -12713,6 +14943,7 @@ void NetplayTick() {
 
             slot.frame = at;
             slot.pad = at == frame ? input : scripted ? ScriptInputFor(at, tick) : g_link.last_input;
+            slot.pad.steer = steer; // coop-wave3
             slot.command = TakeQueuedCommand(); // coop-localmenu: one a frame, in the order queued
             ScriptPressTrace(slot.pad, at, tick);
         }
@@ -12787,6 +15018,8 @@ void NetplayTick() {
         NetSocketBlackout(blackout_ms);
     }
 
+    FreezeTest(tick);
+
     {
         CostScope sent{g_costs.send_ms}; // coop-ws5left
         CatchSend(); // the last blob, until the joiner holds it
@@ -12803,6 +15036,7 @@ void NetplayTick() {
         auto resent = start;
         auto pumped = start;
         int  limit = tick == g_link.first_delay ? FirstWaitMs() : kWaitMs;
+        LinkCheck check; // coop-falsedrop: this wait's check-in on the other's silence
 
         for (;;) {
             Receive();
@@ -12836,9 +15070,19 @@ void NetplayTick() {
             auto now = std::chrono::steady_clock::now();
             auto ms = [&](auto since) { return std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count(); };
 
+            // coop-falsedrop: a link the other copy has spoken in is never given up on silence alone (Jep's rule, 2026-11-17): a
+            // check-in first (LinkedCheckIn), any word of its link ending it. One it never spoke in (coop-linkrace's lone link)
+            // and a wait past kLoadWaitMs in all (its keepalive's Busy all along, its ticks never) give up as before.
+            // DC_NETPLAY_MUTATE=linked_drop_on_silence (twin): gone once nothing but a Busy came for limit, as before.
+            const bool old_rule = !g_link.link_heard || NetplayMutated("linked_drop_on_silence");
+            const auto word = std::max({start, g_link.peer_busy_at, old_rule ? start : g_link.word_at});
+            const int  after = tick == g_link.first_delay ? limit : kCheckInAfterMs;
+            const bool too_long = ms(start) > std::max(limit, kLoadWaitMs);
+            const bool gone = old_rule ? ms(word) > limit || too_long : LinkedCheckIn(check, tick, ms(word), after) || (too_long && ms(word) <= after);
+
             // Gone once nothing came for limit, a Busy (the other copy loading) counting as word from it, up
             // to kLoadWaitMs in all.
-            if (ms(std::max(start, g_link.peer_busy_at)) > limit || ms(start) > std::max(limit, kLoadWaitMs)) {
+            if (gone) {
                 // coop-linkrace (natsplitflake's open bug 2): nothing of the other copy's came under its session all this
                 // link: it never linked with this one (it was not ready, or it linked a moment after this copy gave up).
                 // Its session is no last link's then, so its Hellos and its own link, which still carry it, start the next
@@ -12893,6 +15137,10 @@ void NetplayTick() {
         }
 
         double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (check.probes > 0 || check.rounds > 0) { // coop-falsedrop
+            std::fprintf(stderr, "netplay: player %d answered the check-in (its tick %lld came) after %d probes, %.0f ms: still here\n", 3 - g_link.player,
+                         (long long) tick, check.rounds * kCheckProbes + check.probes, waited);
+        }
 
         g_costs.wait_ms += waited; // coop-ws5left
         if (g_close_watch.left > 0) { // coop-reds2
@@ -12928,9 +15176,11 @@ void NetplayTick() {
     g_link.synced[g_link.player - 1] = ours;
     g_link.synced[2 - g_link.player] = theirs;
     Route();
+    coop::CameraScrambleTick(tick); // coop-wave3 test hook
     // coop-localmenu: the tick's commands, player 1's first, on every copy alike.
     ApplyCommand(1, g_link.player == 1 ? our_command : their_command, tick);
     ApplyCommand(2, g_link.player == 2 ? our_command : their_command, tick);
+    NetplayOwnOptionsTick(tick); // coop-settings
     Diagnose();
     Trace(g_link.synced[0], g_link.synced[1], tick % kChecksumTicks == 0 ? g_link.last_checksum : 0);
     g_link.tick++;
@@ -12978,6 +15228,9 @@ void NetplayLoadPull() {
 bool NetplayPad(int port, InputPadState &out) {
     if (port < 0 || port > 1) {
         return false;
+    }
+    if (port == 0) {
+        PadsMergeTick(); // coop-padpick
     }
 
     // coop-pt1106-batch (Jep's 2026-11-06 playtest, item 6: "Multiscreen now starts at the main menu instead of in game, so P2
@@ -13051,11 +15304,124 @@ int NetplayGamePadPlayer() {
     return g_link.up ? g_game_pad_player : NetplayHasPlayer() ? NetplayLocalPlayer() : 1;
 }
 
+// coop-settings: one of the per-player options (Element Quick Select, Swap Keeps Lock-On, QTE Always Win) as the step reads it: the
+// game pad's player's (whose pad DunMoveChara and a duel read) while linked together, every copy alike; this copy's own config alone.
+static bool PlayerOption(std::uint8_t bit) {
+    if (!g_link.up || CoopWorldsApart()) {
+        return (OwnOptionBits() & bit) != 0;
+    }
+    const int player = g_game_pad_player;
+
+    return player >= 1 && player <= coop::kMaxPlayers && (g_player_options[player - 1] & bit) != 0;
+}
+bool CoopQuickSelectOn() {
+    return PlayerOption(kOptQuickSelect);
+}
+bool CoopSwapKeepsLockOn() {
+    return PlayerOption(kOptKeepsLock);
+}
+bool CoopQteAlwaysWin() {
+    return PlayerOption(kOptQteWin);
+}
+// coop-p2controls: one player's own option, every copy alike while linked together (their row of the table), else this copy's
+// own config: what that player's own ring reads (coop_wheel.cpp), whoever holds the game's pad.
+// coop-seed324: the table while the link is up, apart too (a merge's lockstep ticks: the rings step there on every copy, and each
+// copy's own config is its own player's alone); DC_COOP_MUTATE=slotown (twin): this copy's own config there, as before.
+static bool PlayerOptionOf(int player, std::uint8_t bit) {
+    if (!g_link.up || (CoopWorldsApart() && coop::Mutated("slotown"))) {
+        return (OwnOptionBits() & bit) != 0;
+    }
+    return player >= 1 && player <= coop::kMaxPlayers && (g_player_options[player - 1] & bit) != 0;
+}
+bool CoopQuickSelectOnFor(int player) {
+    return PlayerOptionOf(player, kOptQuickSelect);
+}
+// coop-dpadwheel: game.chara_quick_select, the stepped player's (DunMoveChara's own ring) and one player's own (their co-op ring).
+bool CoopCharaQuickSelectOn() {
+    return PlayerOption(kOptCharaQuick);
+}
+bool CoopCharaQuickSelectOnFor(int player) {
+    return PlayerOptionOf(player, kOptCharaQuick);
+}
+bool CoopSwapKeepsLockOnFor(int player) {
+    return PlayerOptionOf(player, kOptKeepsLock);
+}
+// coop-wave2: the message speed of player's own talks: their row, every copy alike while linked together; this copy's own config else.
+// DC_NETPLAY_MUTATE=message_speed_shared (twin): player 1's for every talk, as when Message Speed was a shared key.
+bool CoopMessagesFastFor(int player) {
+    if (NetplayMutated("message_speed_shared") && g_link.up && !CoopWorldsApart()) {
+        player = 1;
+    }
+    return PlayerOptionOf(player, kOptFastMessages);
+}
+// coop-wave2: the message speed of the windows every player shares (retail's EdInitMesParam and the floor events' init read it): player
+// 1's row while linked together, every copy alike; own (this copy's own config) apart or alone.
+bool CoopSharedMessagesFast(bool own) {
+    if (!g_link.up || CoopWorldsApart()) {
+        return own;
+    }
+    return (g_player_options[0] & kOptFastMessages) != 0;
+}
+int CoopOptionPlayer() {
+    return g_link.up && !CoopWorldsApart() ? g_game_pad_player : NetplayHasPlayer() ? NetplayLocalPlayer() : 1;
+}
+
+// coop-wave3 part 2: the camera pad. A camera whose player plays on this copy turns by that player's controller as read now (the
+// right stick, R1, L1 and L2: the freshest read, the one the steer row goes out with), not by the agreed pad that comes the input
+// delay later: turning answers at once. Everything else is the agreed pad (the left stick the camera leans with, Circle's swing).
+// A port's pad the routing held (another's menu claim, a ring) or a menu of the player's own on this copy holds the camera still.
+// Another copy's player's camera here is never drawn and the step reads none (the steer row): it keeps the agreed pad (false).
+// DC_NETPLAY_MUTATE=camera_agreed_pad (twin): every camera turns by the agreed pad, as before.
+bool NetplayCameraPad(int port, InputPadState &out) {
+    if (!g_link.up || port < 0 || port > 1 || NetplayMutated("camera_agreed_pad")) {
+        return false;
+    }
+    const int player = port == 0 ? g_game_pad_player : 3 - g_game_pad_player;
+
+    if (player != g_link.player) {
+        return false;
+    }
+    constexpr std::uint16_t kCamera = kInputR1 | kInputL1 | kInputL2;
+    const InputPadState    &routed = g_link.routed[port];
+    const InputPadState    &agreed = g_link.synced[player - 1];
+    const bool held = routed.right_x != agreed.right_x || routed.right_y != agreed.right_y || (routed.buttons & kCamera) != (agreed.buttons & kCamera) ||
+                      coop::FullMenuOpenFor(player) || coop::ElementRingOpen(player) || coop::PlayerInMenu(player);
+
+    out = routed;
+    if (held) {
+        out.right_x = out.right_y = kInputAxisCentre;
+        out.buttons = (std::uint16_t) (out.buttons & ~kCamera);
+    } else {
+        out.right_x = g_link.last_input.right_x;
+        out.right_y = g_link.last_input.right_y;
+        out.buttons = (std::uint16_t) ((out.buttons & ~kCamera) | (g_link.last_input.buttons & kCamera));
+    }
+    return true;
+}
+
+// coop-wave3: the steer row of the pad the step reads on a port this tick (kInputNoSteer: none, the game reads its camera).
+std::int32_t NetplaySteer(int port) {
+    if (port < 0 || port > 1 || (!g_link.up && !g_solo.on)) {
+        return kInputNoSteer;
+    }
+    return g_link.routed[port].steer;
+}
+
 bool NetplayMenuPad(int player, InputPadState &out) {
     if (!g_link.up || player < 1 || player > 2) {
         return false;
     }
     out = g_catch.active && player == g_link.player ? OwnInput(player) : g_link.synced[player - 1];
+    return true;
+}
+
+// coop-menushut: netplay.hpp. Its controller as read now (OwnInput), not the recording's routed pad: a catch-up recording alone
+// (the leave checkpoint's) records the world's ticks, and under a held world's menu its routed pad is not this tick's.
+bool NetplayAloneMenuPad(int player, InputPadState &out) {
+    if (g_link.up || player < 1 || player != g_link.player) {
+        return false;
+    }
+    out = OwnInput(player);
     return true;
 }
 
@@ -13075,6 +15441,11 @@ std::int64_t NetplayTestPressClock() {
     return g_test_press_since;
 }
 
+// coop-resyncblack (tests): the press clock's epoch (a resync's or a catch-up's start, DC_COOP_DUNTEST_EACH_EPOCH)
+int NetplayTestEpoch() {
+    return g_test_epoch;
+}
+
 std::int64_t NetplayTestLockstepFrom() {
     return g_test_lockstep_from;
 }
@@ -13087,9 +15458,6 @@ void NetplayTestShot(const char *path) {
     g_test_shot = path;
 }
 
-int NetplayMenuOwner() {
-    return g_link.up ? g_link.menu_owner : 1;
-}
 
 int NetplayLocalPlayer() {
     // A host recording for a catch-up plays as linked player 1 does (independent cameras and the rest), so a joiner
@@ -13110,6 +15478,35 @@ bool NetplayPartnerLinked() {
     return g_link.up && !g_solo.on && !g_catch.active;
 }
 
+// coop-sendtarget: the profile name a player's lobby shows, by player number (the bag screen's send list): this copy's own
+// profile for its own player, the peer's as the join notice names it (the lobby's table, else its Hello's profile) for the peer's,
+// "" for none (unlinked, or a player the link does not carry). Draw only.
+std::string NetplayPlayerName(int player) {
+    if (player == (g_link.player != 0 ? (int) g_link.player : 1)) {
+        return coop::lobby::OwnName();
+    }
+    if (!g_link.peer_hello_got || (int) g_link.peer_hello.player != player) {
+        return std::string();
+    }
+    std::string name = coop::lobby::NameFor(g_link.peer_hello.player_id);
+
+    if (name.empty()) {
+        name.assign(g_link.peer_hello.profile, strnlen(g_link.peer_hello.profile, sizeof g_link.peer_hello.profile));
+    }
+    return name;
+}
+
+std::string NetplayShownName(int player) {
+    std::string name = NetplayMutated("names_by_number") ? std::string() : NetplayPlayerName(player);
+
+    // Apart (no Hello on hand), the name its last Hello carried.
+    if (name.empty() && player >= 1 && player <= coop::kMaxPlayers && !NetplayMutated("names_by_number")) {
+        name = g_known_names[player - 1];
+    }
+
+    return name.empty() ? "Player " + std::to_string(player) : name;
+}
+
 int NetplayLinkPlayer() {
     return g_link.player;
 }
@@ -13123,14 +15520,52 @@ bool NetplayStateLoadPending() {
     return StateFileLoadPending();
 }
 
+static bool g_resync_at_menu = false; // coop-resyncmenu (NetplayResyncAtMenu)
+// coop-rc2 (resyncmenu x w-world-next-floor): a merge at a dungeon's entrance always goes by the resync (Begin: the host's floor play
+// cannot be replayed), landing both at the floor menu they met at. resyncmenu split every player to their own menu there, apart in
+// one place, so they merged again, by the resync again, endlessly (w-world-next-floor-refuse: 200 links). The split is for a
+// resync that left a floor (a desync, Jep's B9), not for the merge's own: that one lands together, the floor menu shared, as before.
+// Set alike on both copies at the link's Begin; taken (and cleared) where the resync lands.
+static bool g_resync_entrance_merge = false;
+
+void NetplayResyncEntranceMerge(bool merge) {
+    g_resync_entrance_merge = merge;
+}
+
+bool NetplayResyncAtMenu() {
+    return g_resync_at_menu && g_link.up;
+}
+
+void NetplayResyncAtMenuTaken() {
+    g_resync_at_menu = false;
+    std::fprintf(stderr, "netplay: the resync's floor menu: every player their own (player %d)\n", g_link.player);
+}
+
+// coop-harnessfix: a debug start (--jump, tests only) takes a dungeon's resync straight back onto the host's floor
+// (DebugStartOnResync), never to the floor menu that takes the flag, so it stayed set through the whole floor: a fixture maker
+// whose opening link went by a resync (the copies' Hellos unlike under load) kept it, the pair that loaded its file did not
+// (x-fixture-fidelity-globals red: g_resync_at_menu), and its next floor menu would have split the players as a resync's.
+// DC_NETPLAY_MUTATE=resync_menu_kept (twin): left set, as before.
+void NetplayResyncLandedOnFloor() {
+    if (!g_resync_at_menu || NetplayMutated("resync_menu_kept")) {
+        return;
+    }
+    g_resync_at_menu = false;
+    std::fprintf(stderr, "netplay: the resync landed on a floor, not its menu: the menu split is not owed (player %d)\n", g_link.player);
+}
+
 void NetplayModeEnded() {
+    g_resync_at_menu = false; // coop-resyncmenu: only the mode a resync leaves into
     ZoneModeEnded(); // coop-stable1: the zone line, before NextMapNo is followed
     g_floor_started = false; // coop-snapshot: whatever floor this mode had is left behind
     g_floor_build_key = -1; // coop-localfix: and its build (NetplayFloorBuilt)
 
     if (g_link.state_due) {
         g_link.state_due = false;
+        coop::RingStateTake(true); // coop-ringguard
         TakeState(g_link.resync_state);
+        coop::RingStateTake(false);
+        coop::ArrivalWalkEndAtResync(); // coop-b9arrive: the resync left the floor (even the host's state set's walk)
         g_test_epoch++;
         g_test_epoch_resyncs = g_link.resyncs;
         std::fprintf(stderr, "netplay: took the host's state as the mode ended\n");
@@ -13143,6 +15578,12 @@ void NetplayModeEnded() {
             g_link.restart_floor = floor;
             std::fprintf(stderr, "catchup: the checkpoint is floor %d's start: this copy goes onto it from the entrance\n", floor + 1);
         }
+        // coop-resyncmenu: no floor to go on to: a dungeon's resync lands at its floor menu (every player their own there).
+        g_resync_at_menu = g_link.restart_floor < 0 && g_link.resync_target >= 200 && (!g_resync_entrance_merge || NetplayMutated("entrance_merge_split"));
+        if (g_resync_entrance_merge && g_resync_at_menu == false && g_link.restart_floor < 0 && g_link.resync_target >= 200) {
+            std::fprintf(stderr, "netplay: the resync was the merge at the dungeon's entrance: the floor menu stays shared\n");
+        }
+        g_resync_entrance_merge = false;
     } else if (CatchupArmed()) {
         Checkpoint();
     }
@@ -13214,6 +15655,17 @@ void NetplayFloorBuilding() {
         // from a run's log (x-key-door: the B1 of Jep's 2026-10-27 run, d6abbc68, with its Bone Key door).
         PortRandSetState((std::uint32_t) std::strtoul(forced, nullptr, 16));
         std::fprintf(stderr, "netplay: test: floor built from random state %s (DC_NETPLAY_TEST_FLOOR_RAND)\n", forced);
+    } else if (std::uint32_t agreed = 0; UserStatus != nullptr && CoopWorldsAgreedFloorRand(UserStatus->cur_floor, &agreed)) {
+        // coop-floorrand (found by coop-rc3misc, 2026-11-18): apart, onto a floor whose build the other copy has not been
+        // heard making. Each copy's own random state parted from the other's at the split, so when both took the same floor
+        // within a presence's way across (a resync that landed both at the floor menu, each picking within half a second)
+        // each built its own version of it: hers showed his opening scene's camera over another layout until the merge put
+        // his in. A copy that has not heard the other's build now builds from a state both copies compute alike (the link's
+        // word, the dungeon, the floor and how many times it was built apart), so both copies' builds of a floor are one
+        // floor whichever comes first. DC_WORLDS_MUTATE=own_floor_race (twin): its own roll, as before.
+        std::fprintf(stderr, "worlds: floor %d built from the agreed random state %08x (this copy's was %08x)\n", (int) UserStatus->cur_floor + 1,
+                     agreed, PortRandState());
+        PortRandSetState(agreed);
     }
 
     g_floor_build_rand = PortRandState();
@@ -13229,6 +15681,11 @@ void NetplayFloorBuilding() {
 
 std::uint32_t NetplayFloorBuildRand() {
     return g_floor_build_rand;
+}
+
+bool NetplayLinkFloorSeed(std::uint32_t *seed) {
+    *seed = g_link_floor_seed;
+    return g_link_floor_seed_set;
 }
 
 int NetplayFloorBuilds() {
@@ -13449,8 +15906,15 @@ bool ArrivalHoldNow() {
     if (NetplayMutated("arrival_shown")) {
         return false;
     }
+    // coop-p2boot: a window that left its title by the host's checkpoint before the link: black there, its own place unshown,
+    // till the link has landed the host's state over it and the lockstep is on (or 20 s: a link that never came shows it).
+    if (PreloadBlack()) {
+        return true;
+    }
     // Taking her state for her merge, until the lockstep (EnterLockstep gives the source back to the host).
-    if (g_link.up && g_link.stayer_merge && g_link.source == 2 && TakesState()) { // (not after: the source is the host again, she would "take")
+    // (coop-b4arrive: not over his own arrival as it plays, a pick join onto her floor, x-floor-join -Case reverse -Seamless: it
+    // shows live as hers does, OwnArrivalPhase; held here it went black from its 8th tick to the lockstep, its walk going on from 24.)
+    if (g_link.up && g_link.stayer_merge && g_link.source == 2 && TakesState() && OwnArrivalPhase() == 0) { // (not after: the source is the host again, she would "take")
         return true;
     }
     // coop-arrivalonce (Jep, 2026-11-01, on "it played the cinematic dungeon floor entrance then it played it a second time ... xiao
@@ -13458,7 +15922,11 @@ bool ArrivalHoldNow() {
     // entrance (the stairs down); the arrival walk replayed after the catch-up (coop::ArrivalWalkStart, on both copies) is for the
     // other screen, so the arriver's stays black through it. (coop-joinlate: no walk again since, Jep "i wanted it not to happen";
     // this holds only under the twin arrival_walk_twice, so its walk is not shown either; arrival_walk_shown's twin row is gone.)
-    if (g_link.up && coop::ArrivalWalkPlayer() != 0 && coop::ArrivalWalkPlayer() == NetplayLocalPlayer()) {
+    // (coop-entrwin: not the walker's own entrance in a floor's entrance window: its screen shows it, from its start.)
+    // (coop-b4arrive: nor an arrival the merge landed over on the arriver's own copy: its screen goes on with it from where it was.
+    // DC_NETPLAY_MUTATE=cut_arrival_black (twin): held black as any other.)
+    if (g_link.up && coop::ArrivalWalkPlayer() != 0 && coop::ArrivalWalkPlayer() == NetplayLocalPlayer() && !coop::EntranceWalkOn() &&
+        !(coop::ArrivalWalkCut() && !NetplayMutated("cut_arrival_black"))) {
         return true;
     }
     // coop-dungeonjoin (Jep, 2026-10-27: a floor join's catch-up hidden inside the arriving copy's floor loading): the copy
@@ -13473,7 +15941,11 @@ bool ArrivalHoldNow() {
     // it, black from there to the lockstep. coop-arrivalfull (Jep, 2026-10-27): no more: its arrival plays after the
     // catch-up, from its start, on both copies (coop::ArrivalWalkStart), so the stairs down and then black hide the whole
     // catch-up. DC_NETPLAY_MUTATE=arrival_skipped (twin): shown, as before.
-    const bool own_arrival = CoopWorldsPickJoining() && !(g_link.up && g_snap.applied) && NetplayMutated("arrival_skipped");
+    // coop-b4arrive (Jep 11-13, on "P2 joined P1 on B4 and the floor entrance animation didn't play": "start playing the animation,
+    // and sync while the animation is playing"): its screen shows its own arrival, the game's floor entrance, from the floor's first
+    // frame until the state set lands, and its last frame from there to the lockstep (NetplayHoldsJoinFrame), where both copies go
+    // on with it from that frame (OwnArrivalPhase). DC_NETPLAY_MUTATE=cut_arrival_black (twin): black from the first frame, as before.
+    const bool own_arrival = (CoopWorldsPickJoining() && !(g_link.up && g_snap.applied) && NetplayMutated("arrival_skipped")) || OwnArrivalPhase() != 0;
 
     if (floor_on && g_link.up && g_link.floor_arrival && !own_arrival) {
         return true;
@@ -13481,18 +15953,30 @@ bool ArrivalHoldNow() {
     // coop-cutscenejoin: its floor's start held while the other plays that floor's opening scene: the black after its
     // arrival (the floor's entrance animation) goes on until the scene is over and it has joined. coop-cutsceneview: but for
     // the other's view of that scene, while it comes in (CoopWorldsSceneView): this copy shows the scene, from its camera.
-    if (floor_on && CoopWorldsFloorStartHeld() && !CoopWorldsSceneView(nullptr, nullptr, nullptr)) {
+    // coop-camflash2: and never for a floor frame drawn from another camera (CoopViewDrewScene 0): his first view could land
+    // between her draw and this ask, and her own arrival's frame came out of the black. (A tick that drew no floor, -1, goes by
+    // the view as before.) DC_NETPLAY_MUTATE=scene_hold_now (proof): the view as fresh now, whatever the frame, as before.
+    if (floor_on && CoopWorldsFloorStartHeld() &&
+        !(CoopWorldsSceneView(nullptr, nullptr, nullptr) && (CoopViewDrewScene() != 0 || NetplayMutated("scene_hold_now")))) {
         return true;
     }
     // coop-houseexit: and her copy taking his where he stayed (she out of the mayor's house to him outside), until the
     // lockstep: her house's last frame drawn again was shown through her catch-up (l-local-play -HerHouseOut).
     // (A floor arrival is held here too; floor_shown_early leaves it out as well, or its twin, x-floor-join -Seamless, passed.)
-    if (g_link.up && g_link.arriving && TakesState() && (floor_on || !g_link.floor_arrival)) {
+    if (g_link.up && g_link.arriving && TakesState() && (floor_on || !g_link.floor_arrival) && !own_arrival) {
         return true;
     }
     // Arrived in her town, the link not up yet: until it comes (at most 8 s, a merge that never came shows the town).
     const bool arrived = CoopWorldsArrivedWhereStayer(8000); // (asked each frame: it notes where this copy is drawing)
-    const bool hold = !g_link.up && (arrived || (floor_on && floor_arriving && !own_arrival)); // (her Hello may not have come yet: her presence says she stayed there)
+    // coop-b4arrive (Jep 11-14, the join after the lead's entrance window closed: "drop the window's black: she plays live the whole
+    // time"): a walker waiting in the lead's entrance window (CoopWorldsWalkInRole 2) for the merge's link shows its own arrival live.
+    // The window may close before the link (the lead's walk-in ends first, x-entrwin -Case closed): the join is then one over its own
+    // arrival (OwnArrivalPhase), which goes on from the tick its screen reached; black in that wait (3 s of it there), none of it was
+    // shown and it played from its start after the sync. No copy can tell before the link which way the window ends, so the wait
+    // shows live either way: in a window join the black starts at the link (some 5 ticks later than before, x-entrwin -Case late).
+    // DC_NETPLAY_MUTATE=window_wait_black (twin): black from the floor's first frame, as before.
+    const bool window_wait = CoopWorldsWalkInRole() == 2 && !NetplayMutated("window_wait_black");
+    const bool hold = !g_link.up && (arrived || (floor_on && floor_arriving && !own_arrival && !window_wait)); // (her Hello may not have come yet: her presence says she stayed there)
 
     if (static bool said = false; CoopDebug() && hold != said) {
         said = hold;
@@ -13509,6 +15993,59 @@ bool ArrivalHoldNow() {
 // apply, the replay): the time the catch-up adds to the arriving copy's transition.
 // coop-pt1111h: the arrival's black as the last presented frame had it (NetplayArrivalHold), read only.
 static bool g_arrival_black = false;
+
+// coop-b4arrive: what this copy's own screen showed of its own arrival in a join over it (OwnArrivalPhase), by the record's ticks:
+// live before the state set (ArrivalOwnShown), its frame held to the lockstep, then the walk both copies play (ArrivalWalkRecordTick);
+// said once at the walk's end (its rows read it: from the first tick, black never, the walk going on where the live one stopped).
+// Counts are of the hold's asks (a drawn copy asks it more than once a tick).
+static void OwnArrivalTrace(bool hold) {
+    struct Trace {
+        bool on = false;
+        int  first = -1, live = -1, live_black = 0, held = 0, walk_first = -1, walk_last = -1, walk_black = 0;
+    };
+    static Trace s;
+    const int    phase = OwnArrivalPhase();
+    const bool   walking = coop::ArrivalWalkCut() && coop::ArrivalWalkPlayer() == NetplayLocalPlayer();
+
+    const int    rec = coop::ArrivalOwnShown();
+
+    // (any own arrival on a floor, merged over or not: its black before a join's phase marks it unshown, OwnArrivalPhase)
+    if (rec > 0 && phase != 2 && !walking) {
+        if (!s.on) {
+            s = Trace{};
+            s.on = true;
+            g_own_black_key = -1000; // (a new arrival: a black of an earlier one on this floor is not its)
+        }
+        if (hold) {
+            s.live_black++;
+            // (any black of it before a join's phase, not only from its first tick: x-entrwin -Case closed showed record tick 1,
+            // then 168 ticks black in the window's wait, and went on from 178, its start never seen)
+            if (phase == 0) {
+                g_own_black_key = OwnFloorKey();
+            }
+        } else {
+            s.first = s.first < 0 ? rec : s.first;
+            s.live = std::max(s.live, rec);
+        }
+    } else if (phase == 2 && s.on) {
+        s.held++;
+        s.live_black += hold ? 1 : 0;
+    } else if (walking && s.on) {
+        const int at = coop::ArrivalWalkRecordTick();
+
+        if (hold) {
+            s.walk_black++;
+        } else {
+            s.walk_first = s.walk_first < 0 ? at : s.walk_first;
+            s.walk_last = std::max(s.walk_last, at);
+        }
+    } else if (s.on && (!g_link.up || !g_link.floor_arrival)) {
+        std::fprintf(stderr, "netplay: own arrival on this copy's screen: record ticks %d to %d live before the state set (%d black), its frame held %d, "
+                             "then the walk's %d to %d (%d black)\n",
+                     s.first, s.live, s.live_black, s.held, s.walk_first, s.walk_last, s.walk_black);
+        s = Trace{};
+    }
+}
 
 bool NetplayArrivalHold() {
     static std::int64_t began = -1, linked = -1;
@@ -13557,6 +16094,7 @@ bool NetplayArrivalHold() {
         }
         began = linked = -1;
     }
+    OwnArrivalTrace(hold); // coop-b4arrive
     g_arrival_black = hold; // coop-pt1111h
     return hold;
 }
@@ -13593,6 +16131,33 @@ std::string NetplayTickPartsSay() {
     std::snprintf(piece, sizeof piece, "%slog writes %.0f ms in %lld lines", out.empty() ? "" : "; ", log_ms, lines);
     out += piece;
     return out;
+}
+
+// coop-apartfps (Jep's rc1 playtest: 20 ms of "netplay wait" a tick, alone in the mayor's house): the netplay tick's parts over
+// a tick-stats window, per tick, the dearest first (those of 0.05 ms a tick or more), for the line after tick-stats' own.
+void NetplayTickPart(const char *name) {
+    TickPart(name);
+}
+
+std::string NetplayTickPartsWindow(long long ticks) {
+    auto parts = g_tick_parts.window;
+
+    g_tick_parts.window.clear();
+    std::sort(parts.begin(), parts.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    std::string out;
+    char        piece[128];
+
+    for (const auto &part : parts) {
+        const double each = ticks > 0 ? part.second / (double) ticks : 0.0;
+
+        if (each < 0.05) {
+            break;
+        }
+        std::snprintf(piece, sizeof piece, "%s%s %.2f", out.empty() ? "" : ", ", part.first, each);
+        out += piece;
+    }
+    return out.empty() ? "none of 0.05 ms or more" : out;
 }
 
 bool NetplayStayerMerge() {
@@ -13721,6 +16286,10 @@ long long NetplayResyncAgeMs() {
     return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_link.resynced_clock).count();
 }
 
+bool NetplayJoinLoaded() {
+    return g_joinload.loaded;
+}
+
 bool NetplayTakeRestart(int &next_map) {
     if (g_link.restart_map < 0) {
         return false;
@@ -13728,12 +16297,22 @@ bool NetplayTakeRestart(int &next_map) {
 
     next_map = (int) g_link.restart_map;
     g_link.restart_map = -1;
+    // coop-joinload: a joiner's load in, as retail's title Load does (GameApplyLoopResult's Load): no map before it (OldMapNo -1),
+    // the town's own start event (StartEventNo -1: event 128), the town's menu as a load opens it. The joiner is at its title.
+    if (g_joinload.jump_due) {
+        g_joinload.jump_due = false;
+        MapNo = -1;
+        StartEventNo = -1;
+        main_select_menu_no = 1;
+        std::snprintf(main_select_param, sizeof main_select_param, "%s", "e01");
+        std::fprintf(stderr, "joinload: town map %d loads as a save load (its start event 128)\n", next_map);
+    }
     // coop-houseblack (Jep's 2026-11-04 pack 8 playtest): a restart from a dungeon to a town (coop-gateflow's Circle at the floor
     // menu, mid the gate's script) left gameTask at GAME_TASK_SCRIPT_RUN in the town for good, and every town check that asks
     // for play (the merge's quiet frame, its landing, the place checkpoint) refused: black for good at the next merge. The
     // dungeon's task is play again as the dungeon is left; its next floor sets its own. DC_NETPLAY_MUTATE=town_task_kept
     // (twin, x-gate-flow-back-p1~town_task_kept): it stays, as before.
-    if (mode == GAME_MODE_DUNGEON && next_map >= 0 && next_map < 200 && gameTask != GAME_TASK_PLAY && !NetplayMutated("town_task_kept")) {
+    if (mode == GAME_MODE_DUNGEON && next_map >= 0 && next_map < 200 && !CoopPlainPlay() && !NetplayMutated("town_task_kept")) {
         std::fprintf(stderr, "netplay: back to town map %d from a dungeon: its task %#x is play again\n", next_map, (unsigned) gameTask);
         gameTask = GAME_TASK_PLAY;
     }
@@ -14403,7 +16982,9 @@ void NetplayDrawTitleJoin() {
     char under[160] = "";
     const char *here = NetSocketLocalAddress();
 
-    if (g_link.started) {
+    if (g_link.started && NetplayHandedTitleHeld()) {
+        std::snprintf(line, sizeof line, "Joining player 1..."); // coop-p2boot: no address (her window's 127.0.0.1)
+    } else if (g_link.started) {
         std::snprintf(line, sizeof line, "%s", g_link.status);
         if (g_nat == 2) {
             const std::string own = NatOwnCode();
@@ -14431,34 +17012,20 @@ void NetplayDrawTitleJoin() {
                                                 : "Up/Down: digit  Right: add  Left: delete  Cross: join  Circle: back");
         }
     } else if (Settings().one_client) {
-        // The launcher's lookup of this PC's internet address (save\wan-address.txt), read once.
-        static std::string wan_file;
-        static bool        read_wan = false;
-
-        if (!read_wan) {
-            read_wan = true;
-            std::ifstream in(PathsSaveRoot() / "wan-address.txt");
-            std::getline(in, wan_file);
-            while (!wan_file.empty() && (wan_file.back() == '\r' || wan_file.back() == ' ')) {
-                wan_file.pop_back();
-            }
+        // coop-titlehint (2026-11-12): no hint text under the title's copyright lines any more (the "Online: MULTIPLAYER to host
+        // or join" line and the Host-by-IP / Steam / Local hosting lines said nothing the menu rows and the lobby do not).
+        // Kept: what the player needs there to act or to know why a join failed: the NAT code once Host > NAT is picked, the
+        // Steam-is-down warning, and the note for a given-up join (coop-natsplit). Plain START / an idle menu draws nothing.
+        line[0] = '\0';
+        // DC_NETPLAY_MUTATE=title_hint (a test's twin): the idle hint back, as before.
+        if (TestEnvIs("DC_NETPLAY_MUTATE", "title_hint")) {
+            std::snprintf(line, sizeof line, "Online: MULTIPLAYER to host or join");
+            std::snprintf(under, sizeof under, "SELECT joins by address (this PC: %s)", here[0] != '\0' ? here : "no network");
         }
-
-        // coop-consent: the internet address on these lines only as the lobby's R1 left it (game.lobby_show_ip); the twin
-        // DC_CONSENT_MUTATE=ip_shown shows it as before.
-        const bool wan_shown = dc::platform::ConfigGet().lobby_show_ip || TestEnvIs("DC_CONSENT_MUTATE", "ip_shown");
-
-        // (plain START is single player: online is the Multi-player row's; SELECT still opens the address entry)
-        std::snprintf(line, sizeof line, "Online: MULTIPLAYER to host or join");
-        // coop-natsplit: why the last join was given up, for a while.
         if (!g_title_note.empty() && std::chrono::steady_clock::now() < g_title_note_until) {
-            std::snprintf(under, sizeof under, "%s", g_title_note.c_str());
+            std::snprintf(line, sizeof line, "%s", g_title_note.c_str());
         }
-        // (coop-natonly: Host > Steam is NAT > Steam's host now, g_host_via 5: a Steam that is not up is said for it too.)
-        if (g_host_via == 5 && NetSteamSelf() != 0) {
-            std::snprintf(line, sizeof line, "NAT by Steam: start or load a game");
-            std::snprintf(under, sizeof under, "Steam friends join from Multi-player > Join > Steam; play goes direct");
-        } else if (g_host_via == 4) {
+        if (g_host_via == 4) {
             std::snprintf(line, sizeof line, "NAT: your code %s", NatOwnCode().c_str());
             std::snprintf(under, sizeof under, "Friend's code taken (%s): start or load a game", g_nat_friend.c_str());
         } else if ((g_host_via == 2 || g_host_via == 5) && NetSteamSelf() == 0) {
@@ -14474,44 +17041,30 @@ void NetplayDrawTitleJoin() {
             std::snprintf(line, sizeof line, "Steam is not available: %s", std::strncmp(why, "Steam: ", 7) == 0 ? why + 7 : why);
             std::snprintf(under, sizeof under, "Start or load still hosts by IP (this PC: %s); for Steam, start Steam and the game again",
                           here[0] != '\0' ? here : "no network");
-        } else if (g_host_via == 2) {
-            std::snprintf(line, sizeof line, "Host on Steam: start or load a game");
-            std::snprintf(under, sizeof under, "Steam friends then join from Multi-player > Join > Steam");
-        } else if (g_host_via == 3) {
-            std::snprintf(line, sizeof line, "Local: start or load a game");
-            std::snprintf(under, sizeof under, "Player 2's copy then opens on the right, joins, and asks for its controller");
-        } else if (g_host_via == 1 && !wan_file.empty() && !wan_shown) {
-            // coop-consent (Jep, 2026-11-02): the internet address only once its player shows it (R1 in the lobby).
-            std::snprintf(line, sizeof line, "Host by IP: start or load a game");
-            std::snprintf(under, sizeof under, "Friends join at your internet IP (R1 in the lobby shows it), LAN %s", here[0] != '\0' ? here : "none");
-        } else if (g_host_via == 1 && !wan_file.empty()) {
-            std::snprintf(line, sizeof line, "Host by IP: start or load a game");
-            std::snprintf(under, sizeof under, "Friends join at internet %s (%s), LAN %s", wan_file.c_str(),
-                          UpnpOn() ? "the game opens the port by UPnP, or forward it" : "port forwarded", here[0] != '\0' ? here : "none");
-        } else if (g_host_via == 1) {
-            std::snprintf(line, sizeof line, "Host by IP: start or load a game");
-            std::snprintf(under, sizeof under, "Friends join at this PC: %s", here[0] != '\0' ? here : "no network");
-        } else if (!wan_file.empty() && wan_shown) {
-            std::snprintf(under, sizeof under, "SELECT joins by address (internet %s, LAN %s)", wan_file.c_str(), here[0] != '\0' ? here : "none");
-        } else {
-            std::snprintf(under, sizeof under, "SELECT joins by address (this PC: %s)", here[0] != '\0' ? here : "no network");
         }
     } else {
         std::snprintf(line, sizeof line, "Online: press SELECT to join player 1 at %s", Settings().peer.c_str());
+    }
+
+    // What the title draws under its copyright lines, as lines (0 on an idle menu, 2026-11-12), logged on each change.
+    static int lines_said = -1;
+    const int  lines = (line[0] != '\0' ? 1 : 0) + (under[0] != '\0' ? 1 : 0);
+
+    if (lines != lines_said) {
+        lines_said = lines;
+        std::fprintf(stderr, "netplay: title notice lines: %d\n", lines);
+    }
+    if (lines == 0) {
+        return;
     }
 
     dc::text::caption::LineStyle style;
 
     style.status_font = true;
     style.edge_width = 1.5f;
-    // A dark band under the two lines only while they sit over the title's copyright line (Jep, 2026-10-21: hard to
-    // read there); under the trademark lines they need none, and the band showed as a black box (Jep, 2026-10-24).
-    if (NetplayTitleNoticeBand()) {
-        static const spRGBA kBand = {0x00, 0x00, 0x00, 0x68};
-
-        set2DSpriteC4(Vif1Packet, CRect_i_(40, (int) NetplayTitleNoticeY(0) - 10, 560, 36), (spRGBA *) &kBand, (spRGBA *) &kBand, (spRGBA *) &kBand, (spRGBA *) &kBand);
+    if (line[0] != '\0') {
+        dc::text::caption::DrawLine(line, 320.0f, NetplayTitleNoticeY(0), 10.0f, 1.0f, 560.0f, style, 1.0f, 1.0f, nullptr); // centred
     }
-    dc::text::caption::DrawLine(line, 320.0f, NetplayTitleNoticeY(0), 10.0f, 1.0f, 560.0f, style, 1.0f, 1.0f, nullptr); // centred
 
     if (under[0] != '\0') {
         dc::text::caption::DrawLine(under, 320.0f, NetplayTitleNoticeY(1), 8.0f, 1.0f, 560.0f, style, 1.0f, 1.0f, nullptr);
@@ -14540,20 +17093,16 @@ float NetplayTitleNoticeY(int which) {
     return which == 0 ? 446.0f : 460.0f;
 }
 
-// The online launchers' settings, for this session only (config.json keeps its own): co-op, own bags, catch-up, the
-// keyboard (MenuOnline).
+// The online launchers' settings, for this session only (config.json keeps its own): co-op and catch-up (MenuOnline).
+// (coopoptions: own bags and the keyboard are always on now.)
 void OnlineSession(dc::platform::Config &config) {
     config.coop = true;
-    config.coop_own_bags = true;
     config.netplay_catchup = true;
-    config.netplay_keyboard = true;
 }
 
 void OnlineSessionRestore(dc::platform::Config &config, const dc::platform::Config &saved) {
     config.coop = saved.coop;
-    config.coop_own_bags = saved.coop_own_bags;
     config.netplay_catchup = saved.netplay_catchup;
-    config.netplay_keyboard = saved.netplay_keyboard;
 }
 
 // coop-pt1111p: this copy's run-only settings in one session (ConfigSetSession keeps one): the title's online ones (MenuOnline) and,
@@ -14561,29 +17110,172 @@ void OnlineSessionRestore(dc::platform::Config &config, const dc::platform::Conf
 namespace {
 bool g_adopt_session = false;
 
+// coop-soakjoin (soak seed 1545, a join's DESYNC at tick 1980): the shared settings (the adopted keys, which the checksum reads
+// as NetplaySettingsHash) change on every copy on one tick. Each player's menus are local (Jep 11-07), and a menu's Options page
+// changed them with ConfigChange on its own copy alone: the host's Clock turned off there and nowhere else, the next compare
+// was out of sync and the resync (a load for both) carried his settings over. Linked, a change of one now goes out as a command
+// (kCmdSetting) and runs on no copy before that command's tick: the running settings keep the ones every copy shares
+// (g_shared). Player 1's change is sent; player 2's is not (whose changes count for the pair is Jep's call, asked 11-17): it
+// snaps back, as the resync made it, without the resync. DC_NETPLAY_MUTATE=settings_unshared (the fix-off): changed at once
+// on the changer's copy alone, as before.
+bool                 g_shared_session = false; // from the first link of a session to its end: the shared keys are kept
+dc::platform::Config g_shared{};               // the shared keys as every copy runs them (the rest of it unused)
+enum SharedMode { kSharedChange, kSharedTake, kSharedKeep };
+SharedMode           g_shared_mode = kSharedChange; // take: a link's adopt or a command sets them; keep: the session's own set
+bool                 g_shared_keep_file = false;    // another player's change: this copy's config.json keeps its own
+
 void RunSession(dc::platform::Config &config) {
     if (g_menu_online) {
         OnlineSession(config);
     }
     // (the adopted keys need no apply: the running settings hold the host's from the adopt's change on, and a later change of
     // them is this run's too)
+    if (!g_shared_session) {
+        return;
+    }
+    if (g_shared_mode == kSharedKeep) { // (the session set again: from config.json's values, which are no change of anyone's)
+        NetplayHelloAdoptedKeys(config, g_shared);
+        return;
+    }
+    if (g_shared_mode == kSharedTake || !g_link.up || NetplayMutated("settings_unshared")) {
+        NetplayHelloAdoptedKeys(g_shared, config);
+        return;
+    }
+    for (int key = 0; key < NetplaySharedKeyCount(); key++) {
+        const std::uint32_t want = NetplaySharedKeyGet(config, key);
+
+        if (want == NetplaySharedKeyGet(g_shared, key)) {
+            continue;
+        }
+        if (g_link.player == 1) {
+            NetCommand command;
+
+            command.kind = kCmdSetting;
+            command.a = (std::uint8_t) key;
+            command.c = want;
+            NetplayQueueCommand(command);
+            std::fprintf(stderr, "netplay: settings: this copy's %s changed to %u at link tick %lld: sent, every copy runs by it from its tick\n",
+                         NetplaySharedKeyName(key), (unsigned) want, (long long) g_link.tick);
+        } else {
+            std::fprintf(stderr, "netplay: settings: this copy's %s changed to %u at link tick %lld: player 1's settings are the pair's, kept %u\n",
+                         NetplaySharedKeyName(key), (unsigned) want, (long long) g_link.tick, (unsigned) NetplaySharedKeyGet(g_shared, key));
+        }
+    }
+    NetplayHelloAdoptedKeys(config, g_shared);
 }
 
 void RunSessionRestore(dc::platform::Config &config, const dc::platform::Config &saved) {
     if (g_menu_online) {
         OnlineSessionRestore(config, saved);
     }
-    if (g_adopt_session) {
+    if (g_adopt_session || (g_shared_session && g_shared_keep_file)) {
         NetplayHelloAdoptedKeys(config, saved);
     }
 }
 
 void RunSessionSet() {
-    const bool on = g_menu_online || g_adopt_session;
+    const bool       on = g_menu_online || g_adopt_session || g_shared_session;
+    const SharedMode was = std::exchange(g_shared_mode, kSharedKeep);
 
     ConfigSetSession(on ? RunSession : nullptr, on ? RunSessionRestore : nullptr);
+    g_shared_mode = was;
+}
+
+// kCmdSetting on every copy, on its tick: the key's value runs from here (and, on the copy that changed it, is in its config.json).
+void ApplySetting(int player, const NetCommand &command, std::int64_t tick) {
+    if (command.a >= NetplaySharedKeyCount()) {
+        return;
+    }
+    dc::platform::Config config = dc::platform::ConfigGet();
+
+    NetplaySharedKeySet(config, command.a, command.c);
+    const SharedMode was = std::exchange(g_shared_mode, kSharedTake);
+
+    g_shared_keep_file = player != g_link.player;
+    dc::platform::ConfigChange(config);
+    g_shared_keep_file = false;
+    g_shared_mode = was;
+    std::fprintf(stderr, "netplay: settings: player %d's %s is %u on this copy from link tick %lld (settings hash %08x)\n", player,
+                 NetplaySharedKeyName(command.a), (unsigned) command.c, (long long) tick, NetplaySettingsHash());
 }
 } // namespace
+
+// coop-settings: kCmdOwnOptions on every copy, on its tick: the sender's own options (a = the bits) from here.
+static void ApplyOwnOptions(int player, const NetCommand &command, std::int64_t tick) {
+    if (player < 1 || player > coop::kMaxPlayers) {
+        return;
+    }
+    g_player_options[player - 1] = command.a;
+    std::fprintf(stderr, "netplay: player %d's own options on this copy from link tick %lld: quick select %s, swap keeps lock-on %s, QTE always win %s, message speed %s\n",
+                 player, (long long) tick, (command.a & kOptQuickSelect) != 0 ? "on" : "off", (command.a & kOptKeepsLock) != 0 ? "on" : "off",
+                 (command.a & kOptQteWin) != 0 ? "on" : "off", (command.a & kOptFastMessages) != 0 ? "fast" : "normal");
+}
+
+// coop-settings: each tick of the link, this copy's own row goes out when the table's differs from its config (a link's first
+// ticks, after a take, after a change in its Options), again after 120 ticks if it has not landed by then.
+void NetplayOwnOptionsTick(std::int64_t tick) {
+    if (!g_link.up || CoopWorldsApart() || g_link.player < 1 || g_link.player > coop::kMaxPlayers) {
+        return;
+    }
+    const std::uint8_t mine = OwnOptionBits();
+
+    if (g_player_options[g_link.player - 1] == mine || (g_own_options_sent >= 0 && tick >= g_own_options_sent && tick < g_own_options_sent + 120)) {
+        return;
+    }
+    NetCommand command;
+
+    command.kind = kCmdOwnOptions;
+    command.a = mine;
+    NetplayQueueCommand(command);
+    g_own_options_sent = tick;
+}
+
+// coop-settings (Jep's option C, 11-17): Time Speed stays shared, set by player 1 (every copy's town clock reads it; Message Speed was
+// shared too till coop-wave2 made it each player's own for their own talks). On another player's copy, from a session's first link to its end, the Options screen
+// draws those rows dimmed, refuses their Left and Right with the game's refusal and says in its help line who sets them
+// (port/src/options/screen.cpp, draw.cpp). Before, her change went through on her screen and snapped back (coop-soakjoin's interim).
+// coopoptions: every shared key (NetplaySharedKeyName, the ones a link carries as kCmdSetting) that has an Options row: Time Speed,
+// Message Speed, and the Co-op page's Trade Only Together (game.coop_swap_same_zone).
+bool CoopOptionRowHostSet(const char *key) {
+    if (!g_shared_session || g_link.player == 1 || key == nullptr) {
+        return false;
+    }
+    for (int k = 0; k < NetplaySharedKeyCount(); k++) {
+        if (std::strcmp(key, NetplaySharedKeyName(k)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// coop-soakjoin: a link is up: the shared keys from here are those running now (the joiner's are the host's it adopted).
+void NetplaySharedSettingsLinked() {
+    static bool handler = false;
+
+    if (!handler) {
+        handler = true;
+        NetplaySetCommandHandler(kCmdSetting, ApplySetting);
+        NetplaySetCommandHandler(kCmdOwnOptions, ApplyOwnOptions); // coop-settings
+    }
+    NetplayHelloAdoptedKeys(g_shared, dc::platform::ConfigGet());
+    if (!g_shared_session) {
+        g_shared_session = true;
+        RunSessionSet();
+    }
+}
+
+// coop-soakjoin: the session over (Quit Game): this copy's settings its own to change again.
+void NetplaySharedSettingsEnded() {
+    if (g_shared_session) {
+        g_shared_session = false;
+        RunSessionSet();
+    }
+}
+
+// A copy's adopt of the host's settings (NetplayHelloAdopt's ConfigChange): taken as they come, never a change of its player's.
+void NetplaySharedSettingsTaking(bool on) {
+    g_shared_mode = on ? kSharedTake : kSharedChange;
+}
 
 void NetplayAdoptSession(bool on) {
     if (NetplayMutated("adopt_saved") || on == g_adopt_session) {
@@ -14743,11 +17435,56 @@ int NetplayActivePad() {
 int NetplayOwnPad() {
     const int player = NetplayLocalPlayer();
 
+    if (player != 0 && InputPadsMerged()) {
+        return ActivePad(); // coop-padpick: a lone player's rumble goes to the controller in hand
+    }
+
     return player != 0 ? OwnPad(player) : -1;
 }
 
 InputPadState NetplayLobbyOwnPad() {
     return OwnInput(2);
+}
+
+// coop-optionspad (DCO-254, Jep's rc4 multi screen playtest 11-18): the controller a screen of this copy's own reads
+// (Chronicle's Options screen, the menu pointer's hand back to the pad): this copy's player's own (OwnPad), as the game's own menus
+// read it, never the first one opened. Kazarov's pad 0 is the first controller this process opened; a lobby that hands controllers
+// out need not leave player 1 on it: Jep's lobby kept controller 2 for player 1 and handed controller 1 to player 2's window, so
+// player 1's Options page read player 2's controller and his own was dead in it. A lone player's pad 0 is every controller
+// (InputPadsMerged): kept. The keyboard folds into pad 0 alone (Kazarov's Compose), and only the window with the focus gets key
+// events, so with another controller this copy's own its keys are added here: they stay this window's.
+// DC_NETPLAY_MUTATE=screen_first_pad (the test's twin): pad 0, as before.
+InputPadState NetplayScreenPad() {
+    if (InputPadsMerged() || NetplayMutated("screen_first_pad")) {
+        return InputGetPad(0);
+    }
+    const int     linked = NetplayLocalPlayer();
+    const int     player = linked != 0 ? linked : std::max(1, Settings().netplay);
+    const int     pad = OwnPad(player);
+    InputPadState state = pad >= 0 ? InputGetPad(pad) : Neutral();
+
+    if (pad != 0) {
+        InputKeyboardMouse held;
+        int                count = 0;
+
+        if (const bool *keys = SDL_GetKeyboardState(&count)) {
+            for (int scancode = 0; scancode < count; ++scancode) {
+                if (keys[scancode]) {
+                    held.keys.push_back(scancode);
+                }
+            }
+        }
+        if (!held.keys.empty()) {
+            const InputPadState typed = InputApplyKeyboardMouse(Neutral(), held);
+
+            state.buttons |= typed.buttons | typed.stick_dpad;
+        }
+    }
+    if (static int said = -2; said != pad) {
+        said = pad;
+        std::fprintf(stderr, "netplay: screens read controller %d (player %d's own)\n", pad + 1, player);
+    }
+    return state;
 }
 
 void NetplayLobbyHandOff(int seat, int host_pad, int pad, std::uint64_t identity) {
@@ -14935,6 +17672,32 @@ bool NetplayQaStopSeen() {
 
 bool NetplayLobbyJoining() {
     return g_join_picked && g_link.started && !g_link.up && g_link.listening && g_role == 2;
+}
+
+// coop-p2boot (Jep's rc3 playtest 11-13: "Multiscreen mode opens the game up and starts loading to the main menu, which gives
+// P2 time to start pressing buttons they shouldn't be"): the lobby's handed window is the seat going straight into the
+// session, so until its first link has taken it to the host's place its title stays black, as the game is between a load's fade and its card (no logo, no
+// menu, no mouse hand: the title's pointer takes clicks only on its logo and menu steps), with one plain line on the black:
+// "Joining player 1...". Her controller already reached nothing there (coop-pt1106-batch's NetplayPad); the title looked
+// live and waited for presses all the same. A friend's own copy is as before (its menu's Join). DC_NETPLAY_MUTATE=
+// handed_live_title (twin): its title runs as before.
+// coop-p2boot part 2 (coop_boot's CoopAreaCardWaited): UnderCardTick.
+void NetplayUnderCard() {
+    UnderCardTick();
+}
+
+bool NetplayHandedTitleHeld() {
+    // (through the first link too, until its catch-up leaves the title for the host's place: no title fading in between)
+    if (!HandedWindow() || g_links_up > 1 || (g_links_up == 1 && !g_link.up) || mode != GAME_MODE_TITLE || NetplayMutated("handed_live_title")) {
+        return false;
+    }
+    static bool said = false;
+
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "netplay: local: the handed window's title stays black until its link (no logo, no menu): Joining player 1...\n");
+    }
+    return true;
 }
 
 bool NetplayLobbyServesJoin() {
@@ -15497,13 +18260,34 @@ void NetplayDrawNotice() {
     // (DC_NETPLAY_MUTATE=notice_measure_seen: measured at 320, as before: the test's twin.)
     const float measure = NetplayMutated("notice_measure_seen") ? 320.0f : -1000.0f;
 
-    dc::text::caption::DrawLine(g_notice.text, measure, 14.0f, 12.0f, 1.0f, 600.0f, style, 0.0f, 1.0f, &bounds);
-    float centre = 24.0f + (measure - bounds.left);
-    dc::text::caption::DrawLine(g_notice.text, centre, 14.0f, 12.0f, 1.0f, 600.0f, style, fade, 1.0f, nullptr);
+    // coop-areanotice: a player's notice with its member's face (the ready box's, quickchara) at the line's left, the size of the
+    // lettering's line, and the name after it; the face fades with the line. The words-only line where the face will not draw.
+    constexpr int      kFace = 18;
+    const bool         face = g_notice.face >= 0 && !g_notice.after_face.empty() &&
+                              CoopDrawHudFaceFaded(g_notice.face, 24, 10, kFace, (int) (0x80 * fade));
+    const std::string &line = face ? g_notice.after_face : g_notice.text;
+    const float        left = face ? 24.0f + kFace + 5.0f : 24.0f;
+
+    dc::text::caption::DrawLine(line, measure, 14.0f, 12.0f, 1.0f, 600.0f, style, 0.0f, 1.0f, &bounds);
+    float centre = left + (measure - bounds.left);
+    dc::text::caption::DrawLine(line, centre, 14.0f, 12.0f, 1.0f, 600.0f, style, fade, 1.0f, nullptr);
 
     if (!g_notice.drawn) {
         g_notice.drawn = true;
-        std::fprintf(stderr, "netplay: notice drawn: %s\n", g_notice.text.c_str());
+        if (face) {
+            std::fprintf(stderr, "netplay: notice drawn: [face %d] %s\n", g_notice.face, line.c_str());
+        } else {
+            std::fprintf(stderr, "netplay: notice drawn: %s\n", line.c_str());
+        }
+    }
+    // Test hook (DC_NETPLAY_TEST_NOTICE_SHOT=DIR): a player's notice's 40th drawn frame written to DIR/notice.png (in-process), once.
+    static int face_frames = 0;
+
+    if (static const char *const shot = TestEnv("DC_NETPLAY_TEST_NOTICE_SHOT"); shot != nullptr && g_notice.face >= 0 && ++face_frames == 40) {
+        static char path[512];
+
+        std::snprintf(path, sizeof path, "%s/notice.png", shot);
+        NetplayTestShot(path);
     }
 }
 
@@ -15524,12 +18308,26 @@ void NetplayGoApart(const char *why, int mover) {
 
     // coop-leaverace: this copy's inputs the other copy may lack for the ticks up to the split (it plays on to it, and
     // this copy sends nothing more): every one given, twice, a packet's kResend at a time.
+    g_linger = Linger{};
     if (!g_catch.active && !NetplayMutated("close_on_leave")) {
+        const bool keep = !NetplayMutated("leave_blind");
+
         for (int round = 0; round < 2; round++) {
             for (std::int64_t newest = g_link.newest; newest >= 0 && newest > g_link.tick - g_link.delay - kResend && g_link.newest - newest < kRing;
                  newest -= kResend) {
-                Send(newest);
+                Packet kept{};
+
+                Send(newest, &kept);
+                if (keep && round == 0 && kept.magic == kMagic) {
+                    g_linger.packets.push_back(kept);
+                }
             }
+        }
+        if (keep && !g_linger.packets.empty()) {
+            g_linger.peer_session = g_link.peer_hello.session;
+            g_linger.split = g_link.tick;
+            g_linger.leave = Busy{kLeaveMagic, (std::uint32_t) g_link.player, g_link.session, kCatchBit | (std::uint32_t) g_link.tick};
+            g_linger.until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2 * kWaitMs);
         }
 
         // The host just after a catch-up join: the last blob (J, the joiner's way to the split) held first, for up to
@@ -15568,8 +18366,16 @@ bool NetplayTakeQuitToTitle() {
     const bool         was_up = g_link.up;
     const std::int64_t tick = g_quit_tick >= 0 ? g_quit_tick : g_link.tick;
     const int          player = g_link.player;
+    const bool         hosted = g_role == 1; // (JoinGiveUp below forgets the role)
+    const bool         own = g_quit_tick >= 0; // coop-hostquit: this copy's player's quit (ApplyQuit), not one heard (a Leave's, apart)
 
     g_quit_tick = -1;
+    // coop-hostquit: apart (the link down), no Leave can go (SayLeaving: linked only, and the other copy reads no link traffic
+    // apart): the quit goes on the worlds channel, the one that crosses apart, so the others hear it as a linked copy would,
+    // resent till acknowledged (at most 1 s). (Linked, the quit's command reached every copy on its tick.)
+    if (!was_up && own) {
+        CoopWorldsSayLeft(g_quit_ends && player == 1, 1, 1000);
+    }
     // The Leave first, as a closed game's (atexit) says it: the others close on it at once, "player N left" (the host's
     // carries kLeaveEnded, so a copy that missed the quit's tick still goes to the title).
     SayLeaving(-1, g_quit_ends && player == 1);
@@ -15596,10 +18402,29 @@ bool NetplayTakeQuitToTitle() {
     JoinGiveUp("ended by Quit Game", g_quit_note.c_str()); // (the title menu's reset: started, the join, the role, Steam, NAT)
     g_host_via = 0;
     g_handoffs.clear();
+    // coop-rehost (Jep's rc3 playtest, 2026-11-13): the host's session over, the seats its lobby handed to windows on this PC
+    // go with it: each window closed (netplay_local.hpp), this copy's controllers its own again (no seat pinned, no window
+    // holding one), so the next Host's lobby starts as the first did. A guest's quit leaves the windows it never started.
+    if (hosted) {
+        NetplayLocalCloseWindows("the host's session ended (Quit Game)");
+        if (g_lobby_spawned || g_lobby_pad >= 0) {
+            std::fprintf(stderr, "netplay: quit: the lobby's controllers released (window %d, pinned controller %d)\n", g_lobby_spawned ? 1 : 0,
+                         g_lobby_pad + 1);
+        }
+        g_lobby_spawned = false;
+        g_lobby_pad = -1;
+    }
     MenuOnline(false); // (a plain copy that went online at its title goes back to single player, as it booted)
-    coop::MenusAdoptEnd(); // coop-pt1111o: this copy's own menus settings again
     NetplayAdoptSession(false); // coop-pt1111p: and its own of the rest the host's had been
+    NetplaySharedSettingsEnded(); // coop-soakjoin
+    coop::KeyPickEndRunsForQuit(); // coop-xiaogap2: player 1's run too (the reset below keeps it through a drop or a join)
     CoopResetForSession();   // every co-op module's own state as a fresh session starts it
+    // coop-soloxiao (Jep's 11-18 playtest: a host who started the next game alone saw Xiao stand in town for a few seconds): whether
+    // player 2 counts as there (coop_party.cpp's presence latch, held 5 s past her last sign) is the session's own, and went
+    // on into the next session; with a Quit Game it ends with the session. DC_COOP_MUTATE=presence_kept (twin): kept, as before.
+    if (!NetplayMutated("presence_kept")) {
+        coop::PresenceResetForSession();
+    }
     CoopWorldsSessionEnded(); // the pair's apart and merge state gone
     std::fprintf(stderr, "netplay: quit: this copy (player %d) left the session at link tick %lld (%s, link was %s): link closed, back to the title\n",
                  player, (long long) tick, g_quit_ends ? "the host's quit: the session over for every player" : "its own player's quit: the others play on",
@@ -15729,4 +18554,9 @@ int NetplayPadOfDevice(const std::string &device) {
         }
     }
     return -1;
+}
+
+// coop-swapcombo part 4 (tests): this frame written to path once it ends, as DC_COOP_MENUSHOTS' are (NetplayTestShotAfterFrame).
+void NetplayTestShotRequest(const char *path) {
+    g_test_shot = path;
 }

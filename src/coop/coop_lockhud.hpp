@@ -18,6 +18,9 @@ namespace coop {
 void LockHudBegin();
 void LockHudEnd();
 
+// coop-areanotice: a box of ours (DimForQuestion) dims this frame: no lock marker draws under it this frame or the next.
+void LockHudUnderModal();
+
 // Whether the player's nearest-monster marker (cursorFrame, shown while he has no lock) draws on this copy.
 bool LockHudPlayerPreview();
 

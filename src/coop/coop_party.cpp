@@ -7,6 +7,7 @@
 #include "coop/coop_combat.hpp" // coop: p2weapon (StarterWeapon, EquippedWeapon)
 #include "coop/coop_camera.hpp" // coop-joinvisuals: PlayerDrawnPlace
 #include "coop/coop_worlds.hpp" // coop-joinvisuals: CoopWorldsEntryStandIn
+#include "coop/coop_faces.hpp"  // coop-faces
 
 #include <SDL3/SDL.h>
 #include <libvu0.h>
@@ -32,6 +33,7 @@
 #include "btmisc.hpp"
 #include "camerafollow.hpp"
 #include "character.hpp"
+#include "cloth.hpp" // coop-entrance9: the stand-in's cloth
 #include "clothread.hpp"
 #include "collision.hpp"
 #include "collisiondata.hpp"
@@ -75,6 +77,8 @@
 #include "coop/coop_inventory.hpp" // coop-revive (the test hook's powders)
 #include "coop/coop_prompt.hpp"    // coop-revive
 #include "coop/coop_interact.hpp"  // coop-openercam: DrawPartnerPresentation
+#include "coop/coop_town.hpp"     // towncrash: TownModelArenaTaken
+#include "coop/coop_wheel.hpp"     // coop-p2controls: CoopWheelBank
 
 namespace dc::game {
 int keyCtrl(float x, float y, MOTION_INFO *motion);
@@ -127,6 +131,8 @@ bool Pickable(int chara) {
 // save and choice parted at tick 1980). Now at the floor's start, before the host's checkpoint and recording, so its
 // state set carries them; a joiner taking that state spends them unapplied. (Its twin party_hook_late retired with
 // q-chest-face-xiao~partyhook, coop-fx51b 2026-11-05: the ordering exists only with a test-hook party.)
+int g_p1_chara_due = -1; // (coop-entrance2 test hook DC_COOP_TEST_P1_CHARA: the member whose model is still to load, -1 none)
+
 void PartyTestHooks(bool apply) {
     static bool hooked = false;
 
@@ -158,7 +164,18 @@ void PartyTestHooks(bool apply) {
         }
 
         if (const char *chosen = TestEnv("DC_COOP_PARTNER")) {
-            g_partner.choice = std::clamp(std::atoi(chosen), 0, 5);
+            SetPick(1, std::clamp(std::atoi(chosen), 0, 5), MemberWhy::kTest);
+        }
+        // coop-entrance2: DC_COOP_TEST_P1_CHARA=n: player 1 plays member n (a party member: DC_COOP_PARTY), for the entrance rows
+        // with another lead than Toan (each character's own delay and spot: Xiao leading, Toan beside her).
+        // (taken inside the floor's opening, a jump start's first partner tick: his member now, its model once the opening is over: a
+        // model reloaded under the running script broke the Temple's and the cave's walk-ins)
+        if (const char *p1 = TestEnv("DC_COOP_TEST_P1_CHARA")) {
+            g_p1_chara_due = std::clamp(std::atoi(p1), 0, UserStatus->party_size - 1);
+            UserStatus->cur_chara = (s8) g_p1_chara_due;
+            // coop-statefix: his member with it, as the lobby's pick seeds it (CoopPartyLobbyPicks): the jump seeded the save's
+            // Toan, and her bump off this member then found Toan held and was refused (dun0-f1-xiao came out Toan and Xiao).
+            MemberSeed(g_p1_chara_due);
         }
 
         // DC_COOP_TEST_P1_LIFE=N: the player's member starts with N life of N (coop-chestsync: a catch-up host waiting
@@ -185,13 +202,23 @@ void PartyTestHooks(bool apply) {
 
 int PickPartner() {
     PartyTestHooks(true);
+    // (a second after the opening's end: at its very end the cave's last camera pan still ran, and the swap there left its view black)
+    // cand1112d (x-fixture-fidelity-globals: the loader's calm unlike the maker's after the dun1-f1 load): counted only while the
+    // hook's member is still due, so it is 0 on every copy otherwise and a load leaves nothing of a copy's own count behind.
+    static int calm = 0;
+
+    calm = g_p1_chara_due >= 0 && BtEventMode == 0 ? calm + 1 : 0;
+    if (g_p1_chara_due >= 0 && calm > 60) {
+        PromptChangePlayer(g_p1_chara_due); // (the test hook's member, as the party menu's change: model and all)
+        g_p1_chara_due = -1;
+    }
 
     // coop-pt1111k: her own pick (her ring, menu, L3) is taken here, on every copy on one tick: on a character-limited floor one
     // that would leave its member unplayed is refused on her screen and she keeps her member (ZonePickLegal; Jep 11-11).
     if (g_partner.loaded_chara >= 0 && g_partner.choice >= 0 && g_partner.choice != g_partner.loaded_chara && g_partner.choice != UserStatus->cur_chara &&
         g_partner.down == 0 && !ZonePickLegal(1, g_partner.choice)) {
         ZonePickRefused(1, g_partner.choice, "her pick");
-        g_partner.choice = g_partner.loaded_chara;
+        SetPartnerPick(g_partner.loaded_chara, MemberWhy::kKeep);
     }
 
     int current = UserStatus->cur_chara;
@@ -210,6 +237,12 @@ int PickPartner() {
         return loaded;
     }
 
+    // coop-swapcombo (A): the floor's start made player 1 Toan (retail's reset) and her pick is Toan, a trade's: his kept member comes
+    // back at the floor's first tick of play (MemberRestoreTick), so her pick stands meanwhile (both Toan through the opening scene).
+    if (MemberRestorePending() && g_partner.choice == current && g_partner.choice >= 0) {
+        return g_partner.choice;
+    }
+
     if (Pickable(g_partner.choice) || (Mutated("p1takes") && g_partner.choice >= 0)) {
         return g_partner.choice;
     }
@@ -221,8 +254,8 @@ int PickPartner() {
             int i = (start + k) % 6;
 
             // The second pass takes a member lying down when no other is standing.
-            if (pass == 0 ? Pickable(i) : i < party && i != current) {
-                g_partner.choice = i;
+            // (coop-memberowner: one another player holds is passed over)
+            if ((pass == 0 ? Pickable(i) : i < party && i != current) && SetPartnerPick(i, MemberWhy::kBump)) {
                 return i;
             }
         }
@@ -250,8 +283,7 @@ void StepSwap(const InputPadState &pad) {
     for (int k = 1; k < 6; k++) {
         int i = (g_partner.loaded_chara + step * k + 6) % 6;
 
-        if (Pickable(i)) {
-            g_partner.choice = i;
+        if (Pickable(i) && SetPick(1, i, MemberWhy::kPick)) {
             SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
             std::printf("coop: pad 2 swaps to %d (%s)\n", i, charaNameTbl[i]);
             return;
@@ -261,34 +293,97 @@ void StepSwap(const InputPadState &pad) {
 
 namespace {
 
+// coop-p2hurt2: each other player's pulse state (entry k is player k + 1; entry 0 unused, player 1's is retail's statics).
+struct Pulse {
+    float rgb[3] = {0.0f, 0.0f, 0.0f};
+    float count = 0.0f;
+    float speed = 1.0f;
+    int   timer = 0;
+    int   flag = 0;
+};
+Pulse g_pulse[kMaxPlayers];
+
+// Retail's routine on player's own state: swapped in, run, swapped out (player 1 runs on the statics themselves).
+template <typename Run> auto PulseRun(int player, Run run) {
+    Pulse *mine = player >= 2 && player <= kMaxPlayers ? &g_pulse[player - 1] : nullptr;
+
+    if (mine != nullptr) {
+        UnitAmbientAnimeExchange(mine->rgb, &mine->count, &mine->speed, &mine->timer, &mine->flag);
+    }
+    auto result = run();
+    if (mine != nullptr) {
+        UnitAmbientAnimeExchange(mine->rgb, &mine->count, &mine->speed, &mine->timer, &mine->flag);
+    }
+    return result;
+}
+
+} // namespace
+
+void PulseSet(int player, float speed, float time, float red, float green, float blue) {
+    PulseRun(player, [&] {
+        setUnitAmbientAnime(speed, time, red, green, blue);
+        return 0;
+    });
+}
+
+bool PulseStep(int player, float *colour) {
+    return PulseRun(player, [&] { return unitAmbientAnime(colour) != 0; });
+}
+
+void PulseRead(int player, int *flag, int *timer, float *count) {
+    Pulse read;
+    Pulse swap;
+
+    UnitAmbientAnimeExchange(swap.rgb, &swap.count, &swap.speed, &swap.timer, &swap.flag); // the statics' (player 1's) out
+    read = swap;
+    UnitAmbientAnimeExchange(swap.rgb, &swap.count, &swap.speed, &swap.timer, &swap.flag); // and back, untouched
+    if (player >= 2 && player <= kMaxPlayers) {
+        read = g_pulse[player - 1];
+    }
+    *flag = read.flag;
+    *timer = read.timer;
+    *count = read.count;
+}
+
+namespace {
+
+// coop-p2hurt2 (p2-like-p1): up again as retail revives the player (GAME_TASK_REVIVE_DONE): invincible 0xA0 and the model's red
+// pulse over 160 draws. DC_COOP_MUTATE=p2revive (twin): twice kInvincibleTicks (120) and no pulse, as before.
 void GetUp(int life) {
     g_partner.down = 0;
     g_partner.revive = 0;
     SetLife(std::max(1, life));
-    g_partner.invincible = kInvincibleTicks * 2;
+    if (Mutated("p2revive")) {
+        g_partner.invincible = kInvincibleTicks * 2;
+    } else {
+        g_partner.invincible = kReviveInvincible;
+        PulseSet(2, 160.0f, 1.0f, 255.0f, 0.0f, 0.0f);
+    }
+    std::fprintf(stderr, "coop-p2hurt2: player 2 up: invincible %d\n", g_partner.invincible);
     PlayMotion(0, 0);
 }
 
 } // namespace
 
-// The revive rule. A partner with no life left lies down for kDownTicks (10 s), then gets up with a
-// quarter of its life. The player can get it up sooner: standing still within kReviveDistance of it,
-// with life of its own, for kReviveTicks (2 s) brings it up with half its life; moving or stepping
-// away starts the count again. No button, so nothing either pad already does is taken. Each member
-// keeps its own down count: one the player takes over while it lies down (down_left) goes on counting
-// and gets up the same way. Everything here reads the shared simulation (positions, party status), so
-// linked copies agree. True while the partner lies down.
-bool StepDown() {
-    float moved_x = CharaFrame->position[0] - g_partner.player_last[0];
-    float moved_z = CharaFrame->position[2] - g_partner.player_last[2];
-    bool  still = moved_x * moved_x + moved_z * moved_z < 0.01f;
+void PartnerUpToLeave(int life) {
+    GetUp(life);
+    std::printf("coop: partner gets up to leave the dungeon, life %d/%d\n", Life(), MaxLife());
+}
 
+// The revive rule (coop-revive2, Jep 11-18: the base game needs a Revive Powder). A partner with no life left lies down. An
+// alive player near it is asked with Cross whether to use a Revive Powder (coop_prompt.hpp ReviveAsk), which gets it up with half
+// its life. Only while the session's debug mode is on does it get up by itself, after kDownTicks (3 s), with a quarter
+// (ReviveFreeGetUp). Each member keeps its own down count: one the player takes over while it lies down (down_left) goes on
+// counting and gets up the same way in debug mode. Everything here reads the shared simulation (positions, party status, the
+// agreed pads), so linked copies agree. True while the partner lies down.
+bool StepDown() {
     g_partner.player_last[0] = CharaFrame->position[0];
     g_partner.player_last[2] = CharaFrame->position[2];
 
-    // coop-revive: test hook (DC_COOP_REVIVETEST=<case>, x-revive.ps1). On the 60th tick of play the reviver gets one
+    // coop-revive: test hook (DC_COOP_REVIVETEST=<case>). On the 60th tick of play the reviver gets one
     // Revive Powder (case p2revives: player 2's bag, nopowder: none, else player 1's pack); from tick 90 the partner is
-    // held 15 beside the player, and on tick 150 the partner goes down (p2revives: the player's life runs out instead).
+    // held 15 beside the player, and on tick 150 the partner goes down (p2revives: the player's life runs out instead);
+    // coop-revive2: on tick 180 the reviver presses Cross (ReviveTestCross).
     // Ticks of the shared simulation, so linked copies do it alike. coop_prompt.cpp answers the question.
     static const char *revive_test = TestEnv("DC_COOP_REVIVETEST");
     static int         revive_ticks = 0;
@@ -314,6 +409,11 @@ bool StepDown() {
             g_partner.pos[1] = CharaFrame->position[1];
             g_partner.pos[2] = CharaFrame->position[2];
             g_partner.chara->frame->SetPosition(g_partner.pos);
+        }
+
+        if (tick == 180) { // coop-revive2: the reviver's Cross, 30 ticks after the down
+            ReviveTestCross(p2 ? 2 : 1);
+            std::printf("coop-debug: revivetest: %dP presses Cross\n", p2 ? 2 : 1);
         }
 
         if (tick == 150 && p2) {
@@ -394,15 +494,15 @@ bool StepDown() {
         CoopPartyDelete(party_dir); // nothing from an earlier run
 
         CoopPartySave(party_dir);
-        g_partner.choice = -1;
+        SetPick(1, -1, MemberWhy::kTest);
         CoopPartyLoad(party_dir);
         std::printf("coop-debug: party save test: picked %d, after load %d\n", picked, g_partner.choice);
 
-        g_partner.choice = UserStatus->cur_chara;
+        SetPick(1, UserStatus->cur_chara, MemberWhy::kTest);
         CoopPartySave(party_dir);
         CoopPartyLoad(party_dir);
         std::printf("coop-debug: party save test: player's member saved, after load %d\n", g_partner.choice);
-        g_partner.choice = picked;
+        SetPick(1, picked, MemberWhy::kTest);
     }
 
     // Test hook (DC_COOP_DOWN_FLOOR): the partner is held down at no life for as long as the party is
@@ -433,6 +533,10 @@ bool StepDown() {
             continue;
         }
 
+        if (!ReviveFreeGetUp()) { // coop-revive2: base game: it waits for a powder
+            continue;
+        }
+
         if (--g_partner.down_left[i] == 0 && OwnLife(i) && UserStatus->hp[i] <= 0 && i != UserStatus->cur_chara) {
             UserStatus->AddNowLife(i, (s16) std::max(1, UserStatus->max_hp[i] / 4), 0.0f);
         }
@@ -440,37 +544,23 @@ bool StepDown() {
 
     if (g_partner.down == 0) {
         g_partner.revive = 0;
-        ReviveAsk(0, false); // coop-revive: up some other way: no question left waiting
+        ReviveAsk(1, 2, false); // coop-revive: up some other way: no question left waiting
         return false;
     }
 
-    float dx = g_partner.pos[0] - CharaFrame->position[0];
-    float dz = g_partner.pos[2] - CharaFrame->position[2];
-    bool  beside = dx * dx + dz * dz <= kReviveDistance * kReviveDistance && UserStatus->hp[(int) UserStatus->cur_chara] > 0;
+    // coop-revivecross: the one rule the red mark reads too (near, up, and no nearer chest or door in reach of his Cross)
+    const bool near = ReviveOffered(1, 2);
 
-    // coop-revive: with the Revive Powder rule on, standing still beside it asks "Use Revive Powder?" instead
-    // (coop_prompt.hpp); there is no free revive.
-    if (RevivePowderOn()) {
-        g_partner.revive = beside && still ? g_partner.revive + 1 : 0;
+    g_partner.revive = near ? g_partner.revive + 1 : 0; // (ticks near, for the HUD's line)
 
-        if (ReviveAsk(0, g_partner.revive >= kReviveAskTicks)) {
-            GetUp(MaxLife() / 2);
-            std::printf("coop: player revives partner with a Revive Powder, life %d/%d\n", Life(), MaxLife());
-            return false;
-        }
-    } else {
-        bool holding = beside && still && !Mutated("revive");
-
-        g_partner.revive = holding ? g_partner.revive + 1 : 0;
-
-        if (g_partner.revive >= kReviveTicks) {
-            GetUp(MaxLife() / 2);
-            std::printf("coop: player revives partner, life %d/%d\n", Life(), MaxLife());
-            return false;
-        }
+    if (ReviveAsk(1, 2, near)) {
+        GetUp(MaxLife() / 2);
+        std::printf("coop: player revives partner with a Revive Powder, life %d/%d\n", Life(), MaxLife());
+        return false;
     }
 
-    if (--g_partner.down == 0) {
+    // DC_COOP_MUTATE=getup_base (twin): the base game's partner gets up by itself, as before.
+    if ((ReviveFreeGetUp() || Mutated("getup_base")) && --g_partner.down == 0) {
         GetUp(Mutated("getup") ? MaxLife() / 2 : MaxLife() / 4);
         std::printf("coop: partner gets up, life %d/%d\n", Life(), MaxLife());
         return false;
@@ -599,21 +689,31 @@ void PlaceBesidePlayer(const char *reason) {
 // equipped (one who has not joined) holds its character's first sound weapon (model 1). body is the model that
 // holds it: the dungeon partner by default, the town partner in town (coop_town.cpp).
 void LoadWeapon(int chara, CCharacter *body) {
+    g_partner.held_out = false; // (the weapon goes to the body's "weapon" frame: PartnerHandStep hangs it from her hand again)
+    LoadWeaponInto(chara, body != nullptr ? body : g_partner.chara, g_partner.pack, g_partner.arena, g_partner.weapon, g_partner.weapon_mark,
+                   PartnerWeaponBlock(), g_partner.weapon_loaded, "partner");
+}
+
+// coop-p1body: the same load for any body's set (the partner's, a town body's of any player: coop_town.cpp's ModelSet): the
+// weapon into that set's pack buffer, arena (rewound to weapon_mark, just above its body) and texture block, held by holder's
+// "weapon" frame. loaded says whether it is in hand. One routine for every player's body (Jep's rule: P2 like P1, design for 6).
+void LoadWeaponInto(int chara, CCharacter *holder, u_int *pack, CDataAlloc2<1> &arena, CCharacter *&weapon, int weapon_mark, int block, bool &loaded,
+                    const char *whose) {
     static const int first[6] = {ITEM_WEAPON_DAGGER_BROKEN,     ITEM_WEAPON_WOODENSLINGSHOT_BROKEN, ITEM_WEAPON_MALLET_BROKEN,
                                  ITEM_WEAPON_GOLD_RING_BROKEN, ITEM_WEAPON_FIGHTING_STICK_BROKEN,  ITEM_WEAPON_MACHINE_GUN_BROKEN};
 
-    g_partner.weapon_loaded = false;
+    loaded = false;
 
     // The weapon goes just above the body every time, in its own block, so a reload takes no more room.
     if (!Mutated("reload")) {
-        g_partner.arena.used = g_partner.weapon_mark;
+        arena.used = weapon_mark;
     }
-    TexManager.DeleteTextureBlock(PartnerWeaponBlock());
+    TexManager.DeleteTextureBlock(block);
     TexManager.CleanUpBuffer();
     TexManager.CleanUpTextureList();
 
-    if (g_partner.weapon == nullptr) {
-        g_partner.weapon = new CCharacter();
+    if (weapon == nullptr) {
+        weapon = new CCharacter();
     }
 
     // In town UserStatus is unset; the save's dungeon status is the same party.
@@ -637,17 +737,15 @@ void LoadWeapon(int chara, CCharacter *body) {
     BtGetWeaponNamePath2(name, cfg, chara, model_no);
     std::snprintf(path, sizeof path, "commenu/weapon/%s", name);
 
-    if (LoadFile(path, g_partner.pack, &size) == 0 || size <= 0 || size > kPackBytes) {
+    if (LoadFile(path, pack, &size) == 0 || size <= 0 || size > kPackBytes) {
         std::fprintf(stderr, "coop: cannot load %s\n", path);
         return;
     }
 
-    CCharacter *weapon = g_partner.weapon;
-    CCharacter *holder = body != nullptr ? body : g_partner.chara;
-    CFrame     *hand = holder->frame->SearchFrame((char *) "weapon");
+    CFrame *hand = holder->frame->SearchFrame((char *) "weapon");
 
     weapon->Initialize();
-    weapon->LoadPackData3(g_partner.pack, cfg, &g_partner.arena, PartnerWeaponBlock(), &g_partner.arena, 1, 0);
+    weapon->LoadPackData3(pack, cfg, &arena, block, &arena, 1, 0);
 
     if (weapon->frame == nullptr || hand == nullptr) {
         std::fprintf(stderr, "coop: %s cannot hold %s\n", charaNameTbl[chara], path);
@@ -658,8 +756,8 @@ void LoadWeapon(int chara, CCharacter *body) {
     weapon->SetRotation(0.0f, 0.0f, 0.0f);
     weapon->frame->SetReference(hand);
     weapon->Step();
-    g_partner.weapon_loaded = true;
-    std::printf("coop: partner weapon %s (slot %d), arena %d\n", path, slot, g_partner.arena.used);
+    loaded = true;
+    std::printf("coop: %s weapon %s (slot %d), arena %d\n", whose, path, slot, arena.used);
 }
 
 // Puts the weapon pad 2's member has equipped now in its hand, in place of the one it held: the arena
@@ -1006,6 +1104,9 @@ bool Load(int chara) {
     TexManager.CleanUpBuffer();
     TexManager.CleanUpTextureList();
 
+    // towncrash: the town body's model lived in this arena too; it goes with what this load writes over it (coop_town.cpp).
+    TownModelArenaTaken(g_partner.model);
+
     g_partner.arena.base = g_partner.model;
     g_partner.arena.buffer = g_partner.model;
     g_partner.arena.used = 0;
@@ -1021,6 +1122,7 @@ bool Load(int chara) {
 
     partner->InitializeTexAnime(g_partner.tex_anime, 64);
     partner->LoadPackData2(g_partner.pack, (char *) "base.cfg", &g_partner.arena, PartnerTextureBlock(), &g_partner.arena, 0);
+    coop::FacesPrepare(); // coop-faces: the face sheets with a body's load, once
 
     if (partner->frame == nullptr) {
         std::fprintf(stderr, "coop: %s has no model\n", charaNameTbl[chara]);
@@ -1058,6 +1160,38 @@ bool Load(int chara) {
 
     for (Shot &shot : g_partner.shots) {
         shot.life = 0;
+    }
+
+    // coop-p2eyehand: her first-person view's raised hand, as GameInit loads the player's CharaHand from his own pack (Xiao's and
+    // Ruby's hand_up.cfg, clipped, into CharaModelBuffer with the body's textures): here into her arena just above her body, below
+    // the weapon's mark, its textures her body's block. DC_COOP_MUTATE=p2_no_hand (twin): no hand loaded, as before.
+    g_partner.hand_loaded = false;
+    g_partner.hand_motion = -1;
+    g_partner.held_out = false;
+    if ((chara == CHARA_XIAO || chara == CHARA_RUBY) && !Mutated("p2_no_hand")) {
+        if (g_partner.hand == nullptr) {
+            g_partner.hand = new CCharacter();
+        }
+
+        CFrameAttr hand_attr;
+
+        hand_attr.clip_enable = true;
+        hand_attr.unk_09 = 0;
+        g_partner.hand->Initialize();
+        g_partner.hand->LoadPackData(g_partner.pack, (char *) "hand_up.cfg", &g_partner.arena, &g_partner.arena, nullptr);
+        if (g_partner.hand->frame != nullptr) {
+            g_partner.hand->frame->SetAttr(hand_attr, 1, 0);
+            g_partner.hand_loaded = true;
+            if (TestEnvOn("DC_COOP_TEST_P2_EYE") && g_partner.hand->motion_type.motion_info != nullptr) { // (x-p2-eye: the hand's motions)
+                for (int m = 0; m < 48; m++) {
+                    const MOTION_INFO &info = g_partner.hand->motion_type.motion_info[m];
+                    if (info.end > info.start && info.start >= 0) {
+                        std::fprintf(stderr, "coop: test: p2 hand motion %d frames %d-%d\n", m, (int) info.start, (int) info.end);
+                    }
+                }
+            }
+        }
+        std::printf("coop: P2 %s hand %s, arena %d\n", charaNameTbl[chara], g_partner.hand_loaded ? "loaded" : "has no model", g_partner.arena.used);
     }
 
     g_partner.weapon_mark = g_partner.arena.used;
@@ -1104,6 +1238,7 @@ bool Load(int chara) {
     }
 
     std::printf("coop: partner %d (%s), %d quadwords, %d footsteps\n", chara, charaNameTbl[chara], g_partner.arena.used, steps);
+    TownBodyAfterFloorLoad(); // towncrash
     return true;
 }
 
@@ -1129,7 +1264,7 @@ void PartnerSnapshotTexturesOut() {
 //   itempack   the HUD's sheet (hearts, drops, cells, badge, frames), a fixed picture the dungeon's start enters from
 //              itempack.img; a joiner that took the state set in its arrival never ran that start.
 //   0x43       coop_hud's icon sheets (wepicon, itemicon) from itemlst.img.
-//   0x44       coop_wheel's faces (quickchara and its pack's sheets) from commenu/quickchr.img.
+//   0x44       coop_wheel's faces and element icons (quickchara, wepicon) from quickchr.pac's quickchr.img (CoopWheelBank).
 // Each file is entered again here and each picture it enters moved onto the table's entry of its name (its keys), the new entries
 // emptied and the manager's counters put back, so the table stays the host's (a picture loaded fresh at a key of this copy's own
 // drew nothing on the joiner's HUD: its faces, tried that way first). The ring's effect (0x42) and the key picker's window (0x45)
@@ -1140,20 +1275,20 @@ namespace {
 // Enters a file's pictures again (enter) and moves each onto the table's entry of the same name and block. The pictures moved.
 template <typename Enter>
 int ReloadAtTableKeys(int block, Enter enter) {
-    bool                used[196];
+    bool                used[kTextureCount];
     const CTextureBlock kept = block >= 0 && block < 72 ? TexManager.blocks[block] : CTextureBlock{};
     const int           fix = TexManager.vram_fix;
     const int           buffer_used = TexManager.buffer_used;
     const int           texture_max = TexManager.texture_max;
     int                 moved = 0;
 
-    for (int i = 0; i < 196; i++) {
+    for (int i = 0; i < kTextureCount; i++) {
         used[i] = TexManager.textures[i].name[0] != 0;
     }
 
     enter();
 
-    for (int i = 0; i < 196; i++) {
+    for (int i = 0; i < kTextureCount; i++) {
         CTexture &fresh = TexManager.textures[i];
 
         if (used[i] || fresh.name[0] == 0) {
@@ -1163,7 +1298,7 @@ int ReloadAtTableKeys(int block, Enter enter) {
         const sceGsTex0 keys = *reinterpret_cast<const sceGsTex0 *>(&fresh.tex0);
         bool            done = false;
 
-        for (int j = 0; j < 196 && !done; j++) {
+        for (int j = 0; j < kTextureCount && !done; j++) {
             const CTexture &old = TexManager.textures[j];
 
             if (used[j] && old.block == fresh.block && std::strcmp(old.name, fresh.name) == 0) {
@@ -1236,11 +1371,50 @@ void DrawBlocksSnapshotApplied() {
         std::fprintf(stderr, "coop: after the state set: the HUD's icon sheets (itemlst.img) entered again, %d picture(s) at the table's keys\n", moved);
     }
 
-    if (TableHasBlock(kWheelTextureBlock) && LoadFile((char *) "commenu/quickchr.img", data(), &size) != 0 && size > 0) {
-        LOADTEXTURE_INFO2 table[2] = {{(char *) data(), kWheelTextureBlock, 0}, {nullptr, 0, 0}};
+    if (u_char *bank = TableHasBlock(kWheelTextureBlock) ? CoopWheelBank() : nullptr; bank != nullptr) { // (coop-p2controls: retail's bank)
+        LOADTEXTURE_INFO2 table[2] = {{(char *) bank, kWheelTextureBlock, 0}, {nullptr, 0, 0}};
         const int         moved = ReloadAtTableKeys(kWheelTextureBlock, [&] { TexManager.LoadTextureBlockEX(kWheelTextureBlock, table); });
+        CoopWheelSheetNote("state set apply (rekeyed to the table)");
         std::fprintf(stderr, "coop: after the state set: the faces (quickchr.img) entered again, %d picture(s) at the table's keys\n", moved);
     }
+}
+
+// coop-p2eyehand: a character's motion clock into a BodyKept and back (the hand's and its slingshot's, PartnerMotionTake and
+// PartnerSnapshotApplied; the body's own has its yaw and place besides, written out there).
+static void HandMotionTake(const CCharacter &c, Partner::BodyKept &m) {
+    const MOTION_STATE &state = c.motion_type.state;
+
+    m.set = true;
+    m.no = c.motion_no;
+    m.flags = c.motion_flags;
+    m.speed = c.motion_speed;
+    m.time = state.time;
+    m.blend = state.blend;
+    m.blend_step = state.blend_step;
+    m.frame = state.frame;
+    m.next_frame = state.next_frame;
+    m.asked = state.motion_no;
+    m.playing = state.playing_no;
+    m.blending = state.blending;
+}
+
+static void HandMotionPut(CCharacter &c, const Partner::BodyKept &m) {
+    if (!m.set) {
+        return;
+    }
+    MOTION_STATE &state = c.motion_type.state;
+
+    c.motion_no = m.no;
+    c.motion_flags = m.flags;
+    c.motion_speed = m.speed;
+    state.time = m.time;
+    state.blend = m.blend;
+    state.blend_step = m.blend_step;
+    state.frame = m.frame;
+    state.next_frame = m.next_frame;
+    state.motion_no = m.asked;
+    state.playing_no = m.playing;
+    state.blending = m.blending;
 }
 
 void PartnerSnapshotApplied() {
@@ -1293,6 +1467,10 @@ void PartnerSnapshotApplied() {
     now.weapon = fresh.weapon;
     now.weapon_loaded = fresh.weapon_loaded;
     now.weapon_mark = fresh.weapon_mark;
+    now.hand = fresh.hand; // coop-p2eyehand: the hand loaded with the body (its weapon in the body's hand until the next step)
+    now.hand_loaded = fresh.hand_loaded;
+    now.hand_motion = fresh.hand_motion;
+    now.held_out = fresh.held_out;
     now.ex_pack = fresh.ex_pack;
     now.ex_model = fresh.ex_model;
     now.ex_arena = fresh.ex_arena;
@@ -1332,6 +1510,24 @@ void PartnerSnapshotApplied() {
         PlayMotion(kept.motion, 0);
         std::printf("coop: partner motion %d starts again at time %.3f yaw %.3f\n", kept.motion, body->motion_type.state.time, yaw);
     }
+
+    // coop-p2eyehand: her view's hand and the slingshot it holds go on from the sender's (the state set's hand_kept, taken by
+    // PartnerMotionTake): loaded again here they start as no step has stepped them, held_out off and hand_motion -1, so a join or a
+    // resync in her view restarted the hand's clock on this copy alone and her shot (EyeShotStart, EyeHandClock) went from another
+    // place at another tick. DC_COOP_MUTATE=p2_hand_unsent (twin, in PartnerMotionTake): nothing taken, as before.
+    const Partner::HandKept &h = kept.hand_kept;
+
+    if (h.set && now.hand_loaded && now.hand != nullptr) {
+        const bool held = h.held_out && PartnerWeaponHold(true);
+
+        HandMotionPut(*now.hand, h.hand);
+        if (held) {
+            HandMotionPut(*now.weapon, h.weapon);
+        }
+        now.hand_motion = h.motion;
+        std::fprintf(stderr, "coop: P2 hand goes on from the state set's: motion %d time %.3f, weapon %s at link tick %lld\n", h.motion,
+                     h.hand.time, held ? "held out" : "in her body's hand", (long long) NetplayLinkTick());
+    }
     std::fflush(stdout);
 }
 
@@ -1364,6 +1560,23 @@ void PartnerMotionTake() {
     m.playing = state.playing_no;
     m.blending = state.blending;
     std::printf("coop: partner motion %d taken at time %.3f yaw %.3f\n", m.no, m.time, m.yaw);
+
+    // coop-p2eyehand: her view's hand (and the slingshot it holds) with it, in or out of her view (a blend into the view's next
+    // motion starts from the hand's last pose). DC_COOP_MUTATE=p2_hand_unsent (twin): not taken, the taker's hand starts again.
+    Partner::HandKept &h = g_partner.hand_kept;
+
+    h = Partner::HandKept{};
+    if (g_partner.hand_loaded && g_partner.hand != nullptr && !Mutated("p2_hand_unsent")) {
+        h.set = true;
+        h.motion = g_partner.hand_motion;
+        h.held_out = g_partner.held_out;
+        HandMotionTake(*g_partner.hand, h.hand);
+        if (g_partner.held_out && g_partner.weapon != nullptr) {
+            HandMotionTake(*g_partner.weapon, h.weapon);
+        }
+        std::fprintf(stderr, "coop: P2 hand taken with the state set: motion %d time %.3f, weapon %s\n", h.motion, h.hand.time,
+                     h.held_out ? "held out" : "in her body's hand");
+    }
     std::fflush(stdout);
 }
 
@@ -1424,6 +1637,7 @@ bool StandInReady(int chara) {
     }
     body->InitializeTexAnime(g_stand_in.tex_anime, 64);
     body->LoadPackData2(g_stand_in.pack, (char *) "base.cfg", &g_stand_in.arena, kStandInBlock, &g_stand_in.arena, 0);
+    coop::FacesPrepare(); // coop-faces
     if (body->frame == nullptr) {
         return false;
     }
@@ -1512,10 +1726,19 @@ void StandInPoseMeasure(CCharacter *body, const sceVu0FVECTOR place) {
 
 // Posed where the game draws its player, this frame's motion.
 CCharacter *StandInPosed() {
-    const int chara = CoopWorldsEntryStandIn();
+    int   chara = CoopWorldsEntryStandIn();
+    float swap_place[4];
+    float swap_yaw = 0.0f;
+    int   swap_motion = 0;
+    int   swap_flags = 0;
+    // coop-entrance2 option C: the game's player drawn as his member on his lagged way while she plays the walk-in (EntranceSwapStandIn)
+    const bool swap = chara < 0 && EntranceSwapStandIn(&chara, swap_place, &swap_yaw, &swap_motion, &swap_flags);
 
     // (loaded and put away on the tick, EntryStandInTick: a texture table cleaned up inside a draw left that frame black)
     if (chara < 0 || chara != g_stand_in.chara || UserStatus == nullptr || g_stand_in.floor != selectMapNo * 256 + UserStatus->cur_floor) {
+        return nullptr;
+    }
+    if (swap && EntranceSwapStandInWaiting()) { // (coop-entrance2: waiting its delay at his way's start: not drawn yet)
         return nullptr;
     }
 
@@ -1526,22 +1749,44 @@ CCharacter *StandInPosed() {
 
     PlayerDrawnPlace(place, axis_x, axis_z);
 
-    const float yaw = atan2f(axis_z[0], axis_z[1]);
+    const float yaw = swap ? swap_yaw : atan2f(axis_z[0], axis_z[1]);
+
+    if (swap) {
+        sceVu0CopyVector(place, swap_place);
+    }
 
     body->frame->SetPosition(place);
     body->frame->SetRotation(0.0f, yaw, 0.0f);
     body->SetPosition(place);
     body->SetRotation(0.0f, yaw, 0.0f);
 
-    const MOTION_INFO &info = body->motion_type.motion_info[CharaMain.motion_no];
-    const int          motion = CharaMain.motion_no >= 0 && info.end > info.start && info.start >= 0 ? CharaMain.motion_no : 0;
+    const int          player_motion = swap ? swap_motion : CharaMain.motion_no;
+    const int          player_flags = swap ? swap_flags : CharaMain.motion_flags;
+    const MOTION_INFO &info = body->motion_type.motion_info[std::max(player_motion, 0)];
+    const int          motion = player_motion >= 0 && info.end > info.start && info.start >= 0 ? player_motion : 0;
 
-    if (body->motion_no != motion) {
+    if (body->motion_no != motion || (swap && body->motion_flags != (motion == player_motion ? player_flags : 0))) {
         body->motion_no = motion;
-        body->motion_flags = motion == CharaMain.motion_no ? CharaMain.motion_flags : 0;
+        body->motion_flags = motion == player_motion ? player_flags : 0;
         body->motion_speed = -1.0f;
     }
     body->Step();
+    // coop-entrance9 (Jep 11-12, clip e57: "right as the opening turns from the cinematic into Toan actually running, Toan loses his
+    // outer layer of clothes"): his poncho is a cloth (CCloth), which hangs from the body only as ClothStep steps it, as the partner's
+    // and the player's are each tick; the stand-in's never was, so it stayed where it was made while the stand-in walked on (the
+    // orange piece left at the niche's end, frame 412 of e58) and he walked on without it. DC_COOP_MUTATE=standin_cloth_unstepped
+    // (twin): not stepped, as before.
+    if (!Mutated("standin_cloth_unstepped")) {
+        // (a cloth far from the body, its first draw or a jump: put on it at rest first, as the game's Clear does, not swung across)
+        for (int i = 0; body->cloth != nullptr && i < 8 && body->cloth[i] != nullptr; i++) {
+            const float *corner = body->cloth[i]->point[0][0];
+
+            if (std::hypot(corner[0] - place[0], corner[2] - place[2]) > 25.0f) {
+                body->cloth[i]->Clear();
+            }
+        }
+        body->ClothStep(0);
+    }
     // coop-entryshadow (Jep's 2026-10-27 run: "her shadow is T-posing" in her entrance): the shadow is a model of its own
     // with its own motions, set to the body's motion and frame by ShadowStep, as the partner's and the town body's are
     // each tick. Never stepped, it stood in its bind pose. DC_COOP_MUTATE=entry_shadow_bind (twin): not stepped, as before.
@@ -1554,6 +1799,41 @@ CCharacter *StandInPosed() {
 
 } // namespace
 
+// coop-entrance9: how many of the drawn lead's cloths (Toan's poncho) hang on him: the stand-in's while it is drawn in his place,
+// else the game's player's; a cloth hangs on him when its first vertex is within 25 of where the body is drawn (x-entrance-forest).
+int DrawnLeadClothsOn(int *all) {
+    int         chara = -1;
+    float       swap_place[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float       swap_yaw = 0.0f;
+    int         swap_motion = 0;
+    int         swap_flags = 0;
+    const bool  swap = EntranceSwapStandIn(&chara, swap_place, &swap_yaw, &swap_motion, &swap_flags) && g_stand_in.body != nullptr &&
+                      g_stand_in.chara == chara;
+    CCharacter *body = swap ? g_stand_in.body : &CharaMain;
+    float       at[4];
+
+    if (swap) {
+        sceVu0CopyVector(at, swap_place);
+    } else {
+        PlayerDrawnAt(at);
+    }
+    int on = 0;
+    int n = 0;
+
+    for (int i = 0; body->cloth != nullptr && i < 8 && body->cloth[i] != nullptr; i++) {
+        const float *corner = body->cloth[i]->point[0][0];
+
+        n++;
+        on += std::hypot(corner[0] - at[0], corner[2] - at[2]) < 25.0f ? 1 : 0;
+        if (static int said = 0; TestEnv("DC_COOP_TEST_ENTRANCE_BODIES") != nullptr && said++ % 90 == 0) {
+            std::fprintf(stderr, "coop: lead cloth %d (%s) corner (%.1f %.1f %.1f) body at (%.1f %.1f %.1f) stop %d\n", i, swap ? "stand-in" : "player",
+                         corner[0], corner[1], corner[2], at[0], at[1], at[2], body->cloth[i]->stop);
+        }
+    }
+    *all = n;
+    return on;
+}
+
 bool EntryStandInPose(EntryStandInPoseInfo *out) {
     if (g_stand_in_pose.frame < 0) {
         return false;
@@ -1563,7 +1843,15 @@ bool EntryStandInPose(EntryStandInPoseInfo *out) {
 }
 
 void EntryStandInTick() {
-    const int chara = CoopWorldsEntryStandIn();
+    int   chara = CoopWorldsEntryStandIn();
+    float swap_place[4];
+    float swap_yaw = 0.0f;
+    int   swap_motion = 0;
+    int   swap_flags = 0;
+
+    if (chara < 0) {
+        EntranceSwapStandIn(&chara, swap_place, &swap_yaw, &swap_motion, &swap_flags); // (coop-entrance2 option C)
+    }
 
     if (chara >= 0 && UserStatus != nullptr && CoopWorldsHereFloor() != -1000) { // (on a floor)
         StandInReady(chara);
@@ -1631,31 +1919,187 @@ void CoopP1WalkIntoForTest(const float *pos, float angle, float *lx, float *ly) 
     *ly = mx * sinf(angle) + mz * cosf(angle);
 }
 
-bool coop::OtherBeyondClip() {
-    static bool far_now = false;
+void coop::PlayerDrawnAt(float *out) {
+    float axis_x[2];
+    float axis_z[2];
 
-    if (mode != GAME_MODE_DUNGEON || !NetplayHasPlayer() || !g_partner.visible || Mutated("farplayer_drawn")) {
+    if (Mutated("farplayer_main_pos")) {
+        sceVu0CopyVector(out, CharaMain.pos);
+        out[3] = 1.0f;
+        return;
+    }
+    PlayerDrawnPlace(out, axis_x, axis_z);
+}
+
+namespace {
+
+bool OtherBeyondClipDecide();
+
+// coop-entrancereds (x-entrance-cave-p1/moon-p1 red since farcull's floor gate, rc2): "the other player drawn throughout the
+// walk-in" read every hidden decision from the opening's first tick, where the cave's in01 holds both at (0 0 0) with the camera
+// still at the last floor's place (cell 0, no part: hidden for that one tick, as the floor round them), and Moon Sea's lead stands
+// off the pad till his beam (hidden by the beam then too). Both before the walk-in draws them. Now said once an opening: the ticks
+// the walk-in drew both (EntranceWalkInShowsBoth, the bodies' span) and those of them the gate hid the other on (stderr: x-entrance).
+void WalkInFarTrack(bool far) {
+    static bool      on = false;
+    static int       seen = 0;
+    static int       hidden = 0;
+    static long long first = -1;
+    static long long last_tick = -1;
+    static int       map = -1;
+    const bool       intro = FloorIntro();
+    const long long  tick = NetplayLinkTick();
+
+    if (intro && !on) {
+        seen = hidden = 0;
+        first = last_tick = -1;
+        map = selectMapNo;
+    }
+    if (intro && tick != last_tick && EntranceWalkInShowsBoth()) { // (once a tick: his copy asks twice a draw)
+        last_tick = tick;
+        seen++;
+        if (far) {
+            hidden++;
+            first = first < 0 ? tick : first;
+        }
+    }
+    if (!intro && on && seen > 0) {
+        std::fprintf(stderr, "coop-farplayer: the walk-in on map %d: the other player hidden as far away on %d of the %d ticks it drew both (first at link tick %lld)\n",
+                     map, hidden, seen, first);
+        std::fflush(stderr);
+    }
+    on = intro;
+}
+
+} // namespace
+
+bool coop::OtherBeyondClip() {
+    const bool far = OtherBeyondClipDecide();
+
+    WalkInFarTrack(far);
+    return far;
+}
+
+namespace {
+
+bool OtherBeyondClipDecide() {
+    static bool far_now = false;
+    static bool said = false; // (the first decision on a floor is said too, drawn or hidden)
+
+    if (mode != GAME_MODE_DUNGEON || !NetplayHasPlayer() || !g_partner.visible) {
         far_now = false;
+        said = false;
         return false;
     }
 
+    // coop-entrance2 round 7 (Jep 11-12, cave clip: "each player can't see the other until the END of the walk-in"; fine on
+    // lan-pack-coop7 11-02, broken since this gate, v0.1.1 too): the game's player is measured where it is drawn (PlayerDrawnPlace):
+    // while a scene's node carries him (the cave's stairs) CharaMain.pos is (0 0 0), so the other read 1269 away and was hidden
+    // on both screens from link tick 100 to 285. DC_COOP_MUTATE=farplayer_main_pos (twin): CharaMain.pos, as before.
+    sceVu0FVECTOR drawn;
+
+    PlayerDrawnAt(drawn);
     const bool   mine_is_partner = ActorLocalIndex() == 1;
-    const float *mine = mine_is_partner ? g_partner.pos : CharaMain.pos;
-    const float *other = mine_is_partner ? CharaMain.pos : g_partner.pos;
-    const float  away = DistVector(const_cast<float *>(mine), const_cast<float *>(other));
+    {
+        // coop-entrancereds: option C (EntranceSwapStandIn): the game's player plays her walk-in and his stand-in walks his lagged
+        // way: on her copy he is where the stand-in is drawn (CoopDrawShadow asks this gate for it).
+        int   swap_chara = -1;
+        float swap_yaw = 0.0f;
+        int   swap_motion = 0;
+        int   swap_flags = 0;
+        float swap_place[4];
+
+        if (mine_is_partner && EntranceSwapStandIn(&swap_chara, swap_place, &swap_yaw, &swap_motion, &swap_flags)) {
+            sceVu0CopyVector(drawn, swap_place);
+        }
+    }
+    const float *mine = mine_is_partner ? g_partner.pos : drawn;
+    const float *other = mine_is_partner ? drawn : g_partner.pos;
     const bool   was = far_now;
 
-    far_now = far_now ? away >= 300.0f : away > 310.0f; // (retail: awake inside 300, asleep past 310)
-    if (far_now != was) {
-        std::fprintf(stderr, "coop-farplayer: the other player is %s at %.0f from this copy's own, link tick %lld\n", far_now ? "hidden" : "drawn", away, (long long) NetplayLinkTick());
+    if (Mutated("farplayer_clip300")) { // (twin: the pt1109b rule, a monster's 300 between the players)
+        const float away = DistVector(const_cast<float *>(mine), const_cast<float *>(other));
+
+        far_now = far_now ? away >= 300.0f : away > 310.0f;
+        if (far_now != was) {
+            std::fprintf(stderr, "coop-farplayer: the other player is %s at %.0f from this copy's own, link tick %lld\n", far_now ? "hidden" : "drawn", away, (long long) NetplayLinkTick());
+            std::fflush(stderr);
+        }
+        return far_now;
+    }
+
+    FloorCull cull;
+
+    // (the twin, farplayer_drawn: drawn at any distance, and said, so its row ends on the line and fails on its own check)
+    far_now = BeyondFloorDraw(other, &cull) && !Mutated("farplayer_drawn");
+    static int  calls = 0;
+    const bool  each_second = CoopDebug() && ++calls % 60 == 0; // (a test reads the drawn decision as it stands, not only on a change)
+
+    if (far_now != was || !said || each_second) {
+        said = true;
+        std::fprintf(stderr, "coop-farplayer: the other player is %s at %.0f from this copy's camera (cell %d at %.0f, %s; the floor draws its cells within %.0f), %.0f from this copy's own, link tick %lld\n",
+                     far_now ? "hidden" : "drawn", cull.from_camera, cull.cell, cull.cell_dist, cull.cell_drawn ? "drawn" : cull.has_part ? "not drawn" : "no part", cull.reach,
+                     DistVector(const_cast<float *>(mine), const_cast<float *>(other)), (long long) NetplayLinkTick());
         std::fflush(stderr);
     }
     return far_now;
 }
 
+} // namespace
+
+// coop-farcull: CDungeonMap::DrawMap's own rule, read where it already ran on this copy's screen (the cell's visible flag).
+bool coop::BeyondFloorDraw(const float *at, FloorCull *out) {
+    FloorCull cull;
+    float     cam[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+    if (NowCamera__3 != nullptr) {
+        ((CCamera *) NowCamera__3)->GetPos(cam);
+    }
+    float flat[4] = {at[0] - cam[0], 0.0f, at[2] - cam[2], 0.0f};
+
+    cull.from_camera = DistVector(flat);
+    cull.cell_dist = cull.from_camera; // (off the grid: the place itself)
+
+    if (NowDngMap == nullptr || NowDngMap->map_type != 1) { // a floor of freely placed parts draws every part (DrawMapFreeStyle)
+        if (out != nullptr) {
+            *out = cull;
+        }
+        return false;
+    }
+
+    cull.reach = 160.0f * NowDngMap->draw_dist_scale;
+    const int col = (int) ((80.0f + at[0]) / 160.0f); // (the cell a place is in: retail's own, CDungeonMap's boxes and circles)
+    const int row = (int) ((80.0f + at[2]) / 160.0f);
+    bool      hidden = !(cull.from_camera < cull.reach); // (off the floor's 20 by 20 cells: no cell drawn there; by the distance)
+
+    if (col >= 0 && col < 20 && row >= 0 && row < 20) {
+        const MAPPARTS &cell = NowDngMap->cells[col + row * 20];
+        float           centre[4] = {160.0f * col - cam[0], 0.0f, 160.0f * row - cam[2], 0.0f};
+
+        cull.cell = col + row * 20;
+        cull.cell_dist = DistVector(centre);
+        cull.cell_drawn = cell.visible != 0;
+        cull.has_part = cell.parts_no != MAP_PARTS_NONE;
+        // A cell with a part: hidden exactly when the floor did not draw it. One with none (never drawn) by the distance alone.
+        hidden = cell.parts_no != MAP_PARTS_NONE ? !cull.cell_drawn : !(cull.cell_dist < cull.reach);
+    }
+    if (out != nullptr) {
+        *out = cull;
+    }
+    return hidden;
+}
+
 void CoopDrawShadow() {
     // coop-joinvisuals: her member in the hidden player's place, its shadow and body (the partner's draw is off apart).
-    if (CCharacter *body = StandInPosed(); body != nullptr) {
+    CCharacter *body = StandInPosed();
+
+    // coop-entrancereds (x-entrance-temple-p1, copy B "no walk-in line"): option C's stand-in (EntranceSwapStandIn, no joinvisuals
+    // member) is him drawn in his place on her copy, which CoopDrawPlayer leaves out through the opening (CoopPlayerShown): so it
+    // takes his draw gate too, as he would (her copy draws him only inside the distance the floor draws at, OtherBeyondClip).
+    if (body != nullptr && CoopWorldsEntryStandIn() < 0 && coop::ActorLocalIndex() == 1 && coop::OtherBeyondClip()) {
+        body = nullptr;
+    }
+    if (body != nullptr) {
         if (BtActStatus.shadow_visible != 0) {
             float light[4][4];
             float colour[4][4];
@@ -1675,11 +2119,13 @@ void CoopDrawShadow() {
         }
         TexManager.ReloadTexture(Vif1Packet, kStandInBlock);
         body->TextureAnime(kStandInBlock);
+        coop::FacesDraw(body, kStandInBlock, -1, "the stand-in"); // coop-faces
         body->Draw();
     }
 
     CoopPerfScope perf(kCoopPerfDraw); // coop: perf
-    if (!g_partner.visible || BtActStatus.shadow_visible == 0 || (coop::ActorLocalIndex() == 0 && coop::OtherBeyondClip())) { // coop-pt1109b: past the draw distance
+    if (!g_partner.visible || BtActStatus.shadow_visible == 0 || (coop::ActorLocalIndex() == 0 && coop::OtherBeyondClip()) ||
+        coop::EntrancePartnerHidden()) { // coop-pt1109b: past the draw distance; coop-entrance2: before her beam
         return;
     }
 
@@ -1700,9 +2146,48 @@ void CoopDrawShadow() {
     MGSetPLight(light, colour);
 }
 
+// coop-p2eyehand: her own copy's draw from her first-person view draws her view's hand and the slingshot it holds, as the game
+// draws the player's after the monsters while CharaMainHandViewFlag (Xiao's alone: Ruby's hand is posed for her shot, never drawn),
+// the hand with her body's textures, the weapon with its own. Draw only: the simulation posed both (PartnerHandStep).
+// x-p2-eye (DC_COOP_TEST_P2_EYE): once every 10 draws, how many drew the hand and the weapon.
+static void DrawPartnerEyeHand() {
+    static int hands = 0;
+    static int weapons = 0;
+    static int traced = 0;
+
+    if (g_partner.loaded_chara == CHARA_XIAO && g_partner.hand_loaded && g_partner.hand_motion >= 0) {
+        TexManager.ReloadTexture(Vif1Packet, PartnerTextureBlock());
+        g_partner.hand->Draw();
+        hands++;
+
+        if (g_partner.held_out) {
+            TexManager.ReloadTexture(Vif1Packet, PartnerWeaponBlock());
+            g_partner.weapon->Draw();
+            weapons++;
+        }
+    }
+
+    if (static const bool on = TestEnvOn("DC_COOP_TEST_P2_EYE"); on && traced++ % 10 == 0) {
+        std::fprintf(stderr, "coop: test: p2 eye hand: drawn %d, weapon in it %d of %d eye draws\n", hands, weapons, traced);
+    }
+}
+
 void CoopDraw() {
     CoopPerfScope perf(kCoopPerfDraw); // coop: perf
-    if (!g_partner.visible) {
+    // coop-entrance2: Moon Sea's pad, each character's own beam, drawn last (whatever this returns by): over the partner, as the
+    // retail beam (an event actor, drawn after the player) is over the lead, so she shows inside her beam as he does in his
+    // (drawn first, the beams under her, she popped in crisp while he came up through his glow: spots2 11-12).
+    // DC_COOP_MUTATE=moon_beam_under (twin, frames only): the beams first, as before.
+    struct BeamsLast {
+        ~BeamsLast() {
+            coop::EntranceBeamsDraw(); // (cand1112c: its switch removed, no row turned it on)
+        }
+    } beams_last;
+
+    CoopWorldsSceneActorsDraw(); // coop-sceneactors: the other's scene's actors in its view (its partner is not drawn then)
+
+    // coop-menutpose: her stay waiting under her menu draws her body where she stood (apart it is otherwise neither stepped nor drawn)
+    if ((!g_partner.visible && !CoopWorldsStayKeepsBody()) || coop::EntrancePartnerHidden()) { // coop-entrance2: not drawn before her beam
         return;
     }
 
@@ -1716,8 +2201,23 @@ void CoopDraw() {
         return;
     }
 
-    // The partner blinks while it cannot be hit.
-    if (g_partner.down == 0 && g_partner.invincible > 0 && (g_partner.invincible & 4) != 0) {
+    // coop-p2hurt2 (p2-like-p1): no blink. Retail's player never blinks while it cannot be hit; a hit or a revive lights its model
+    // red and back (its pulse, PulseStep below). DC_COOP_MUTATE=p2blink (twin): the partner blinks while it cannot be hit, as before.
+    const bool blinked = Mutated("p2blink") && g_partner.down == 0 && g_partner.invincible > 0 && (g_partner.invincible & 4) != 0;
+
+    // (Test hook DC_COOP_TEST_PULSE=1: each draw while she cannot be hit, whether her body was drawn.)
+    if (static const bool safe_draws = TestEnvOn("DC_COOP_TEST_PULSE"); safe_draws && g_partner.down == 0 && g_partner.invincible > 0) {
+        std::fprintf(stderr, "coop-p2hurt2: safe draw: drawn %d\n", blinked ? 0 : 1);
+    }
+    if (blinked) {
+        return;
+    }
+
+    // coop-p2actions: her own copy in her first-person view draws from her eye: her body is left out, as retail leaves the
+    // player's (BtActStatus.player_visible 0); what she opens or holds is the world's and still draws. Draw only.
+    if (CoopPartnerEyeDrawn()) {
+        DrawPartnerEyeHand(); // coop-p2eyehand
+        DrawPartnerPresentation();
         return;
     }
 
@@ -1735,8 +2235,14 @@ void CoopDraw() {
     // while her Square runs the feather (SpeedBoosted); her ailment tint below overrides it, as retail's status colour does.
     // DC_COOP_MUTATE=featherglow_off (twin): no pulse, as before.
     bool boosted = false;
+    // coop-featherpres (Jep's rc1 playtest: "P2 does NOT GLOW while using Dran's Feather when P1 is opening a chest"): retail's
+    // Draw_MainUnit holds the glow and the status tint off through the player's own presentation (BtActStatus.in_presentation);
+    // hers read that same flag, which is the game's player's (player 1's, set on every copy by his chest or Atla's world half),
+    // so his chest put out her glow on every screen. Hers now read her own (PartnerPresenting: her presentation, the world's).
+    // DC_COOP_MUTATE=featherglow_hispres (twin): his flag, as before.
+    const bool presenting = Mutated("featherglow_hispres") ? BtActStatus.in_presentation != 0 : PartnerPresenting();
 
-    if (BtEventMode == 0 && BtActStatus.in_presentation == 0 && SpeedBoosted() && !Mutated("featherglow_off")) {
+    if (BtEventMode == 0 && !presenting && SpeedBoosted() && !Mutated("featherglow_off")) {
         static float rate = 0.0f;
 
         if (rate >= 3.14159274f) {
@@ -1752,7 +2258,7 @@ void CoopDraw() {
         boosted = true;
     }
 
-    if (BtEventMode == 0 && BtActStatus.in_presentation == 0 && g_partner.loaded_chara >= 0 && !Mutated("partnerglow")) {
+    if (BtEventMode == 0 && !presenting && g_partner.loaded_chara >= 0 && !Mutated("partnerglow")) {
         s8 cur_chara = UserStatus->cur_chara;
 
         UserStatus->cur_chara = (s8) g_partner.loaded_chara;
@@ -1767,23 +2273,21 @@ void CoopDraw() {
         }
     }
 
-    static int log_wait = 0;
+    // coop-p2hurt2: her pulse after a hit or a revive, last over the boost and tint as Draw_MainUnit's unitAmbientAnime is, and
+    // stepped once a draw of her as his is once a draw of him. (Test hook DC_COOP_TEST_PULSE=1: each draw, both players' pulses.)
+    if (BtEventMode == 0 && !presenting && PulseStep(2, ambient)) {
+        MGSetAmbient(ambient);
+    }
+    if (static const bool pulses = TestEnvOn("DC_COOP_TEST_PULSE"); pulses) {
+        int   flag[2];
+        int   timer[2];
+        float count[2];
 
-    // The test's report (DC_COOP_GLOW): the tint, and where her feet and her pos + 12 come out on this copy's screen (the
-    // 2D drawing's 640-wide coordinates, as CoopDrawWheel works them out), for its frame check.
-    if (TestEnv("DC_COOP_GLOW") != nullptr && --log_wait <= 0) {
-        float feet[4] = {g_partner.pos[0], g_partner.pos[1], g_partner.pos[2], 1.0f};
-        float head[4] = {g_partner.pos[0], g_partner.pos[1] + 12.0f, g_partner.pos[2], 1.0f};
-        int   at_feet[4] = {};
-        int   at_head[4] = {};
-        bool  seen = MGRotTransPers(at_feet, feet, 0) != 0 && MGRotTransPers(at_head, head, 0) != 0;
-
-        log_wait = 30;
-        std::fprintf(stderr, "coop-glow: partner %d ailments %#x tint %s (%.0f %.0f %.0f), screen %d feet (%d %d) head (%d %d), copy of p%d\n",
-                     g_partner.loaded_chara, g_partner.loaded_chara >= 0 ? (unsigned) UserStatus->ailments[g_partner.loaded_chara] : 0u,
-                     tinted ? "on" : boosted ? "boost" : "off", ambient[0], ambient[1], ambient[2], seen ? 1 : 0, (at_feet[0] - 0x6C00) >> 4,
-                     ((at_feet[1] - GS_Y_OFFSET) >> 4) * 2, (at_head[0] - 0x6C00) >> 4, ((at_head[1] - GS_Y_OFFSET) >> 4) * 2,
-                     NetplayLocalPlayer() == 2 ? 2 : 1);
+        PulseRead(1, &flag[0], &timer[0], &count[0]);
+        PulseRead(2, &flag[1], &timer[1], &count[1]);
+        if (flag[0] != 0 || flag[1] != 0) {
+            std::fprintf(stderr, "coop-p2hurt2: pulse draw: p1 %d %.3f, p2 %d %.3f\n", flag[0], count[0], flag[1], count[1]);
+        }
     }
 
     // coop-atlaopen: her Atla's light on her body, as retail's lights the opener (its "light01" point light).
@@ -1802,8 +2306,27 @@ void CoopDraw() {
         MGSetPLight(pres_light, pres_colour);
     }
 
+    // candfix2 (x-p2-lockpress / -lock-cam / -circle-cam OUT OF SYNC at tick 120 after the dun1-f1 load): CCharacter::Draw puts
+    // the character's own place and turn onto its frame, and the frame is what the simulation reads (CoopStep takes her turn from
+    // it, autoCamTrial her facing). A turn or place written to the frame alone after CoopStep's step (camtest's "facing it") was
+    // undone on a copy that draws her and kept on one that does not (his copy past the draw distance, OtherBeyondClip): her yaw
+    // parted the copies, then her camera's lock swing. The draw now draws the frame as the tick left it, so drawing her changes
+    // nothing. DC_COOP_MUTATE=partner_draw_writes (twin): the character's own, as before.
+    if (CFrame *frame = g_partner.chara->frame; frame != nullptr && !Mutated("partner_draw_writes")) {
+        float turn[4];
+
+        frame->GetRotation(turn);
+        g_partner.chara->pos[0] = frame->position[0];
+        g_partner.chara->pos[1] = frame->position[1];
+        g_partner.chara->pos[2] = frame->position[2];
+        g_partner.chara->rotation.x = turn[0];
+        g_partner.chara->rotation.y = turn[1];
+        g_partner.chara->rotation.z = turn[2];
+    }
+
     TexManager.ReloadTexture(Vif1Packet, PartnerTextureBlock());
     g_partner.chara->TextureAnime(PartnerTextureBlock());
+    coop::FacesDraw(g_partner.chara, PartnerTextureBlock(), -1, "the dungeon partner"); // coop-faces
     g_partner.chara->Draw();
 
     if (lit) {
@@ -1811,7 +2334,23 @@ void CoopDraw() {
     }
 
     // The weapon follows the hand the body's Step just posed.
-    if (g_partner.weapon_loaded) {
+    // coop-p2eyehand: while her view's hand holds it (another copy's draw of her in her first-person view), it is drawn in her body's
+    // hand all the same: the view's hand is her own screen's alone; the simulation steps it then (PartnerHandStep), the draw does not.
+    if (g_partner.weapon_loaded && g_partner.held_out) {
+        CFrame *held = g_partner.weapon->frame->parent; // (the view's hand: SetReference keeps it as the parent)
+        CFrame *body_hand = g_partner.chara->frame->SearchFrame((char *) "weapon");
+
+        if (body_hand != nullptr) {
+            g_partner.weapon->frame->SetReference(body_hand);
+        }
+        TexManager.ReloadTexture(Vif1Packet, PartnerWeaponBlock());
+        g_partner.weapon->Draw();
+        g_partner.weapon->frame->SetReference(held);
+
+        sceVu0FMATRIX fresh; // (its frames' world matrices made again from the view's hand, not left from this draw's)
+
+        g_partner.weapon->frame->GetLWMatrix(fresh);
+    } else if (g_partner.weapon_loaded) {
         g_partner.weapon->Step();
         TexManager.ReloadTexture(Vif1Packet, PartnerWeaponBlock());
         g_partner.weapon->Draw();
@@ -1840,11 +2379,11 @@ bool Mutated(const char *feature) {
         return false;
     }
 
-    // coop-onher: a comma list turns several on (a twin of a bug two fixes now guard).
+    // coop-onher: a comma list (or a plus list, for a test's --prove=DC_COOP_MUTATE=a+b) turns several on (a twin of a bug two fixes now guard).
     const std::size_t length = std::strlen(feature);
 
     for (const char *at = mutation; *at != '\0';) {
-        const char *end = std::strchr(at, ',');
+        const char *end = std::strpbrk(at, ",+");
         const std::size_t size = end != nullptr ? (std::size_t) (end - at) : std::strlen(at);
 
         if (size == length && std::strncmp(at, feature, length) == 0) {
@@ -1873,9 +2412,12 @@ void PartyResetForSession() {
     fresh.pack = g_partner.pack;
     fresh.model = g_partner.model;
     fresh.weapon = g_partner.weapon;
+    fresh.hand = g_partner.hand; // coop-p2eyehand (loaded again with the body)
     fresh.ex_pack = g_partner.ex_pack;
     fresh.ex_model = g_partner.ex_model;
+    fresh.choice = g_partner.choice;
     g_partner = fresh;
+    SetPick(1, -1, MemberWhy::kNet); // coop-memberowner: no pick, through the members' writer (the host's follows with its state)
     std::printf("coop: party reset for the session\n");
 }
 
@@ -1884,23 +2426,77 @@ void PartyResetForSession() {
 // Pad 2's pick beside the save slot (saves/<N>/coop-party.dat): written with the save, read as it
 // loads, removed with it. The pick comes back only if that member has joined and is not the player's;
 // a slot without the file starts with no pick (Xiao, or the next member, as on a new game).
+// save6 (Jep 11-12: a save made now holds 6 players, so it never has to change shape later): the file is the 8 bytes it
+// always was (magic CPP1, pad 2's pick: v0.1.0/v0.1.1 read only those 8, FilesRead stopping at their buffer) and, after
+// them, a section: magic CPPN, the layout version (3), a count, then one byte per player from 3 on (their pick, 0xFF none).
+// Players 3 to 6 have no pick of their own yet (nobody plays them): the bytes are kept as read and written back, so a
+// later release that fills them loses nothing through this one. A file of 8 bytes is an older release's.
 namespace {
 
 constexpr std::uint32_t kPartyMagic = 0x31505043; // "CPP1"
+constexpr std::uint32_t kPartyMoreMagic = 0x4E505043; // "CPPN" (save6)
+constexpr std::uint32_t kPartyLayout = 3;            // save6: coop-p2.dat's layout version, the same number
 const char *const       kPartyFile = "coop-party.dat";
+int                     g_more_picks[coop::kMaxPlayers] = {-1, -1, -1, -1, -1, -1}; // players 3 up (index p: player p+1); -1 none
 
 } // namespace
+
+bool CoopPartyFileWrite(const std::filesystem::path &save_directory) {
+    unsigned char bytes[8 + 12 + coop::kMaxPlayers] = {};
+    std::size_t   size = 0;
+    const auto    put = [&](std::uint32_t v) {
+        std::memcpy(bytes + size, &v, sizeof v);
+        size += sizeof v;
+    };
+
+    put(kPartyMagic);
+    put((std::uint32_t) (coop::g_partner.choice >= 0 ? coop::g_partner.choice : 0xFF));
+    put(kPartyMoreMagic);
+    put(kPartyLayout);
+    put((std::uint32_t) (coop::kMaxPlayers - 2));
+    for (int p = 2; p < coop::kMaxPlayers; p++) {
+        bytes[size++] = (unsigned char) (g_more_picks[p] >= 0 ? g_more_picks[p] : 0xFF);
+    }
+    if (FilesWrite(save_directory / kPartyFile, bytes, size, true) != FilesResult::kWritten) {
+        std::fprintf(stderr, "coop: could not write %s\n", (save_directory / kPartyFile).string().c_str());
+        return false;
+    }
+    return true;
+}
+
+int CoopPartyFileRead(const std::filesystem::path &save_directory, int picks[coop::kMaxPlayers]) {
+    unsigned char bytes[256] = {};
+    std::size_t   size = FilesRead(save_directory / kPartyFile, bytes, sizeof bytes);
+    std::uint32_t word[5] = {};
+
+    for (int p = 0; p < coop::kMaxPlayers; p++) {
+        picks[p] = -1;
+    }
+    if (size < 8) {
+        return size == 0 ? -1 : 0;
+    }
+    std::memcpy(word, bytes, std::min<std::size_t>(size, sizeof word));
+    if (word[0] != kPartyMagic) {
+        return 0;
+    }
+    picks[1] = word[1] <= 5 ? (int) word[1] : -1;
+    if (size < 20 || word[2] != kPartyMoreMagic || word[3] < 3) {
+        return 2; // (an older release's file: pad 2's pick alone)
+    }
+    for (std::uint32_t i = 0; i < word[4] && 20 + i < size && 2 + i < (std::uint32_t) coop::kMaxPlayers; i++) {
+        picks[2 + i] = bytes[20 + i] <= 5 ? bytes[20 + i] : -1;
+    }
+    return (int) word[3];
+}
 
 bool CoopPartySave(const std::filesystem::path &save_directory) {
     // The host writes it; a joiner's copy (player 2 of a link) writes none of its own.
     if (!coop::Enabled() || NetplayLocalPlayer() == 2 || coop::Mutated("partysave")) {
         return true;
     }
+    coop::CoopSlotKeepOldLayout(save_directory); // save6: an older release's files kept once before the first write
 
-    std::uint32_t data[2] = {kPartyMagic, (std::uint32_t) (coop::g_partner.choice >= 0 ? coop::g_partner.choice : 0xFF)};
-
-    if (FilesWrite(save_directory / kPartyFile, data, sizeof data, true) != FilesResult::kWritten) {
-        std::fprintf(stderr, "coop: could not write %s\n", (save_directory / kPartyFile).string().c_str());
+    if (!CoopPartyFileWrite(save_directory)) {
         return false;
     }
 
@@ -1909,31 +2505,48 @@ bool CoopPartySave(const std::filesystem::path &save_directory) {
 }
 
 void CoopPartyLoad(const std::filesystem::path &save_directory) {
-    std::uint32_t data[2] = {};
-    std::size_t   size = FilesRead(save_directory / kPartyFile, data, sizeof data);
+    int picks[coop::kMaxPlayers];
+    const int layout = CoopPartyFileRead(save_directory, picks);
 
-    coop::g_partner.choice = -1;
+    coop::SetPick(1, -1, coop::MemberWhy::kLoad);
+    if (SaveData != nullptr) {
+        coop::MemberSeed(SaveData->GetDngStatus()->cur_chara); // (the save's player, until the lobby's pick)
+    }
+    for (int p = 2; p < coop::kMaxPlayers; p++) {
+        g_more_picks[p] = picks[p];
+    }
 
-    if (size != sizeof data || data[0] != kPartyMagic || data[1] > 5) {
+    if (layout <= 0 || picks[1] < 0) {
         return;
     }
 
     CDngStatusData *status = SaveData->GetDngStatus();
-    int             pick = (int) data[1];
+    int             pick = picks[1];
 
     if (status == nullptr || pick >= status->party_size || pick == status->cur_chara) {
         std::printf("coop: pad 2's saved pick %d skipped (not joined, or the player's)\n", pick);
         return;
     }
 
-    coop::g_partner.choice = pick;
+    coop::SetPick(1, pick, coop::MemberWhy::kLoad);
     std::printf("coop: pad 2's pick %d restored from the slot\n", pick);
+}
+
+int CoopPartyMorePick(int p) {
+    return p >= 2 && p < coop::kMaxPlayers ? g_more_picks[p] : -1;
+}
+
+void CoopPartyMorePickSet(int p, int pick) {
+    if (p >= 2 && p < coop::kMaxPlayers) {
+        g_more_picks[p] = pick;
+    }
 }
 
 void CoopPartyDelete(const std::filesystem::path &save_directory) {
     std::error_code error;
 
     std::filesystem::remove(save_directory / kPartyFile, error);
+    std::filesystem::remove(save_directory / (std::string(kPartyFile) + coop::kSlotBackupSuffix), error); // (save6: its backup with it)
 }
 
 namespace {
@@ -1943,7 +2556,10 @@ int g_lobby_guest = -1;
 } // namespace
 
 void CoopPartyNewGame() {
-    coop::g_partner.choice = -1;
+    coop::SetPick(1, -1, coop::MemberWhy::kLoad);
+    if (SaveData != nullptr) {
+        coop::MemberSeed(SaveData->GetDngStatus()->cur_chara); // (a new game's player, Toan, until the lobby's pick below)
+    }
     if (g_lobby_host >= 0 || g_lobby_guest >= 0) {
         const int host = g_lobby_host, guest = g_lobby_guest;
 
@@ -1967,8 +2583,13 @@ void CoopPartyLobbyPicks(int host, int guest, bool new_game) {
     if (status != nullptr && host >= 0 && host < status->party_size && host != status->cur_chara) {
         status->cur_chara = (s8) host;
     }
+    // coop-memberowner (Jep's rule 11-14: the lobby's pick is the member each player starts as, his first recorded one): player 1's
+    // member is the one he starts as, so retail's Toan at the dungeon's load is undone at the floor's first tick of play.
+    if (status != nullptr) {
+        coop::MemberSeed(status->cur_chara);
+    }
     if (guest >= 0 && guest < 6 && (status == nullptr || guest != status->cur_chara)) {
-        coop::g_partner.choice = guest;
+        coop::SetPick(1, guest, coop::MemberWhy::kLoad);
     }
     std::fprintf(stderr, "lobby: picks applied: player 1 plays %d (asked %d), player 2's pick %d (asked %d)\n", status != nullptr ? status->cur_chara : -1, host,
                  coop::g_partner.choice, guest);
@@ -2115,3 +2736,230 @@ int PartyJobPresenceCalls() {
 }
 
 } // namespace coop
+
+// coop-farcull (Jep's rc1 playtest: player 1 saw player 2's damage numbers from all the way across the floor): a damage number
+// (CHitValue::Draw, a 2D sprite with no depth, so it showed through every wall) is drawn only where this copy's floor draws the
+// world (coop::BeyondFloorDraw), as the other player's body is. Retail's own are always by its one player, whose cells are drawn.
+// Linked copies on a floor only. DC_COOP_MUTATE=farcull_numbers (twin): every number drawn, as before.
+bool CoopHitValueCulled(const void *slot, const float *world) {
+    static const void *seen[32] = {};
+    static signed char said[32] = {};
+    static float       at[32][3] = {};
+
+    if (mode != GAME_MODE_DUNGEON || !NetplayHasPlayer()) {
+        return false;
+    }
+
+    coop::FloorCull cull;
+    // (the twin's numbers are said too, drawn, so its row ends on them and fails on its own check)
+    const bool      hidden = coop::BeyondFloorDraw(world, &cull) && !coop::Mutated("farcull_numbers");
+    int             k = 0;
+
+    while (k < 32 && seen[k] != nullptr && seen[k] != slot) {
+        k++;
+    }
+    if (k < 32) {
+        // (one line a number as it first draws or hides, and again when that changes; a number newly put in the slot, at
+        // another place, says itself anew)
+        const auto *value = static_cast<const CHitValue *>(slot);
+        const bool  fresh = seen[k] == nullptr || value->pos[0] != at[k][0] || value->pos[1] != at[k][1] || value->pos[2] != at[k][2];
+        const int   state = hidden ? 1 : 2;
+
+        seen[k] = slot;
+        if (fresh || said[k] != state) {
+            std::fprintf(stderr, "coop-farcull: damage number %s at %.0f from this copy's camera (cell %d at %.0f, %s; the floor draws within %.0f), link tick %lld\n",
+                         hidden ? "hidden" : "drawn", cull.from_camera, cull.cell, cull.cell_dist, cull.cell_drawn ? "drawn" : cull.has_part ? "not drawn" : "no part", cull.reach,
+                         (long long) NetplayLinkTick());
+            std::fflush(stderr);
+        }
+        said[k] = (signed char) state;
+        at[k][0] = value->pos[0];
+        at[k][1] = value->pos[1];
+        at[k][2] = value->pos[2];
+    }
+    return hidden;
+}
+
+// coop-farcull2 (Jep's rc1 notes, left by coop-farcull: a monster the other player woke, and its hit sparks, drawn floating in the dark
+// across the floor): a monster only another player woke (this copy's own player past its wake distance, clip_distance, so retail would
+// not have it awake for him) is drawn only where this copy's floor draws the cell under it (coop::BeyondFloorDraw), as her body and her
+// damage numbers are. One this copy's own player woke is drawn as retail draws it. Linked copies on a floor only.
+// What CMonstorUnit::DrawMonstor writes that the tick reads (its motion step, the frame's place, its effects' and events' points, the
+// events' timers) runs for a hidden monster too, as before; only the drawing is left out (monstorunit.cpp, the recipe).
+// 0 drawn; 1 hidden (posed, not drawn); 2 skipped whole, writes and all (DC_COOP_MUTATE=farcull_monster_skip, the twin: the naive cull,
+// which parts the copies). DC_COOP_MUTATE=farcull_monster_drawn (twin): every monster drawn, as before, and said.
+namespace {
+// coop-drawwrite: this copy's own player, as this copy draws the floor round it (her body on her copy).
+void OwnPlayerAt(float *own) {
+    if (coop::ActorLocalIndex() == 1) {
+        sceVu0CopyVector(own, coop::g_partner.pos);
+    } else {
+        coop::PlayerDrawnAt(own);
+    }
+    own[3] = 1.0f;
+}
+
+// coop-drawwrite: the centre this copy's floor draw goes round (DrawDungeon's CoopViewFrame: her body on her copy while it shows
+// her view), the "player" a detail distance is measured from.
+void ViewCentreAt(float *own) {
+    CFrameVu1 *centre = CoopViewFrame();
+
+    if (centre != nullptr) {
+        sceVu0CopyVector(own, centre->position);
+    } else {
+        sceVu0CopyVector(own, CharaMain.pos);
+    }
+    own[3] = 1.0f;
+}
+
+bool g_dormant_hidden[16] = {}; // (this copy's own: which sleeping monsters this draw poses but does not draw)
+} // namespace
+
+// coop-drawwrite (localaudit 3.8 / Jep's 5.3: detail distance is each player's own): whether this copy draws sleeping monster i,
+// that is, whether it is within this copy's own video.detail_distance of this copy's own player. Only the drawing goes by it: the
+// motion of every sleeping monster on the floor is stepped on every copy alike (DrawMonstorDetail, recipe 0036), so what one
+// player's setting leaves out of their screen never stops what another's shows, and the copies never part over it.
+bool CoopDormantDrawn(int i) {
+    if (NowMonstorUnit == nullptr || i < 0 || i >= 16) {
+        return false;
+    }
+    sceVu0FVECTOR at;
+    sceVu0FVECTOR own;
+
+    NowMonstorUnit->chara[i][0].GetPosition(at);
+    at[3] = 1.0f;
+    ViewCentreAt(own);
+    return DistVector(own, at) < dc::platform::ConfigDetailDistance();
+}
+
+void CoopDormantHide(int i, bool hide) {
+    if (i >= 0 && i < 16) {
+        g_dormant_hidden[i] = hide;
+    }
+}
+
+// coop-herscreen: where this copy's floor draw measures "near" from: its draw centre (her body on her copy while it shows her view),
+// player 1 unlinked as retail. DC_COOP_MUTATE=herscreen_p1 (twin): player 1 on every copy, as before.
+void CoopDrawCentreAt(float *out) {
+    if (NetplayLocalPlayer() != 0 && !coop::Mutated("herscreen_p1")) {
+        ViewCentreAt(out);
+    } else {
+        sceVu0CopyVector(out, CharaMain.pos);
+        out[3] = 1.0f;
+    }
+}
+
+// coop-herscreen: DC_COOP_TEST_TRAP_TRACE=1, each draw of a revealed trap circle (CDungeonMap::DrawTrapCircle): "coop-trapdraw: circle N
+// drawn|not drawn on this copy, D from this copy's centre (the floor draws within R), state S, link tick T".
+void CoopTrapCircleTrace(int i, bool drawn, float from, float reach, int state) {
+    static const bool on = TestEnvOn("DC_COOP_TEST_TRAP_TRACE");
+
+    if (on) {
+        std::fprintf(stderr, "coop-trapdraw: circle %d %s on this copy, %.0f from this copy's centre (the floor draws within %.0f), state %d, link tick %lld\n", i,
+                     drawn ? "drawn" : "not drawn", from, reach, state, (long long) NetplayLinkTick());
+    }
+}
+
+// coop-drawwrite: DC_COOP_DETAIL_TRACE=1, each draw of a sleeping monster: whether this copy drew it, its distance from this copy's
+// player, this copy's setting and its motion's frame, "coop-detail: monster ..." (what a test compares frame by frame).
+void CoopDormantTrace(int i, bool drawn) {
+    static const bool on = TestEnvOn("DC_COOP_DETAIL_TRACE");
+
+    if (!on || NowMonstorUnit == nullptr || i < 0 || i >= 16) {
+        return;
+    }
+    CCharacter   &chara = NowMonstorUnit->chara[i][0];
+    sceVu0FVECTOR at;
+    sceVu0FVECTOR own;
+    int           index = -1;
+    int           set = 0;
+
+    chara.GetPosition(at);
+    at[3] = 1.0f;
+    ViewCentreAt(own);
+    tagMOTION_TYPE *motion = chara.motion_no >= 0 ? chara.GetMotionParam(chara.motion_no, &index, nullptr, nullptr, &set) : nullptr;
+    const float     detail = dc::platform::ConfigDetailDistance();
+    static int      draws = 0;
+
+    std::fprintf(stderr,
+                 "coop-detail: monster %d asleep, %s on this copy, %.0f from this copy's player (detail %s%.0f), %.0f from player 1 and %.0f from player 2, motion %d "
+                 "time %.3f, draw %d, link tick %lld\n",
+                 i, drawn ? "drawn" : "hidden", DistVector(own, at), std::isinf(detail) ? "all, " : "", std::isinf(detail) ? 0.0f : detail, DistVector(CharaMain.pos, at),
+                 coop::g_partner.visible ? DistVector(coop::g_partner.pos, at) : -1.0f, chara.motion_no, motion != nullptr ? motion->state.time : -1.0f, ++draws,
+                 (long long) NetplayLinkTick());
+}
+
+int CoopMonsterCulled(int i) {
+    static signed char said[16] = {};
+    static const void *unit_seen = nullptr;
+
+    if (i >= 0 && i < 16 && g_dormant_hidden[i]) { // coop-drawwrite: asleep past this copy's own detail distance: posed and stepped, not drawn
+        return 1;
+    }
+    if (mode != GAME_MODE_DUNGEON || !NetplayHasPlayer() || NowMonstorUnit == nullptr || i < 0 || i >= 16) {
+        return 0;
+    }
+    if (unit_seen != NowMonstorUnit) { // (a new floor's unit: every monster says itself anew)
+        unit_seen = NowMonstorUnit;
+        std::memset(said, 0, sizeof said);
+    }
+    sceVu0FVECTOR at;
+    sceVu0FVECTOR own;
+
+    NowMonstorUnit->chara[i][0].GetPosition(at);
+    OwnPlayerAt(own);
+    at[3] = 1.0f;
+    const float     from_own = DistVector(own, at);
+    const float     wake = NowMonstorUnit->monster[i].clip_distance;
+    coop::FloorCull cull;
+    const bool      dark = coop::BeyondFloorDraw(at, &cull);
+    const bool      hidden = from_own >= wake && dark && !coop::Mutated("farcull_monster_drawn");
+    const int       state = hidden ? 1 : 2;
+
+    if (said[i] != state) {
+        said[i] = (signed char) state;
+        std::fprintf(stderr, "coop-farcull: monster %d %s at %.0f from this copy's camera (cell %d at %.0f, %s; the floor draws within %.0f), %.0f from this copy's player (wakes within %.0f), link tick %lld\n",
+                     i, hidden ? "hidden" : "drawn", cull.from_camera, cull.cell, cull.cell_dist, cull.cell_drawn ? "drawn" : cull.has_part ? "not drawn" : "no part", cull.reach,
+                     from_own, wake, (long long) NetplayLinkTick());
+        std::fflush(stderr);
+    }
+    if (!hidden) {
+        return 0;
+    }
+    return coop::Mutated("farcull_monster_skip") ? 2 : 1;
+}
+
+// coop-farcull2: a hit spark, a hit's point mark or a weapon's element burst (gameloop.cpp's MainDraw; each one's Draw only draws, its
+// Step is the tick's) is drawn only where this copy's floor draws the cell it is in, as a damage number is. Linked copies on a floor only.
+// kind: 0 spark (CHitMark), 1 point mark (CHitPointMark), 2 element (CWeaponElement). DC_COOP_MUTATE=farcull_sparks (twin): every one
+// drawn, as before, and said.
+bool CoopSparkCulled(int kind, int slot, const float *world) {
+    static float said_at[3][32][3] = {};
+    static signed char said[3][32] = {};
+
+    if (mode != GAME_MODE_DUNGEON || !NetplayHasPlayer() || world == nullptr || kind < 0 || kind > 2) {
+        return false;
+    }
+    coop::FloorCull cull;
+    const bool      hidden = coop::BeyondFloorDraw(world, &cull) && !coop::Mutated("farcull_sparks");
+
+    if (slot >= 0 && slot < 32) {
+        const int  state = hidden ? 1 : 2;
+        float     *was = said_at[kind][slot];
+        const bool fresh = was[0] != world[0] || was[1] != world[1] || was[2] != world[2];
+
+        if (fresh || said[kind][slot] != state) {
+            static const char *const names[3] = {"hit spark", "hit mark", "element burst"};
+
+            std::fprintf(stderr, "coop-farcull: %s %d %s at %.0f from this copy's camera (cell %d at %.0f, %s; the floor draws within %.0f), link tick %lld\n",
+                         names[kind], slot, hidden ? "hidden" : "drawn", cull.from_camera, cull.cell, cull.cell_dist,
+                         cull.cell_drawn ? "drawn" : cull.has_part ? "not drawn" : "no part", cull.reach, (long long) NetplayLinkTick());
+            std::fflush(stderr);
+        }
+        said[kind][slot] = (signed char) state;
+        was[0] = world[0];
+        was[1] = world[1];
+        was[2] = world[2];
+    }
+    return hidden;
+}

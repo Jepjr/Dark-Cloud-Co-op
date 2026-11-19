@@ -30,12 +30,22 @@ bool TownWheelHoldsPad();
 
 // Session reset (CoopResetForSession): closed, as at the start of a session.
 void WheelResetForSession();
+// coop-seed324: the rings' stepped state goes in the state set (build/snapshot-allow.txt): the twin (DC_COOP_MUTATE=ringset_own)
+// keeps this copy's own across a state set's apply, as before.
+void WheelApplyBefore();
+void WheelApplyAfter();
 
 // coop-wheelcrash: player 1's own ring. Linked and together on a floor, his Select opens it in place of retail's wheel
 // (which stops the game for both, draws on both screens, and beside her menu took its texture block and crashed both
 // copies); drawn on his copy alone; the world goes on. Pad 2's Select opens hers (StepWheel), drawn on her copy alone.
 // DC_COOP_MUTATE=gamewheel (twin of t-wheel): retail's wheel, as before.
 bool OwnWheels();
+// coop-p2controls3: each player's element ring (their D-pad Up, the game's element picker as a menu of their own and a pause state of
+// theirs), stepped from the menu tick on the agreed pads; whether player's is open.
+void StepElementRings(const InputPadState &one, const InputPadState &two);
+bool ElementRingOpen(int player);
+unsigned char *CoopWheelBank(); // coop-p2controls: retail's quick change bank (quickchr.pac's quickchr.img: faces, element icons) in the ring's buffer
+void CoopWheelSheetNote(const char *what); // coop-ringlog: the element sheet was just read, loaded or re-keyed by `what` (the ring's open line names the last)
 
 // Steps his ring from his agreed pad. Walk calls it each tick of play; true while open.
 bool StepPlayerWheel(const InputPadState &pad);
@@ -44,6 +54,9 @@ bool StepPlayerWheel(const InputPadState &pad);
 // held as it closed): the link's routing and the menu's world step take them off his pad.
 bool          PlayerWheelOpen();
 std::uint16_t PlayerWheelMask();
+// coop-georamaring: the buttons a player's ring holds off their own windows (his: PlayerWheelMask; hers: all while one of her rings is
+// open, and after it closes what was still down till let go).
+std::uint16_t RingHold(int player);
 
 // coop-pausewheel: a player's own pause closes that player's ring as it starts (coop_pause calls it; the rings' steps do not
 // run while the world holds, so they cannot close it themselves).
@@ -69,3 +82,5 @@ void CoopDrawWheel();
 // coop-hudicon: draws one member's wheel face, size by size with its top left at x, y (the HUD's own 2D
 // coordinates); false when the faces could not be loaded.
 bool CoopDrawHudFace(int chara, int x, int y, int size);
+// coop-areanotice: the same face at alpha (0x80 whole), for a notice that fades.
+bool CoopDrawHudFaceFaded(int chara, int x, int y, int size, int alpha);

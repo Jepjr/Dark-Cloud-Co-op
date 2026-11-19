@@ -1,0 +1,53 @@
+# port/include/game/texture.hpp from Chronicle's port/include/game/texture.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/texture.hpp
+base port/include/game/texture.hpp
+from e67ccdac5b12d70ae86baad075287ad98c2ef160
+to c1b997f546df9e607352c48ded7a1bf0ddbee788
+@@ -109,0 +110,42
++// Jep (co-op), coop-pt1108f (Jep's 11-09 playtest): retail's 72 blocks, then six only player 2's menu engine uses (74 to 79). Her menu sat in 44 to 49, and a town
++// script's _LOAD_TEXTURE family deletes and loads 45 to 49, so an event on her walk took her menu's pictures. 73 is never a block: the Z sheet's mark.
++// coop-eventslots (Jep's 11-11 item 1): 80 to 127, eight a player (six players), each player's own event's and fishing's blocks
++// (the fish, the fish caught, the bait, the event's 45 to 49), so two players' events and fishing never take each other's pictures
++// (port/src/coop/coop_eventslots.cpp CoopEventTexBlock).
++// coop-p1body: 128 to 139, two a player (six players): a player's own town body and its weapon (coop_town.cpp TownBodyBlock).
++// coop-pondfish: 140 and 141, a town's two shared ponds' fish (port/src/coop/coop_eventslots.cpp kPondBlock).
++constexpr int kTextureBlockCount = 142;
++// Jep (co-op), coop-texslots (owed from coop-p1body): the texture table's slots, retail's 196 and 16 more a player for six players.
++// Retail's table holds one player's loads; co-op adds each player's own: a town body (4 to 8 slots: all six members' bodies take 31),
++// a fishing or event set in that player's own blocks (6 to 8: the rod, the bait, the fish), player 2's menu engine's blocks. Measured
++// 11-14 (DC_COOP_TEST_TEXSLOTS, the most named at once on a copy): Norune walking 126 (with player 2's body), with the six bodies 157,
++// a menu open +10, two fishers 140, a floor of six 94, Brownboo 85; six players fishing beside six bodies with a menu open would
++// need 121 + 31 + 48 + 10 = 210, past 196. 196 + 6 x 16 = 292 holds that with 82 to spare. A full table still stops loudly
++// (texture.cpp TextureSlotTaken), never written past.
++constexpr int kTextureCount = 196 + 16 * 6;
++constexpr bool TextureBlockValid(int block) {
++    return block >= 0 && block < kTextureBlockCount && block != 73;
++}
++
++// Jep (co-op), coop-floorjoin2 (the host snapshot's "texture keys after an apply"): the
++// texture registry (render/texture_registry.hpp) re-keyed to the game's texture table after another copy's memory snapshot
++// was put back on this one (snapshot_state.cpp). The table (TexManager, in the state set) then names the host's TBP0 and
++// CBP keys, which the registry never handed out, so every draw missed. PortTextureRebuildBefore remembers this copy's own
++// entries by texture name; PortTextureRebuildAfterApply moves a fixed texture's entry (block -1: its pixels were never
++// staged) to the key the table now holds, drops the manager's other entries and makes each staged texture again at its keys
++// from its staged pixels (TextureData, in the state set). (Defined in game/texture.cpp.)
++struct PortTextureRebuildReport {
++    int images = 0;
++    int palettes = 0;
++    int targets = 0;
++    int moved = 0;
++    int skipped = 0;
++};
++// Jep (co-op), coop-texslots: the texture table's slots named now, the most named at once since the last reset (reset: start again
++// from now), and the slot count a full table stops at (kTextureCount, or DC_COOP_TEST_TEXSLOTS_LIMIT in a test). (Defined in game/texture.cpp.)
++int PortTextureSlotsUsed();
++int PortTextureSlotsPeak(bool reset);
++int PortTextureSlotsLimit();
++void                     PortTextureRebuildBefore();
++PortTextureRebuildReport PortTextureRebuildAfterApply();
++
+@@ -122,2 +164,2
+- 5e0852c3da337b51
+- eb44b6f6376f9489
++    CTextureBlock     blocks[kTextureBlockCount];    /**< Managed texture blocks. */
++    CTexture          textures[kTextureCount]; /**< Registered textures (retail 196; co-op: texslots). */

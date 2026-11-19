@@ -1,0 +1,21 @@
+# port/src/options/rows.cpp from Chronicle's port/src/options/rows.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/options/rows.cpp
+base port/src/options/rows.cpp
+from 61ef167b25d5033e7fb7ac19ae1cb4cc532ea4ac
+to 22bb20cf24f39703c29fc976acc0ec0011e0631e
+@@ -616,0 +617,2
++    OnOffRow<&Config::chara_quick_select>("game.chara_quick_select", "Character Quick Select", // coop-dpadwheel
++                                          "\"Character Quick Select\"\nD-pad Down opens the\ncharacter ring."),
+@@ -741,0 +744,10
++// coopoptions (Jep 11-17): the co-op settings a player changes in the game. Where Is Everyone is each player's own (it draws on
++// their screen alone); Trade Only Together is the pair's, player 1's to change while linked (the screen dims it on the others'
++// copies: CoopOptionRowHostSet). The rest of the co-op keys stay in config.json (port/src/platform/config.hpp).
++constexpr Row kCoopRows[] = {
++    OnOffRow<&Config::coop_whereis>("game.coop_whereis", "Where Is Everyone",
++                                    "\"Where Is Everyone\"\nThe list at the top\nright of where each\nplayer is."),
++    OnOffRow<&Config::coop_swap_same_zone>("game.coop_swap_same_zone", "Trade Only Together",
++                                           "\"Trade Only Together\"\nCharacter trades only\nwhile both players are\nin the same place."),
++};
++
+@@ -879,0 +892,1
++        {"Co-op",         "\"Co-op\"\nPlaying together.",                            kCoopRows         }, // coopoptions

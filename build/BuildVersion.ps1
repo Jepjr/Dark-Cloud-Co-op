@@ -72,8 +72,19 @@ function Get-ContentVersion([string]$Mod, [string]$Commit = '') {
     try { -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canon)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
 }
 
+# version-scheme (Jep 11-15: 0.R.B = alpha.public.test): the version players see and the join compares, build\version.txt's
+# one line: test builds 0.1.5, 0.1.6, ..., the next public release 0.2, then 0.2.1 and on. In the content (build\ is), so a
+# version change is a new exe. The game says it in its log and lobby and sends it in its Hello (netplay_hello.cpp).
+function Get-ReleaseVersion([string]$Mod) {
+    $file = Join-Path $Mod 'build\version.txt'
+    if (-not (Test-Path -LiteralPath $file)) { return '' }
+    $v = "$((Get-Content -LiteralPath $file -TotalCount 1))".Trim()
+    if ($v -notmatch '^\d+(\.\d+){1,3}$') { throw "build\version.txt says '$v', not a version like 0.1.1.5" }
+    return $v
+}
+
 function Get-BuildVersion([string]$Mod, [hashtable]$Pin) {
-    return [pscustomobject]@{ Content = (Get-ContentVersion $Mod); Chronicle = "$($Pin.upstream)"; Kazarov = "$($Pin.kazarov)" }
+    return [pscustomobject]@{ Content = (Get-ContentVersion $Mod); Chronicle = "$($Pin.upstream)"; Kazarov = "$($Pin.kazarov)"; Release = (Get-ReleaseVersion $Mod) }
 }
 
 # -Flavor: a build other than build\build.ps1's (debug\build\build.ps1's dev build: 'dev' and its dev-include.cmake's hash),
@@ -85,9 +96,10 @@ function Write-BuildVersion([string]$Mod, [hashtable]$Pin, [string]$Stage, [stri
             "#define DCO_VERSION_CONTENT `"$($v.Content)`"`n" +
             "#define DCO_VERSION_CHRONICLE `"$($v.Chronicle)`"`n" +
             "#define DCO_VERSION_KAZAROV `"$($v.Kazarov)`"`n" +
-            "#define DCO_VERSION_FLAVOR `"$Flavor`"`n"
+            "#define DCO_VERSION_FLAVOR `"$Flavor`"`n" +
+            "#define DCO_VERSION_RELEASE `"$($v.Release)`"`n"
     $dest = Join-Path $Stage 'port\src\coop\build_version.hpp'
     New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
     [IO.File]::WriteAllText($dest, $text, [Text.UTF8Encoding]::new($false))
-    Write-Host "version: content $($v.Content.Substring(0, 16)) + Chronicle $($v.Chronicle.Substring(0, 8)) / Kazarov $($v.Kazarov.Substring(0, 8))$(if ($Flavor) { " ($Flavor)" })"
+    Write-Host "version: $(if ($v.Release) { $v.Release } else { 'no build\version.txt' }), content $($v.Content.Substring(0, 16)) + Chronicle $($v.Chronicle.Substring(0, 8)) / Kazarov $($v.Kazarov.Substring(0, 8))$(if ($Flavor) { " ($Flavor)" })"
 }

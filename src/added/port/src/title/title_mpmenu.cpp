@@ -489,6 +489,37 @@ void TitleMpClose() {
     g_level = kTop;
 }
 
+static int &TestHostState();
+
+// coop-rehost (Jep's rc3 playtest, 2026-11-13: "If P1 quits the game and hits Host again and loads a save, it doesn't bring
+// them to the lobby again, it just loads straight into the save"): Continue's submenu was kept under the load screen
+// (TitleMpClose) and nothing dropped it once the save loaded and the game started, so the title the session's end came back
+// to stood on Host > Start / Continue ("back from the load screen to Host start"), while the lobby's pending pick (armed
+// by Host's own pick, Choose) had gone with the first lobby's start and netplay's Host way with the quit
+// (NetplayTakeQuitToTitle): Continue there loaded the save straight in. The game's own way into the title (TitleInit, as
+// it comes from the game; the load screen's Back never passes it) now drops the submenu: the menu is the title's own, and
+// Multi-player > Host picks the way and arms the lobby as the first time did. DC_TITLE_MP_MUTATE=start_kept (l-rehost's
+// twin): kept, as before.
+void TitleMpTitleEntered() {
+    // DC_TITLE_MP_TEST_REHOST=1 (l-rehost): the lobby jump again on this title, as a player who hosts again picks it from
+    // what the menu shows (TitleMpOpen).
+    if (TestEnvIs("DC_TITLE_MP_TEST_REHOST", "1") && TestHostState() == 3) {
+        TestHostState() = 1;
+        std::fprintf(stderr, "title-mp: test: the lobby jump again on this title (DC_TITLE_MP_TEST_REHOST)\n");
+    }
+    if (g_level == kTop && !g_kept) {
+        return;
+    }
+    if (TestEnvIs("DC_TITLE_MP_MUTATE", "start_kept")) {
+        std::fprintf(stderr, "title-mp: the title entered from the game: %s kept (start_kept)\n", LevelName().c_str());
+        return;
+    }
+    std::fprintf(stderr, "title-mp: the title entered from the game: %s, row %d dropped; the title's own menu\n", LevelName().c_str(), g_row);
+    g_level = kTop;
+    g_row = 0;
+    g_kept = false;
+}
+
 void TitleMpFromLobby() {
     // coop-lobby: the host left its lobby (Leave? Yes): back to Start / Continue under Host (or Local), the way kept. A guest's
     // lobby left (or the host started, closed or went silent): the menu stays at JOIN's level, its line saying why.
@@ -542,6 +573,14 @@ bool TitleMpOpen() {
         Go(kStart, 1);
         TestHostState() = 2;
         std::fprintf(stderr, "title-mp: test host: Multi-player > Local > Continue (DC_TITLE_MP_TEST_HOST)\n");
+    }
+    // coop-rehost (DC_TITLE_MP_TEST_REHOST, after the first jump): a menu that came back on Host's Start / Continue (the
+    // kept submenu: start_kept, the twin) takes Continue there at once, as Jep did; the title's own menu takes the jump below.
+    if (TestHostState() == 1 && TitleMpShown() && g_level == kStart && TestEnvIs("DC_TITLE_MP_TEST_REHOST", "1")) {
+        Go(kStart, TestEnvIs("DC_TITLE_MP_TEST_HOST", "continue") ? 1 : 0);
+        TestHostState() = 2;
+        std::fprintf(stderr, "title-mp: test host again: %s on the %s the title came back to (DC_TITLE_MP_TEST_REHOST)\n", g_row == 1 ? "Continue" : "Start",
+                     LevelName().c_str());
     }
     // The lobby jump: at the menu's first frame, Multi-player > Host, then Start (or Continue) chosen in TitleMpStep.
     if (TestHostState() == 1 && TitleMpShown()) {

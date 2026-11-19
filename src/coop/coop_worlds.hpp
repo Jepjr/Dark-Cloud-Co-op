@@ -3,6 +3,8 @@
 #include "coop/game_ns.hpp"
 
 #include <cstdint>
+
+#include "platform/input.hpp" // coop-016: InputPadState (CoopWorldsStayPad)
 #include <string>
 
 // coop-worlds: separate worlds for linked copies (game.netplay 1 or 2). One shared game, two copies:
@@ -37,10 +39,20 @@ bool CoopWorldsMayLink();
 // takes it, player 2's copy stays (false) and becomes player 2's own world. True whenever worlds is off
 // or the copies are not linked. next_map: where the exit goes (NextMapNo's numbering).
 bool CoopWorldsTakeExit(int next_map);
+// coop-warplight: on around the town menu's way out (TownMapJump's CoopWorldsTakeExit), off after.
+void CoopWorldsMenuWarp(bool on);
+// coop-warplight test hook: the copy's DC_WORLDS_TEST_GATE_WARP / _PARTNER_WARP (whichever it runs with) done.
+bool CoopWorldsTestWarpsDone();
 
 // Player 2's copy staying on a dungeon floor (after CoopWorldsTakeExit said false): the game's player
 // becomes player 2's member where its partner stood. The exit's own fade is the caller's to undo.
 void CoopWorldsStayOnFloor();
+// coop-016 (option A): her stay at a split waiting for her own menu's close; its run at that close; her menu's pad meanwhile.
+bool CoopWorldsStayDeferred();
+// coop-menutpose: her stay waits under her own menu on a floor: her copy draws her body where she stood (CoopDraw), not the game's player.
+bool CoopWorldsStayKeepsBody();
+void CoopWorldsStayMenuClosed(int player);
+InputPadState CoopWorldsStayPad();
 
 // Player 2's copy staying in town (after CoopWorldsTakeExit said false): Toan, the town's player, stands
 // where player 2 stood.
@@ -61,6 +73,25 @@ bool CoopWorldsTestTownExit();
 // flag (_SSET_GAME_FLAG, read from its code). The HUD then says "Toan needs to be here". program: the loaded
 // event script (EdEventData).
 bool CoopWorldsHoldStoryEvent(const void *program, int event_no);
+// coop-windmill: editloop's walk step (recipe 0045), the game's walker standing on a complete building part whose finished scene (town
+// event_no = 200 + the part) is unseen, at the town loop's step `step` (loop_counter): true holds it (no fade, no scene this step): its
+// ready check is open (together: the starter's box, everyone else asked), it was called apart, or it was asked and closed this stand.
+bool CoopWorldsPartSceneHeld(int event_no, int step);
+// coop-windmill: together, that scene runs with this copy's player along: its screen shows it from the scene's camera (OwnTownView).
+bool CoopWorldsPartSceneShown();
+// coop-windmill: apart, that scene runs as its starter's alone (START NOW, nobody along): no merge into it till it is over.
+bool CoopWorldsPartSceneAlone();
+// coop-storygaps: the other story starts together that had no gather (coop-windmill's audit). A Georama scene its starter asked for by
+// a fade (its menu's Event pick, its close's scenes): true holds it, its gather open or waiting (editloop; her own Georama's queue).
+bool CoopWorldsStoryFadeHeld(int event_no, int level, int starter, const char *how);
+// A town event a player walked or talked into (starter: 1 the walker's, a talker's number, 0 none): true holds a story one for its gather.
+bool CoopWorldsStoryStartHeld(const void *program, int event_no, int starter);
+// The gathered start to go on now at the town's free walk step (its fade's level and whether it goes by a fade), else 0.
+int  CoopWorldsStoryGatherDue(int *level, bool *fade);
+// Together, player's own body (2 up) standing in this town, free: its place (editloop's finished-part check), and that check's find.
+bool CoopWorldsPartSceneBodyAt(int player, float *at);
+void CoopWorldsPartSceneBodyOn(int event_no, int step, int player);
+int  CoopWorldsPlayerSlots();
 // coop-p2collide: whether a room's event is a scripted pickup, no story (the mayor's closet; the guard's own rule): player 2's
 // Cross starts one together too (CoopTownHerRoomEvent).
 bool CoopWorldsPickupEvent(const void *program, int event_no);
@@ -109,6 +140,14 @@ bool CoopWorldsPartnerMayStart(const void *program, int event_no);
 // The town event just started is player N's (2: her partner's); its exit's split sends that player's copy and keeps the
 // other in town.
 void CoopWorldsTownEventBy(int player);
+// coop-doorrace: a press the mod puts on the game pad's first port for this tick alone (set, its down edge made), and what of it the next
+// CGamePad::UpDate takes out of the previous pad (the player did not hold it: it must not swallow their real press on the next tick).
+void CoopWorldsPadPress(int mask);
+int  CoopWorldsPadPressedTake();
+// coop-padtake: a held button taken off the game pad's first port for this tick alone, and what of it the next UpDate puts back into the
+// previous pad (still held: no new press the tick after).
+void CoopWorldsPadTake(int mask);
+int  CoopWorldsPadTakenTake();
 // coop-dungeonp2: the dungeon's way out (the menu's Escape) chosen by player N, both copies on the same tick: its split
 // sends that player's copy and keeps the other on the floor (Jep: Xiao's "escape this dungeon" took Toan out).
 void CoopWorldsExitBy(int player);
@@ -131,6 +170,7 @@ void CoopWorldsDoorWindowEnd();
 
 // DC_WORLDS_MUTATE=no_partner_door (the door test's twin): player 2's Cross at a door opens nothing.
 bool CoopWorldsMutatedDoor();
+bool CoopWorldsMutatedQuestionCross(); // coop-askhold: DC_WORLDS_MUTATE=question_cross_starts
 // coop-menucross: linked and together (CoopWorldsPartnerMayStart's own test, without her pad's).
 bool CoopWorldsLinkedTogether();
 
@@ -185,11 +225,13 @@ void CoopWorldsCheckTownLeave(int from_mode, int next_map);
 // Join?" instead, with no leave anyway: a no keeps both on the floor and tells the asker. Apart, such a gate does not start
 // (CoopWorldsHoldFloorChange) and the other copy is called.
 bool CoopWorldsGateVote(int script_no);
+// coop-016: the vote's step while the world holds (WorldStep: every player paused or in a menu), the world still held.
+void CoopWorldsVoteHeldStep();
 // coop-floorgate: whether this copy's player may be asked a question now (playing a floor or walking a town; no scene, event,
 // talk, minigame or menu). A question that would come to a player not free is answered "busy" instead (never shown).
 bool CoopWorldsPlayerFree();
-// coop-floorgate: game.coop_story_gather as it is in effect (a joiner takes the host's).
-bool CoopWorldsStoryGather();
+// coop-notices: apart, this copy's player found an item others hear of (everyone: every player, else the find's floor alone).
+void CoopWorldsPickupNotice(int item, bool everyone);
 
 // coop-p2prompt: player 2's exit gate asked from her own prompt, beside the running game (coop_worlds.cpp): whether a gate
 // may be asked now, the ask (asker 0 player 1, 1 player 2; answer: the escape window's, 1 the next floor, 2 back to town), whether such a question is waiting, and whether it waits on player.
@@ -213,6 +255,14 @@ bool CoopWorldsGateWaiting(int *waiting_on, int *state, int *where, int *to, boo
 // coop-floorgate: apart, the other player's call shown on this copy (from 1 or 2; the dungeon, the floor called to and the
 // caller's floor, 0 up; cursor 0 come, 1 not now), drawn in the game's window (coop::DrawGatherQuestion).
 bool CoopWorldsCallQuestion(int *from, int *map, int *to, int *floor, int *cursor);
+// coop-forcefloor: that call is for a floor fenced to chara, which this copy's player plays (theirs: the caller's member, a
+// swap's offer); its rows are GO TO FLOOR, SWAP, CANCEL (cursor 0 to 2).
+bool CoopWorldsCallForce(int *chara, int *theirs);
+// coop-forcefloor: the member retail fences floor `to` (0 up) of dungeon `map` to (its start's F(z) and _SET_LIMMIT_ZONE), -1 none.
+int CoopWorldsZoneFloorChara(int map, int to);
+// coop-forcefloor: apart, the member of the player on its way onto this copy's floor after its "go" to this copy's call (it counts
+// as playing it there till the merge: coop_zonechara's ZoneHolders), -1 none.
+int CoopWorldsForceComing();
 // coop-floorgate: "Divine Beast Cave floor 2" (to 0 up).
 const char *CoopWorldsFloorName(int map, int to);
 
@@ -228,8 +278,18 @@ bool CoopWorldsHoldStandInStory(int script_no, bool marker);
 
 // Whether the copies are apart: the partner is then on neither copy (not stepped, drawn or targeted).
 bool CoopWorldsApart();
+// Ticks since this copy's split by its own clock (60 a second), -1 not apart: the link's tick stops at the split.
+long long CoopWorldsApartTicks();
+// coop-swapcombo: a trade across zones' step to the other copy (a progress record, resent until acknowledged; coop_prompt's apart
+// trade), and the other player's member as this copy last heard it on a floor (-1 not heard).
+void CoopWorldsTradeSend(int step, int a, int b, int c);
+int  CoopWorldsPeerMember();
+bool CoopWorldsCallFree(); // apart: this copy's player is free to be asked (the call's rule)
+void CoopWorldsCallFreeWhy(char *out, int size);
 bool CoopWorldsPeerHeardHere();
 bool CoopWorldsPeerHeard(); // cand1111b: apart, and the other copy has been heard since the split (anywhere)
+bool CoopWorldsPeerHeardInTown(); // coop-forcefloor (test hook): apart, the other copy heard in a town
+bool CoopWorldsPeerHeardInATown(); // coop-rc3misc (test hook): apart, the other copy heard in a town, in its arrival or scene or not
 long long CoopWorldsHerLeaveMs(); // coop-dunentry: ms since player 2 left this (player 1's, staying) copy's map, else -1
 void CoopWorldsLocalFlags(bool on); // coop-floorscene2: flags set while on stay this copy's (no progress sent)
 
@@ -266,6 +326,11 @@ bool CoopWorldsArrivedWhereStayer(int within_ms);
 bool CoopWorldsSceneTakeOk();
 // coop-exitscene: and while a town's event runs outdoors on player 1's copy (DC_WORLDS_MUTATE=town_scene_merge_off: no).
 bool CoopWorldsTownSceneTakeOk();
+// coop-firstvisit: a town's story arrival, apart, is a story gather: EditInit asks whether it holds the arrival (its RunEvent then
+// waits), the town's step runs a held one once it is released, and the late 2D blacks the screen under its box while held.
+bool CoopWorldsTownArrivalHolds(const void *program, int event_no);
+int  CoopWorldsArrivalRelease();
+bool CoopWorldsArrivalBlack();
 void CoopWorldsBagsHers();        // coop-stage4 4e part 2: her bag in the party's place (CoopWorldsBagsBack undoes it)
 bool CoopWorldsHerEventCarries(); // coop-stage4 4e part 2: her copy apart, her own talk or event running: it goes on through the merge
 bool CoopWorldsTalkTakeOk(); // coop-stage4 4e part 1: his talk is a take tick
@@ -275,7 +340,7 @@ bool CoopWorldsIntoDungeonOnly(const void *program, int event_no); // coop-pt110
 bool CoopWorldsStayedHere(); // coop-pt1109f: apart, and this copy is the one that stayed when the other left
 bool CoopWorldsDungeonEventAlone(const void *program, int event_no);
 // coop-doorgate: Norune's cave door while B1's opening scene is unseen, used by player `asker` (1 or 2) while the other player
-// is linked but not beside it (game.coop_story_gather): it stays shut, the asker gets a note, the other a call. Whether it
+// is linked but not beside it (always; coop-gatherpicker retired game.coop_story_gather): it stays shut, the asker gets a note, the other a call. Whether it
 // stays shut (the event's Cross and Square: CoopWorldsDungeonEventAlone; the key picker's Square: coop_town).
 bool CoopWorldsCaveDoorRefused(int asker);
 // coop-doorgate: the door into room `name` (a building's, "i01h06") used by player `asker` stays shut: its arrival's story is
@@ -303,7 +368,7 @@ bool CoopWorldsQuestionHolds(int port);
 // coop-gatepopup2: apart at a dungeon's entrance floor menu, the pick of a floor that needs both players is held back and the
 // other player called (port 0's buttons, coop_menu's MenuFilterPort); their yes picks it.
 void CoopWorldsEntrancePad(int *buttons);
-// coop-gateflow: player's Cross at a floor's exit gate (her own prompt's), with game.coop_gate_picker: to the dungeon's floor
+// coop-gateflow: player's Cross at a floor's exit gate (her own prompt's): to the dungeon's floor
 // menu, no question (together the pair splits there and the other is asked to go along). False: the gate as before.
 bool CoopWorldsGatePicker(int player, CDungeonEventData *gate);
 // coop-gatepopup3: port 0's buttons as the game reads them (MenuFilterPort, before any hold), and what an apart call's keys read.
@@ -312,6 +377,10 @@ std::uint16_t CoopWorldsCallPadButtons();
 // coop-gatepopup: this copy's player asked a gate's question and waits on player `asked`'s answer (coop::DrawWaitingBox draws its
 // box: "Waiting for Player N", the controller's Circle: Cancel; Circle withdraws it).
 bool CoopWorldsWaitingFor(int *asked);
+// coop-readyscreen: the ready check's box (this copy's player started it, together) and the one question its asked players get
+// ("Player N wants to / start a story scene. / Come along?" then its two rows).
+bool CoopWorldsReadyBox();
+void CoopWorldsReadyQuestionText(int initiator, char *text, int size);
 bool CoopWorldsDoorAsks(int player);
 
 // coop-scenejoin: a room's event about to start is a story scene (its arrival, its story not seen): both screens show it from
@@ -360,6 +429,9 @@ bool CoopWorldsFloorStartHeld();
 // second, that view's eye, look point and roll (world places): this copy draws its own build of the floor (the same one,
 // from the other's random state) from it instead of black. False otherwise. DC_WORLDS_MUTATE=scene_black (twin): never.
 bool CoopWorldsSceneView(float *eye, float *ref, float *roll);
+// coop-camflash2: how black the other's screen was when it sent the view CoopWorldsSceneView gives (0 to 128; 0 none).
+int CoopWorldsSceneViewBlack();
+bool CoopWorldsSceneBlackKept(); // (false under its proof switch, DC_WORLDS_MUTATE=scene_view_covered: his black not kept)
 
 // coop-cutsceneview (tests): the other's count of the view this copy shows now (CoopWorldsSceneView), 0 for none.
 unsigned CoopWorldsSceneViewSeq();
@@ -381,6 +453,15 @@ bool     CoopWorldsScenePicturesReceive(const void *data, int size, int other);
 void     CoopWorldsScenePicturesTick(bool apart, int map, int floor);
 void     CoopWorldsSceneSpritesDraw();
 
+// coop-sceneactors (rc3: her scene view drew fewer meshes than his screen: the scene's event NPCs, the B1 lesson's elder): the
+// scene's own actors on the copy showing it (coop_scenepics.cpp). The playing copy says, with each view, the pack entry each drawn
+// NPC was made from (_LOAD_CHARA: CoopWorldsSceneNpcLoaded) and how it stands; the showing copy makes the same model from its own
+// game data, into actors of its own, and draws them in the view (CoopWorldsSceneActorsDraw, from CoopDraw).
+// DC_WORLDS_MUTATE=scene_no_actors (twin): none.
+constexpr int kCoopWorldsSceneActorsBytes = 768; // its message's size (told apart from the other worlds messages by it)
+void          CoopWorldsSceneNpcLoaded(int index, int file, const char *cfg); // file: _LOAD_CHARA's pack (actv_file)
+void          CoopWorldsSceneActorsDraw();
+
 // coop-b1lesson: a join in the other's floor scene (CoopWorldsSceneJoining) puts the other's state in this copy, with its
 // actors' mesh records naming models the other read into the dungeon's read buffer, which the state set leaves out. The
 // copy playing the scene names the packs it read (with each SceneView); the joining copy reads them from its own game data
@@ -397,12 +478,23 @@ int CoopWorldsPeerOpeningFloor();
 // coop-cutscenejoin: this copy, apart, is in its own arrival on the floor the other plays (picked it, built it, the floor's
 // entrance animation under way): it counts as on that floor, and the other's state lands over the arrival.
 bool CoopWorldsPickJoining();
+// coop-b4arrive: the same join latched and still under way (its floor not started): the other's state will land over this copy's
+// own arrival and cut it (said in the Hello: NetplayHello::arrival_cut). Read without latching.
+bool CoopWorldsArrivalCut();
 
 // coop-b1lesson (Jep's 2026-10-27 playtest: P2 on B1 during P1's elder lesson saw its pictures, but not the elder, his
 // speech bubbles or herself): this copy, apart, joins the other's floor during that floor's opening scene: 1 as the one
 // playing the scene (it sends its state, taken mid-scene), 2 as the one held for it (CoopWorldsHoldFloorStart; it takes
 // that state and plays the rest of the scene in lockstep), 0 neither. Both count as on that floor (Here) until the merge.
 int CoopWorldsSceneJoining();
+
+// coop-entrwin (Jep 11-11, item 23 option A): this copy's own floor walk-in apart and its place in the floor's entrance window:
+// 1 the lead (its state goes mid-walk-in), 2 a walker that arrived within the lead's walk-in (it takes that state and plays its own
+// entrance at its spot after the merge), 0 neither. CoopWorldsSceneJoinIsWalkIn: the scene join latched is that window's.
+int  CoopWorldsWalkInRole();
+int  CoopWorldsWalkInGap(); // coop-entrance2 rule 3: a walker's ticks after the lead's walk-in began, -1 none
+bool CoopWorldsSceneJoinIsWalkIn();
+bool CoopWorldsWalkJoinLatched(); // coop-entrance2: the same, read without latching
 
 // coop-b2join: the floor's arrival (script 100) plays a scene of its own, not only the walk-in: B2's, the cat (an event
 // actor loaded). The scene join takes it as a scene, and the partner's arrival camera and walk (FloorIntro) stand aside.
@@ -442,20 +534,44 @@ void CoopWorldsTestSlotOnLastBlob(); // coop-catchuprace (tests): DC_WORLDS_TEST
 // coop-fx51c: a state file (DC_STATE_LOAD_AT's fixture) put back on a floor: the floor counts as started and played (netplay.cpp's
 // StateFileApply).
 void CoopWorldsStateFileLoaded();
+bool CoopWorldsStateFileWasLoaded(); // coop-readyscreen: once a state file loaded on this copy
 // coop-warmreset (WS7): a warm pair's job start (coop_core's CoopResetForJob): no door vote left, the said-once lines unsaid;
 // and the vote as a job finds it, for the job's leftovers line.
 void CoopWorldsResetForJob();
 // coop-quittitle: this copy's session ended by Quit Game (netplay.cpp NetplayTakeQuitToTitle): the pair's state (apart, the
 // merge, the other copy's presence, the vote) as a booted copy has it.
 void CoopWorldsSessionEnded();
+// coop-hostquit: apart (the link down), this copy's Quit Game told to the other copies before its session closes (NetplayTakeQuitToTitle;
+// ended: the host's, the session over for every player); the other copy gone (its quit, or not heard: netplay.cpp NetplayPeerGoneApart),
+// as a dropped link leaves the pair (a new copy of it rejoins as any join); and, from the keepalive's thread, a word that this copy is
+// still there while its game does not tick apart (a load), so the other's silence watch waits for it.
+// how: 1 its Quit Game, 2 its game closing; sent (linked or apart) until acknowledged, at most wait_ms.
+void CoopWorldsSayLeft(bool ended, int how, int wait_ms);
+void CoopWorldsPeerGone();
+void CoopWorldsKeepaliveApart();
 void CoopWorldsJobLeftovers(char *out, std::size_t size);
 
 // A resync's state taken (netplay.cpp's TakeState, on both copies): a floor change held for a merge ends. coop-floorscene: own,
 // a checkpoint's self-take (this copy's own state): not the other's state in.
 void CoopWorldsStateTaken(bool own = false);
 
-// The HUD's link line while apart ("Apart: player 2 is in Norune"), else empty.
+// The HUD's link line while apart (questions and notes; "Apart: player 2 is in Norune" only with game.coop_whereis off), else empty.
 const char *CoopWorldsStatus();
+
+// coop-whereis (coop_whereis.hpp): the players in this link (1 alone), this copy's player (1 alone), what its player does now
+// (coop::WhereActivity), and player's (1 up) place as this copy knows it: its own, together (the same map, "here"), or apart from
+// that player's presence. False when there is no such player. The towns' and dungeons' names. Whether the list may be drawn on
+// this player's screen now (why not, when not).
+namespace coop {
+struct Where;
+}
+int         CoopWorldsPlayers();
+int         CoopWorldsSelf();
+int         CoopWorldsOwnActivity();
+bool        CoopWorldsWhere(int player, coop::Where *out);
+const char *CoopWorldsTownName(int map);
+const char *CoopWorldsDungeonName(int map);
+bool        CoopWorldsWhereIsFree(const char **why);
 
 // Each tick of dungeon play on both copies (CoopStep): the test hook DC_WORLDS_EXIT_AT=N (both copies)
 // starts player 1's way out of the dungeon (its exit fade) at link tick N, as an exit would; an apart
@@ -477,6 +593,13 @@ void CoopWorldsBagsSaveBack(); // CoopWorldsBagsBack, unless DC_WORLDS_MUTATE=no
 bool CoopWorldsPartnerOnFloor(int *map, int *floor);
 // coop-gateopen: this copy opened a dungeon floor's gate (coop::GateOpenTick); apart, the other copy is told (kWhatGate).
 void CoopWorldsGateOpened(int dungeon, int floor);
+// coop-choosing (ura, the back half of a floor): its unlock told to the other copy apart; a back-half door's Yes (the split: the
+// user goes in alone, the others asked to come along); whether this copy plays linked with the others now.
+void CoopWorldsUraOpened(int dungeon, int floor, int script, int item);
+void CoopWorldsUraEnter(int user, int script, int slot);
+void CoopWorldsPlayerNote(int player, const char *text); // coop-xiaogap: a note on one player's screen (4 s)
+void CoopWorldsTestAway(int leaver); // a test hook: that player leaves the floor for the floor menu (x-back-half -Away)
+bool CoopWorldsTogether();
 // coop-joinatla: the game's first entry into a dungeon lays out its Atla (BtAtraListMake, from the random state): the
 // state it was laid out from is kept, and goes with the floor's progress, so the other copy lays out the same.
 void CoopWorldsAtlaListMake(int dungeon);
@@ -504,6 +627,24 @@ struct SceneHandover {
 extern SceneHandover g_scene_handover;
 } // namespace coop
 int CoopWorldsSceneOwner();
+// swapduel: a story event that needs Toan (an event battle of the floor's story: the cave's floor-8 duel) started with another
+// member as the game's player: the player who plays Toan is the game's player for it (in the state set). CoopWorldsStoryOwner:
+// that player's number while it plays (the game's pad is theirs: NetplayRoute), else 0.
+namespace coop {
+struct StoryRole {
+    int due;       // 1 while the scene plays
+    int owner;     // the player who plays Toan for it (1: player 1 switched)
+    int p1_member; // player 1's member before it
+    int script;    // the event
+};
+extern StoryRole g_story_role;
+} // namespace coop
+int CoopWorldsStoryOwner();
+// coop-rc2: true while the copies swap roles (FloorRolesSwap, a story event's role): ChangePlayer then records no member.
+bool CoopWorldsRolesSwapping();
+// swapduel: DunMoveChara's marker check (recipe 0036): the walk-in story marker that needs Toan another player on the floor
+// stands in, else null (retail checks the game's player alone).
+CDungeonEventData *CoopWorldsStoryMarkerByOther();
 
 // coop-localfix: what player 2's copy apart draws as its own player (chara 0-5, -1 nobody), logged at each change
 // ("identity: player 2's copy draws its player as Toan (town, ...)").
@@ -527,3 +668,18 @@ bool CoopWorldsMergeStateInHere();
 // coop-localfix (Jep's note H): the random state the other copy built its floor from, when apart and it is on this dungeon's
 // floor `floor` (0 up), so this copy, arriving second, builds the same floor; false otherwise.
 bool CoopWorldsPeerFloorRand(int floor, std::uint32_t *rand);
+// coop-floorrand: apart, building floor `floor` (0 up) of this dungeon that the other copy has not been heard building: the
+// random state both copies build it from (the last link's word, the dungeon, the floor, and its build count apart, the
+// other's heard counts included). False before any link, while linked, or under DC_WORLDS_MUTATE=own_floor_race.
+bool CoopWorldsAgreedFloorRand(int floor, std::uint32_t *rand);
+
+// coop-joinload (Jep 11-11: a joiner always loads in as if it had just loaded the game): the pair apart from a join on, with no
+// split and no link: the host's copy (stays) as the one that stayed where it is, the joiner's as the one that arrived in the town
+// it loads (its town's start event places it; the landing's spot is logged once: "worlds: joinload: player 2 stands at ...").
+// The other copy's zone as each knows it at the join (mode, map, floor as Here() makes them; the joiner's: the town, outdoors).
+void CoopWorldsJoinAsLoad(bool stays, int peer_mode, int peer_map, int peer_floor);
+// This copy's zone as the worlds' presence says it (Here()).
+void CoopWorldsHereZone(int *zone_mode, int *zone_map, int *zone_floor);
+namespace dc::game {
+int CoopDungeonTownMap(); // movechara.cpp (recipe 0036): the town dungeon selectMapNo's way out leads to
+} // namespace dc::game

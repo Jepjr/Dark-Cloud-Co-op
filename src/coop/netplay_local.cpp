@@ -21,6 +21,14 @@
 
 namespace {
 
+// coop-rehost: the windows this copy started, each with its process handle kept open (so its id is never another
+// process's by then), for NetplayLocalCloseWindows.
+struct Window {
+    unsigned long pid = 0;
+    void         *process = nullptr;
+};
+std::vector<Window> g_windows;
+
 // Player 2's own keys: her window and its title, her controller and her copy's link settings (the Local spawn sets the link).
 bool OwnKey(const std::string &section, const std::string &key) {
     if (section == "game") {
@@ -254,11 +262,47 @@ unsigned long NetplayLocalSpawn(int player1_pad, char *why, unsigned long why_si
     }
     ResumeThread(process.hThread);
     CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    g_windows.push_back(Window{process.dwProcessId, process.hProcess}); // (its handle closed by NetplayLocalCloseWindows)
     std::snprintf(why, why_size, "started");
     return process.dwProcessId;
 #else
     std::snprintf(why, why_size, "Windows only");
     return 0;
 #endif
+}
+
+int NetplayLocalCloseWindows(const char *why) {
+    int closed = 0;
+
+    if (g_windows.empty()) {
+        return 0;
+    }
+    if (NetplayMutated("local_windows_kept")) {
+        std::fprintf(stderr, "netplay: local: %zu seat window(s) left running (local_windows_kept): %s\n", g_windows.size(), why);
+#if defined(_WIN32)
+        for (const Window &window : g_windows) {
+            CloseHandle(static_cast<HANDLE>(window.process));
+        }
+#endif
+        g_windows.clear();
+        return 0;
+    }
+#if defined(_WIN32)
+    for (const Window &window : g_windows) {
+        HANDLE process = static_cast<HANDLE>(window.process);
+        DWORD  code = 0;
+
+        if (!GetExitCodeProcess(process, &code) || code != STILL_ACTIVE) {
+            std::fprintf(stderr, "netplay: local: seat window (pid %lu) already gone\n", window.pid);
+        } else if (TerminateProcess(process, 0)) {
+            closed++;
+            std::fprintf(stderr, "netplay: local: seat window (pid %lu) closed: %s\n", window.pid, why);
+        } else {
+            std::fprintf(stderr, "netplay: local: seat window (pid %lu) could not be closed (%lu)\n", window.pid, GetLastError());
+        }
+        CloseHandle(process);
+    }
+#endif
+    g_windows.clear();
+    return closed;
 }

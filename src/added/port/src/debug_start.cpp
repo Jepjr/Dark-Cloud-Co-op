@@ -1,5 +1,5 @@
 // Debug start (--jump pick): a list of the five towns and seven dungeons drawn with the developer menu's
-// font, at boot (--jump pick) or at any time from pad 1's L3+R3 (gameloop.cpp), in the developer menu's place.
+// font, at boot (--jump pick) or, with debug mode on, at any time from pad 1's L3+R3 (gameloop.cpp), in the developer menu's place.
 // Up and Down pick a row; on a dungeon Left and Right pick the floor (L1 and R1 by ten); Cross starts there,
 // Circle goes back where it was opened (at boot, on to the title).
 #include "coop/game_ns.hpp"
@@ -14,6 +14,7 @@
 
 #include "coop/coop.hpp"
 #include "coop/coop_worlds.hpp"
+#include "coop/netplay.hpp"
 #include "dun/gameloop.hpp"
 #include "userstatus.hpp"
 #include "debugfont.hpp"
@@ -209,9 +210,14 @@ void DebugStartBeforeModeInit() {
     // own test start goes to is the one meant (both copies jump alike).
     const int jumped = g_jump_pending;
     g_jump_pending = -1;
-    if (DebugMode != 0 && mode == GAME_MODE_DUNGEON && status->cur_floor >= 0) {
+    // coop-b9arrive test switch (DC_DEBUG_START_RESYNC_MENU=1, x-entrwin -Case resyncwalk): no way back to the floor; the resync
+    // lands at the dungeon's floor menu as a player's game does (no debug start there), the menu Jep's rc1 B9 resync left deaf.
+    if (static const bool to_menu = TestEnvOn("DC_DEBUG_START_RESYNC_MENU"); to_menu && mode == GAME_MODE_DUNGEON) {
+        std::fprintf(stderr, "debug start: test: after the resync, the dungeon's floor menu as a player's game has it\n");
+    } else if (DebugMode != 0 && mode == GAME_MODE_DUNGEON && status->cur_floor >= 0) {
         g_resync_floor = std::max<int>(status->cur_floor, jumped);
         std::fprintf(stderr, "debug start: after the resync, back to floor %d\n", g_resync_floor + 1);
+        NetplayResyncLandedOnFloor(); // coop-harnessfix: not to the floor menu, so its resync flag would have stayed set
     }
 }
 

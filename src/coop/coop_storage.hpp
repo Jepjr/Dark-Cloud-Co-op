@@ -13,6 +13,7 @@ void CoopStoragePut(int page, int slot, const void *data, int size);
 // into the bag. swap: the held record goes into the slot as the claim lands (the hand keeps it till then).
 void CoopStorageClaim(int page, int slot, int expected, int purpose, const void *swap, int swap_size);
 void CoopStorageSort(int page); // the page sorted (retail's Seiton), as one move
+bool CoopStorageIdle();         // coop-wave1a: every ask of this copy's answered (a merge waits for them)
 bool CoopStorageWaiting();      // a claim of this copy's player is out: the counter takes no other storage press till it lands
 // The counter's step on the presser's copy: a claim landed for this copy's player (true; its slot's record in data), or refused.
 bool CoopStorageGranted(int *page, int *slot, int *purpose, void *data, int size);

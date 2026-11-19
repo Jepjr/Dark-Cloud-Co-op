@@ -47,6 +47,9 @@ struct State {
     bool         swapped = false;        // Begin took the player's name and bar off this copy
     ClsMes      *name_mes = nullptr;
     s32          bar_draw = 0;
+    long long    frames = 0;       // LockHudBegin's count (the floor's drawn frames)
+    long long    modal_frame = -9; // the count when a box of ours last dimmed the screen (LockHudUnderModal)
+    bool         under_modal = false;
 };
 
 State g;
@@ -171,6 +174,18 @@ void LockHudBegin() {
     g.last = g.shown;
     g.shown = LockHudShown{};
     Log();
+    g.frames++;
+    // coop-areanotice (the developer 11-18 screenshot: the lock-on corners drawn over the "Starting a story scene" box's text): a lock marker is
+    // a sprite of the game's 2D list, which lands over our modal's lettering whatever order the two are called in; while a box of ours
+    // dims the screen (this frame or the last), none of this copy's lock markers (the player's corners, the nearest-monster marker, the
+    // other player's corners) draws. Draw only: setTargetCursor still runs (its lock, its sounds) as on the other copy.
+    // DC_COOP_MUTATE=lock_over_modal (twin): drawn as before.
+    const bool under = g.frames - g.modal_frame <= 1 && !Mutated("lock_over_modal");
+
+    if (under != g.under_modal) {
+        std::fprintf(stderr, "coop-lockhud: lock markers %s (a box of ours %s)\n", under ? "hidden" : "drawn again", under ? "is up" : "closed");
+    }
+    g.under_modal = under;
     g.drawing_player = true;
     g.swapped = Fixed() && LocalIsPartner();
 
@@ -184,8 +199,12 @@ void LockHudBegin() {
     }
 }
 
+void LockHudUnderModal() {
+    g.modal_frame = g.frames;
+}
+
 bool LockHudPlayerPreview() {
-    bool shown = !g.swapped;
+    bool shown = !g.swapped && !g.under_modal;
 
     if (shown) {
         g.shown.preview = lockOnTargetNo;
@@ -213,6 +232,10 @@ void LockHudEnd() {
 
 int LockHudPartnerCursor(int monster) {
     int alpha = kOtherAlpha;
+
+    if (g.under_modal) {
+        return 0;
+    }
 
     if (Fixed()) {
         if (LocalIsPartner()) {
@@ -275,7 +298,7 @@ void DrawtargetCursor(float *world, float width, float height, float alpha) {
     setbilinear(0);
     world[3] = 1.0f;
 
-    if (g.swapped && !NearOwnPlayer(lockOnTargetNo)) {
+    if (g.under_modal || (g.swapped && !NearOwnPlayer(lockOnTargetNo))) {
         shown = 0;
     } else if (g.swapped) {
         shown = kOtherAlpha;

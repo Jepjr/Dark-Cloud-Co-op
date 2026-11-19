@@ -9,13 +9,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 #include "btactstatus.hpp"
+#include "btitem.hpp" // coop-camflash: BtGetTreasurebox_Sled
+#include "main.hpp"   // coop-camflash: MapNo
+#include "dispctrl.hpp"  // coop-camflash: DispFade__3
+#include "editloop3.hpp" // coop-camflash: EdGetFadeColor
 #include "camerafollow.hpp"
 #include "character.hpp"
 #include "dun/gameloop.hpp"
 #include "dungeonmap.hpp"
+#include "gameutil.hpp"
 #include "mathutil.hpp"
 #include "monstorunit.hpp"
 #include "randomitem.hpp"
@@ -30,6 +36,7 @@
 #include "coop/coop_lockhud.hpp" // coop-lockhud
 #include "coop/coop_interact.hpp" // coop-p2atla
 #include "coop/coop_menu.hpp"     // coop-p2atla
+#include "coop/coop_opener.hpp"   // coop-camflash
 #include "coop/coop_prompt.hpp"   // coop-p2atla
 #include "coop/netplay.hpp"
 
@@ -168,7 +175,7 @@ float *LocalPosition() {
 }
 
 bool Playing() {
-    return gameTask == GAME_TASK_PLAY && !FloorIntro() && g_partner.visible;
+    return CoopPlainPlay() && !FloorIntro() && g_partner.visible;
 }
 
 // coop-fx51d: a check's start, playing. On a state fixture (DC_STATE_LOAD_AT) that is the event itself, the fixture put
@@ -205,7 +212,12 @@ void PutPartner(const float *pos) {
     }
 
     g_partner.velocity[0] = g_partner.velocity[1] = g_partner.velocity[2] = 0.0f;
-    g_partner.chara->frame->SetPosition(g_partner.pos);
+    // cand1112d (DC_COOP_CAMTEST_REALFACE=1): her character placed with her frame, as CoopStep's end leaves them (see LockPress)
+    if (TestEnvOn("DC_COOP_CAMTEST_REALFACE")) {
+        g_partner.chara->SetPosition(g_partner.pos);
+    } else {
+        g_partner.chara->frame->SetPosition(g_partner.pos);
+    }
 }
 
 // Each tick a player's stick points: its step must go that way on the camera this copy drew.
@@ -346,7 +358,27 @@ void Intro() {
         // (the stairs' steps stand between them for PathClear).
         if (g.referenced == 0 && g.opening_ticks > 1) {
             g.reach_checked++;
-            g.reachable += PathClear(player, g_partner.pos);
+            // coop-entrance: an entrance with its own spot for her (kEntranceSpots) stands her there, where his walk need not
+            // reach (Wise Owl Forest's niche: only his front is walkable, the spot that stood her before the log); counted when
+            // she is within 1 of it. Elsewhere, as before, where he could walk.
+            if (const EntranceSpot *spot = EntranceSpotFor(selectMapNo, 2); spot != nullptr) {
+                sceVu0FVECTOR rotation;
+
+                CharaMain.GetRotation(rotation);
+                const float ax[2] = {cosf(rotation[1]), -sinf(rotation[1])};
+                const float az[2] = {sinf(rotation[1]), cosf(rotation[1])};
+                // (coop-entrance2: an entrance of his own (spot->own) starts her at his very place, the table's spot only at its end;
+                // her model without his stairs motion still stands at the spot)
+                int         own_motion = -1;
+                const bool  own = spot->own && !CoopMutate("entrance_delay_off") &&
+                                 g_partner.chara->GetMotionParam(100, &own_motion, nullptr, nullptr, nullptr) != nullptr;
+                const float want[2] = {own ? player[0] : player[0] - spot->right * ax[0] + spot->along * az[0],
+                                       own ? player[2] : player[2] - spot->right * ax[1] + spot->along * az[1]};
+
+                g.reachable += std::hypot(g_partner.pos[0] - want[0], g_partner.pos[2] - want[1]) <= 1.0f;
+            } else {
+                g.reachable += PathClear(player, g_partner.pos);
+            }
         }
 
         // Carried in (the cave), past the first 25 ticks: she walks where he walked (within 8 of a
@@ -886,6 +918,257 @@ void CircleCam() {
             return;
         }
 
+        // candfix2: dun1-f1 saves at the forest opening's end now (698, was 450), where she stands in the stairs' niche: her
+        // camera's swing round behind her met the floor's camera collision at tick 95 (autoCamTrial's reach 80 -> 55) and its
+        // CameraAutoMove turned it away (2.49 rad from behind her 90 ticks on), on both copies alike (no desync: the check's
+        // place). She is put first where a whole swing, from 140 degrees round to behind her, keeps the camera's line clear
+        // (CameraLineClear: the camera's polygons, not a walk's): where she stands, else the nearest of the floor's spots, the
+        // first of eight ways, with no monster within 320 (none she wakes or could lock); a tick later (her camera cut to her) the
+        // check goes on as before.
+        if (g.placed < 0) {
+            const auto open = [](const float *at, float yaw) {
+                const float look[4] = {at[0], at[1] + 13.5f, at[2], 1.0f};
+
+                for (int k = 0; k <= 8; k++) {
+                    const float a = yaw - PI + 2.44f * (float) k / 8.0f; // (the camera's angle: its eye at (sin, cos) of it from her)
+                    const float eye[4] = {look[0] + 80.0f * sinf(a), look[1] + 10.0f, look[2] + 80.0f * cosf(a), 1.0f};
+
+                    if (!CameraLineClear(look, eye)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            // coop-entrance10c (the landing set, 11-13: since entrance10 the fixture leaves both in the forest's stairs niche, where no
+            // spot passes open(); the floor's nearest event, 428 away, did, and she fell there, y -82, and was leashed back beside
+            // him, her camera cut mid-swing: 0.55 rad): her spot is searched by walking out from her place over the floor itself,
+            // a 16 grid, each step one the game's MoveCheck lets her take (PathClear) onto ground the floor's own query finds
+            // (GetFootPoly, within 10 of the step before; eight ways), up to 992 out, nearest by the walk first; there the first that passes
+            // open() with no monster within 320 and a step each way walkable. Beyond the player's 240 (his loaded region, his
+            // leash) both walk out: he is put three steps back along her way first.
+            // DC_COOP_MUTATE=circlecam_far_spot (twin): the floor's event and cell spots by straight distance, as before.
+            const auto ground_at = [](float x, float y, float z, float *ground) {
+                float         at[4] = {x, y + 8.0f, z, 1.0f};
+                CCPoly       *polys;
+                const int     count = GatherPolys(at, &polys);
+                CCPoly        poly;
+                sceVu0FVECTOR hit;
+
+                if (count <= 0 || !GetFootPoly(at, 16.0f, &poly, hit, polys, count, 0)) {
+                    return false;
+                }
+                *ground = hit[1];
+                return true;
+            };
+            const auto alone_at = [](const float *spot) {
+                bool alone = true; // (no monster she would wake, retail's 300, and so none she could lock)
+
+                for (int i = 0; i < 16 && alone; i++) {
+                    float position[4];
+
+                    NowMonstorUnit->chara[i][0].GetPosition(position);
+                    alone = NowMonstorUnit->monster[i].state < 0 || NowMonstorUnit->monster[i].hp <= 0 || DistXZ(position, spot) > 320.0f;
+                }
+                for (int d = 0; d < 4 && alone; d++) { // (open ground: a step each way walkable, not inside a tree or a rock)
+                    const float to[4] = {spot[0] + (d == 0 ? 24.0f : d == 1 ? -24.0f : 0.0f), spot[1], spot[2] + (d == 2 ? 24.0f : d == 3 ? -24.0f : 0.0f), 1.0f};
+
+                    alone = PathClear(spot, to);
+                }
+                return alone;
+            };
+            const auto put = [](const float *at, float yaw, float away, const char *how) {
+                float spot[4] = {at[0], at[1], at[2], 1.0f};
+
+                PutPartner(spot);
+                g_partner.chara->SetPosition(spot);
+                g_partner.chara->SetRotation(0.0f, yaw, 0.0f);
+                g.placed = g.tick;
+                std::printf("camtest: circlecam partner put at (%.0f %.0f %.0f), %.0f from where she stood (%s), facing %.2f rad: her camera's swing is clear\n",
+                            spot[0], spot[1], spot[2], away, how, yaw);
+            };
+            if (!CoopMutate("circlecam_far_spot")) {
+                constexpr int   kN = 125; // (a grid 16 apart, 992 each way from her)
+                constexpr float kGrid = 16.0f;
+                static float    ys[kN * kN];
+                static int      queue[kN * kN];
+                static int      from[kN * kN]; // (the cell each was walked to from)
+                static bool     seen[kN * kN];
+                const float    *origin = g_partner.pos;
+                const float    *him = CharaMain.pos;
+                int             head = 0;
+                int             tail = 0;
+
+                std::fill(std::begin(seen), std::end(seen), false);
+                if (ground_at(origin[0], origin[1], origin[2], &ys[kN * kN / 2])) {
+                    seen[kN * kN / 2] = true;
+                    from[kN * kN / 2] = -1;
+                    queue[tail++] = kN * kN / 2;
+                }
+                // (beyond the player's 240, his loaded region and leash: both walk out, he to the cell three steps back along her
+                // way, on the ground she walked over, then she to the spot)
+                const auto walk_out = [&](int c, const float *spot) {
+                    if (DistXZ(spot, him) <= 240.0f) {
+                        return;
+                    }
+                    int back = c;
+
+                    for (int k = 0; k < 3 && from[back] >= 0; k++) {
+                        back = from[back];
+                    }
+                    float to[4] = {origin[0] + kGrid * (back % kN - kN / 2), ys[back], origin[2] + kGrid * (back / kN - kN / 2), 1.0f};
+
+                    CharaMain.SetPosition(to);
+                    if (CharaFrame != nullptr) {
+                        CharaFrame->SetPosition(to);
+                    }
+                    MainCamera__4.SetFollow(to[0], to[1] + 13.0f, to[2]);
+                    MainCamera__4.Step(-1);
+                    std::printf("camtest: circlecam both walked out: the player to (%.0f %.0f %.0f), %.0f from the spot\n", to[0], to[1], to[2],
+                                DistXZ(to, spot));
+                };
+                while (head < tail && g.placed < 0) {
+                    const int   c = queue[head++];
+                    const float spot[4] = {origin[0] + kGrid * (c % kN - kN / 2), ys[c], origin[2] + kGrid * (c / kN - kN / 2), 1.0f};
+
+                    for (int w = 0; w < 8 && alone_at(spot); w++) {
+                        if (!open(spot, (float) w * 0.7853982f)) {
+                            continue;
+                        }
+                        walk_out(c, spot);
+                        put(spot, (float) w * 0.7853982f, DistXZ(spot, origin), "walked to over the floor");
+                        break;
+                    }
+                    for (int d = 0; d < 8 && g.placed < 0; d++) { // (eight ways: a lane out of the niche runs at -30 degrees)
+                        static const int kDx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+                        static const int kDz[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+                        const int        x = c % kN + kDx[d];
+                        const int        z = c / kN + kDz[d];
+                        float     y = 0.0f;
+
+                        if (x < 0 || x >= kN || z < 0 || z >= kN || seen[x + z * kN]) {
+                            continue;
+                        }
+                        const float to[4] = {origin[0] + kGrid * (x - kN / 2), spot[1], origin[2] + kGrid * (z - kN / 2), 1.0f};
+
+                        if (!PathClear(spot, to) || !ground_at(to[0], spot[1], to[2], &y) || std::fabs(y - spot[1]) > 10.0f) {
+                            continue;
+                        }
+                        seen[x + z * kN] = true;
+                        ys[x + z * kN] = y;
+                        from[x + z * kN] = c;
+                        queue[tail++] = x + z * kN;
+                    }
+                }
+                // (coop-entrance10c: dun1-f1 by numbers, 2339 grid spots reached, 1266 open, 18 passing alone_at (no monster within
+                // 320 AND a 24 step each way walkable), none both: the open spot, reached by the walk, whose nearest monster is
+                // farthest, 160 or more (e87: 338, so beyond 320 after all; its 24 steps were what failed); the tap's own check,
+                // nothing lockable, and the result's, no lock taken, still hold)
+                int   best = -1;
+                int   best_w = 0;
+                float best_far = 160.0f;
+
+                for (int k = 0; k < tail && g.placed < 0; k++) {
+                    const float on[4] = {origin[0] + kGrid * (queue[k] % kN - kN / 2), ys[queue[k]], origin[2] + kGrid * (queue[k] / kN - kN / 2), 1.0f};
+                    float       nearest = 1e9f;
+
+                    for (int i = 0; i < 16; i++) {
+                        float position[4];
+
+                        NowMonstorUnit->chara[i][0].GetPosition(position);
+                        if (NowMonstorUnit->monster[i].state >= 0 && NowMonstorUnit->monster[i].hp > 0) {
+                            nearest = std::min(nearest, DistXZ(position, on));
+                        }
+                    }
+                    if (nearest < best_far) {
+                        continue;
+                    }
+                    for (int w = 0; w < 8; w++) {
+                        if (open(on, (float) w * 0.7853982f)) {
+                            best = k;
+                            best_w = w;
+                            best_far = nearest;
+                            break;
+                        }
+                    }
+                }
+                if (g.placed < 0 && best >= 0) {
+                    const int   c = queue[best];
+                    const float on[4] = {origin[0] + kGrid * (c % kN - kN / 2), ys[c], origin[2] + kGrid * (c / kN - kN / 2), 1.0f};
+
+                    std::printf("camtest: circlecam no open spot with no monster within 320: the open one farthest from them, its nearest %.0f\n", best_far);
+                    walk_out(c, on);
+                    put(on, (float) best_w * 0.7853982f, DistXZ(on, origin), "walked to over the floor");
+                }
+                if (g.placed < 0) {
+                    float farthest = 0.0f;
+                    float low = 1e9f;
+                    float high = -1e9f;
+                    int   opens = 0;  // (of those reached: how many pass open() some way, how many have no monster within 320)
+                    int   alones = 0;
+
+                    for (int k = 0; k < tail; k++) {
+                        const float at[4] = {origin[0] + kGrid * (queue[k] % kN - kN / 2), 0.0f, origin[2] + kGrid * (queue[k] / kN - kN / 2), 1.0f};
+
+                        farthest = std::max(farthest, DistXZ(at, origin));
+                        const float on[4] = {at[0], ys[queue[k]], at[2], 1.0f};
+                        bool        any = false;
+
+                        for (int w = 0; w < 8 && !any; w++) {
+                            any = open(on, (float) w * 0.7853982f);
+                        }
+                        opens += any ? 1 : 0;
+                        alones += alone_at(on) ? 1 : 0;
+                        low = std::min(low, ys[queue[k]]);
+                        high = std::max(high, ys[queue[k]]);
+                    }
+                    std::printf("camtest: circlecam no open spot walkable from her within 992 (%d grid spots reached, the farthest %.0f, ground %.0f to %.0f; %d of them open, %d alone)\n",
+                                tail, farthest, low, high, opens, alones);
+                }
+            } else {
+                float spots[449][4];
+                int   n = 0;
+
+                std::memcpy(spots[n++], g_partner.pos, sizeof spots[0]);
+                for (int i = 0; i < 48; i++) {
+                    if (NowDngMap->events[i].kind != DNG_EVENT_NONE) {
+                        std::memcpy(spots[n], NowDngMap->events[i].pos, sizeof spots[0]);
+                        spots[n++][3] = 1.0f;
+                    }
+                }
+                for (int i = 0; NowDngMap->map_type == 1 && i < 400; i++) {
+                    if (NowDngMap->cells[i].parts_no != -1) {
+                        spots[n][0] = 160.0f * (i % 20) + 80.0f;
+                        spots[n][1] = g_partner.pos[1];
+                        spots[n][2] = 160.0f * (i / 20) + 80.0f;
+                        spots[n++][3] = 1.0f;
+                    }
+                }
+                int order[449];
+
+                for (int i = 0; i < n; i++) {
+                    order[i] = i;
+                }
+                std::stable_sort(&order[1], &order[n], [&spots](int a, int b) { return DistXZ(spots[a], spots[0]) < DistXZ(spots[b], spots[0]); });
+                for (int k = 0; k < n && g.placed < 0; k++) {
+                    float *spot = spots[order[k]];
+
+                    for (int w = 0; w < 8 && alone_at(spot); w++) {
+                        if (open(spot, (float) w * 0.7853982f)) {
+                            put(spot, (float) w * 0.7853982f, DistXZ(spot, spots[0]), "the floor's spot");
+                            break;
+                        }
+                    }
+                }
+            }
+            if (g.placed < 0) {
+                Verdict(false, "precondition: no spot of the floor's where her camera's swing round behind her is clear");
+            }
+            return;
+        }
+        if (g.tick < g.placed + 2) {
+            return;
+        }
+
         for (int i = 0; i < 16; i++) {
             if (Lockable(i)) {
                 Verdict(false, "precondition: monster %d is lockable by her, so Circle would lock on", i);
@@ -1004,7 +1287,14 @@ void LockPress() {
 
             if (PathClear(position, spot)) {
                 PutPartner(spot);
-                g_partner.chara->frame->SetRotation(0.0f, yaw, 0.0f);
+                // cand1112d (DC_COOP_CAMTEST_REALFACE=1, x-p2-lockpress-realface): her character and frame turned together, as
+                // every game path leaves her after CoopStep (its end puts the frame's turn on the character), so the rest is play's
+                // own path; the hook's frame-alone turn is the one write a draw could undo.
+                if (TestEnvOn("DC_COOP_CAMTEST_REALFACE")) {
+                    g_partner.chara->SetRotation(0.0f, yaw, 0.0f);
+                } else {
+                    g_partner.chara->frame->SetRotation(0.0f, yaw, 0.0f);
+                }
                 placed = true;
                 break;
             }
@@ -1454,7 +1744,7 @@ void PartnerCrossAt(int i) {
 // coop-p2atla (Jep 2026-10-25, notes 27-29, 32): Xiao takes an Atla with her Cross; pad 2 swaps to Toan (the
 // player becomes Xiao) and takes one as Toan; the player, Toan again, takes one through retail's presentation.
 // Each take: the ball gone and the task still play (no presentation) on both copies; copy B draws from her
-// own camera through her take and through his presentation. Copy A's prompt cover is the test script's.
+// own camera through her take and through his presentation. Copy A never takes her pad for it (no prompt of hers: the test script's check).
 void P2Atla() {
     static const char *const kStep[] = {"", "Xiao's take", "swap to Toan", "Toan's take", "swap back", "his presentation"};
     long                     since = g.tick - g.atla_at;
@@ -1488,7 +1778,7 @@ void P2Atla() {
                 std::printf("camtest: p2atla %s: ball %d used %d, task %d, partner %d, player %d\n", kStep[g.atla_step], ball,
                             NowDngMap->atra[ball].used, (int) gameTask, g_partner.loaded_chara, (int) UserStatus->cur_chara);
 
-                if (!taken || gameTask != GAME_TASK_PLAY) {
+                if (!taken || !CoopPlainPlay()) {
                     Verdict(false, "%s: ball %d used %d, task %d (want taken, task %d)", kStep[g.atla_step], ball, NowDngMap->atra[ball].used,
                             (int) gameTask, GAME_TASK_PLAY);
                 }
@@ -1504,12 +1794,13 @@ void P2Atla() {
 
             int chara = g.atla_step == 1 ? CHARA_XIAO : CHARA_TOAN;
 
-            if (!PromptChangePlayer(chara)) {
-                Verdict(false, "precondition: the player cannot become %d", chara);
+            // coop-dungeonreds: the swap is a trade (the partner's member is the one the player becomes): a plain change to a member
+            // the other player holds is refused since coop-memberowner, so the row trades as her Characters pick's yes does.
+            if (g_partner.loaded_chara != chara || !PromptTradeForTest()) {
+                Verdict(false, "precondition: the player cannot trade for %d (partner %d)", chara, g_partner.loaded_chara);
                 return;
             }
 
-            g_partner.choice = chara == CHARA_XIAO ? CHARA_TOAN : CHARA_XIAO;
             std::printf("camtest: p2atla %s: the player becomes %d, pad 2 takes %d (tick %ld)\n", kStep[g.atla_step + 1], chara,
                         g_partner.choice, g.tick);
             break;
@@ -1597,11 +1888,11 @@ void CamTestTick() {
 
     g.tick++;
 
-    // The mode first: linked, co-op on, the cameras setting on, the partner on the floor.
+    // The mode first: linked, co-op on, the partner on the floor.
     const dc::platform::Config &config = dc::platform::ConfigGet();
 
     // pullback's own result tells a camera each (no leash) from a shared camera, so it runs either way.
-    if (NetplayLocalPlayer() == 0 || !config.coop || (!IndependentCamerasSetting(config) && !Is("pullback"))) {
+    if (NetplayLocalPlayer() == 0 || !config.coop) {
         Verdict(false, "precondition: not linked with independent cameras on");
         return;
     }
@@ -1737,4 +2028,122 @@ void CamTestDropDrawn(const float *pos) {
 // coop-warmreset (WS7): a camera test's second job on a warm pair found the first one's verdict (done) and never said its own.
 void coop::CamtestResetForJob() {
     g = State{};
+}
+
+// coop-camflash2: GameRenderTick's word on the tick MGEndFrame renders (it asks before CamFlashTick logs that tick): 1 the
+// tick's own picture, 0 nothing new (the last frame stays up: a catch-up's or a join's held frame), 2 black (the arrival's
+// hold), -1 not asked. A tick drawn is not always shown (a join holds its frame through the host's state), so a check of what
+// the player saw reads this word.
+// With it the meshes the tick's list draws (a frame of the world, or a blank or a card).
+static int g_camflash_shown = -1;
+static int g_camflash_meshes = -1;
+
+bool CamFlashOn() {
+    static const bool on = TestEnvOn("DC_COOP_TEST_CAMFLASH");
+    return on;
+}
+
+void CamFlashShown(int shown, int meshes) {
+    g_camflash_shown = shown;
+    g_camflash_meshes = meshes;
+}
+
+// coop-camflash (Jep's 11-16 playtest: "when P1 goes to open a chest, it plays a frame of a different camera angle ... before it
+// starts the animation; I believe it does the same thing when entering the dungeon from the village"). Test hook
+// (DC_COOP_TEST_CAMFLASH=1, x-camflash): each tick's drawn view, as MGEndFrame keeps it for the next tick's interpolation (the
+// tick view), with whether the renderer cut its interpolation into it (a camera cut or the mode's first tick) and what the
+// floor's presentation state was. Read only.
+void CamFlashTick(const float *view, bool camera_cut, bool list_cut) {
+    const bool        log = CamFlashOn();
+    static float      last_eye[3] = {};
+    static float      last_dir[3] = {};
+    static bool       have_last = false;
+
+    if (!log || view == nullptr) {
+        return;
+    }
+
+    // The eye is where the view's inverse puts the origin; the view looks down its negative Z.
+    const float(*m)[4] = reinterpret_cast<const float(*)[4]>(view);
+    float r[3][3];
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            r[i][j] = m[i][j];
+        }
+    }
+
+    const float det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) +
+                      r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+
+    if (std::fabs(det) < 1.0e-12f) {
+        return;
+    }
+
+    float inv[3][3];
+
+    inv[0][0] = (r[1][1] * r[2][2] - r[1][2] * r[2][1]) / det;
+    inv[0][1] = (r[0][2] * r[2][1] - r[0][1] * r[2][2]) / det;
+    inv[0][2] = (r[0][1] * r[1][2] - r[0][2] * r[1][1]) / det;
+    inv[1][0] = (r[1][2] * r[2][0] - r[1][0] * r[2][2]) / det;
+    inv[1][1] = (r[0][0] * r[2][2] - r[0][2] * r[2][0]) / det;
+    inv[1][2] = (r[0][2] * r[1][0] - r[0][0] * r[1][2]) / det;
+    inv[2][0] = (r[1][0] * r[2][1] - r[1][1] * r[2][0]) / det;
+    inv[2][1] = (r[0][1] * r[2][0] - r[0][0] * r[2][1]) / det;
+    inv[2][2] = (r[0][0] * r[1][1] - r[0][1] * r[1][0]) / det;
+
+    // Row vectors (the PS2's): p_view = p_world * M, so p_world = (p_view - t) * inv.
+    float eye[3];
+    float dir[3];
+
+    for (int j = 0; j < 3; j++) {
+        eye[j] = -(m[3][0] * inv[0][j] + m[3][1] * inv[1][j] + m[3][2] * inv[2][j]);
+        dir[j] = -inv[2][j];
+    }
+
+    const float length = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+
+    if (length > 0.0f) {
+        for (float &d : dir) {
+            d /= length;
+        }
+    }
+
+    float jump = 0.0f;
+    float turn = 0.0f;
+
+    if (have_last) {
+        jump = std::sqrt((eye[0] - last_eye[0]) * (eye[0] - last_eye[0]) + (eye[1] - last_eye[1]) * (eye[1] - last_eye[1]) +
+                         (eye[2] - last_eye[2]) * (eye[2] - last_eye[2]));
+        const float dot = std::clamp(dir[0] * last_dir[0] + dir[1] * last_dir[1] + dir[2] * last_dir[2], -1.0f, 1.0f);
+        turn = std::acos(dot) * 57.29578f;
+    }
+
+    // Which camera the eye is (the game's own, the presentation's SubCamera, or another: a co-op view, a scene's).
+    auto near = [&](const CCameraFollow &camera) {
+        return std::fabs(camera.pos[0] - eye[0]) < 0.5f && std::fabs(camera.pos[1] - eye[1]) < 0.5f && std::fabs(camera.pos[2] - eye[2]) < 0.5f;
+    };
+    const char *name = near(MainCamera__4) ? "main" : near(SubCamera) ? "sub" : "other";
+
+    // (what covers the frame: the event fade, EdFadeInOut's alpha 0-128, and the floor's DispFade__3, its mode and rate)
+    float fade[4] = {};
+
+    EdGetFadeColor(fade);
+    int       his = -1;
+    const int black = CoopViewDrewScene() >= 0 ? CoopViewBlack(&his) : CoopScreenBlack(); // (the screen's black; his view's)
+    const int shown = g_camflash_shown;
+    const int meshes = g_camflash_meshes;
+
+    g_camflash_shown = g_camflash_meshes = -1;
+    const PresentScreenIn screen; // coop-tripwires3: the opener's own box flags, as its frame drew them
+    std::fprintf(stderr,
+                 "camflash: p%d tick %lld map %d task %d event %d sled %d box %d/%d engine %d cam %s eye (%.2f %.2f %.2f) dir (%.3f %.3f %.3f) "
+                 "jump %.2f turn %.2f cut %d listcut %d fade %.0f dfade %d:%.0f shown %d meshes %d from %d black %d his %d\n",
+                 NetplayLocalPlayer(), (long long) NetplayLinkTick(), MapNo, (int) gameTask, (int) BtEventMode, BtGetTreasurebox_Sled,
+                 (int) itemOpenSmallFlag, (int) itemOpenBigFlag, PresentEngineCamera() != nullptr ? 1 : 0, name, eye[0], eye[1], eye[2],
+                 dir[0], dir[1], dir[2], jump, turn, camera_cut ? 1 : 0, list_cut ? 1 : 0, fade[3], (int) DispFade__3.mode,
+                 DispFade__3.rate, shown, meshes, CoopViewDrewScene(), black, his);
+    std::memcpy(last_eye, eye, sizeof last_eye);
+    std::memcpy(last_dir, dir, sizeof last_dir);
+    have_last = true;
 }

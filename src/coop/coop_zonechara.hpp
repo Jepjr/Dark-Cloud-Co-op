@@ -45,6 +45,9 @@ bool ZoneForceMetByOther(dc::game::RS_STACKDATA *stack, int chara);
 
 // Each tick in the step, on every copy (coop_core, before PickPartner): the leave-floor switch and the test hooks.
 void ZoneStep();
+void ZoneTestFloorStep(); // coop-forcefloor: DC_WORLDS_TEST_ZONE_FLOOR's force, apart too
+// coop-entrance: the zone test hook (DC_COOP_TEST_ZONE_*) has picks still to make.
+bool ZoneTestPending();
 
 // The menu's Characters page on a character-limited floor (main_ring recipe): open with another player on the floor (each
 // pick checked as it is taken); alone, retail's refusal.

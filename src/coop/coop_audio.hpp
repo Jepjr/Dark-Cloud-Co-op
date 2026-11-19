@@ -62,6 +62,12 @@ int SoundCoopEffectVolume(int se_no);
 } // namespace dc::game
 
 namespace coop {
+// coop-comboaudio (the combo rows): the key sounds (the voice set's swings and shouts, Goro's smash) player 1's attacks played
+// through SndSePlay and player 2's through her own voice, in order (up to 64 each); cleared by the bot.
+void KeySoundRecord(int player, int se_no);
+void KeySoundsClear(int player);
+int  KeySoundsRead(int player, const int **list);
+
 void AudioSnapshotBefore();  // coop-pt1109c: the sound driver's track, before a state set lands over the words for it
 void AudioSnapshotApplied(); // coop-pt1109c: after: the driver made to match the set
 
@@ -81,6 +87,9 @@ private:
     bool menu_only_;
 };
 
+// coop-p2rumble: the player (1 up) a SoundOwner names now (whose own step or menu runs: menu_only or not), 0 none.
+int SoundOwnerPlayer();
+
 // coop-soundpt (Jep's playtest, 2026-10-30: "p1 can hear p2 shooting an enemy from really far away"): the sounds played
 // while one lives come from where `at` stands (the partner's step: her swings, shots, hits, items, traps), placed against
 // this copy's listener as the game places a monster's (SndGetVolPan), so the other player hears them fade with distance.
@@ -97,9 +106,30 @@ private:
     const float *at_;
 };
 
+// coop-farcull (Jep's rc1 playtest: player 1 heard the mimic player 2 opened across the floor): while one lives (motionDrive's
+// monster step), a monster's own flat sounds (its script's SET_SND_NOW: the mimic's reveal, a roar; the unit's hit sounds) play
+// as retail's while the monster is inside its wake distance of this copy's own player (retail only steps a monster there), and
+// past it, where only another player woke it, from the monster, placed against this copy's listener with the monster's own
+// fall-off (SoundCheck's: 50 to 500, 350 to 1000 for one that cannot be locked on), so across the floor it is not heard.
+// DC_COOP_AUDIO_MUTATE=monsterflat (twin): flat on every copy, as before.
+class MonsterSounds {
+public:
+    MonsterSounds();
+    ~MonsterSounds();
+    MonsterSounds(const MonsterSounds &) = delete;
+    MonsterSounds &operator=(const MonsterSounds &) = delete;
+
+private:
+    bool was_;
+};
+
 // coop-soundpt: player 2's own weapon about to break (as motionDrive's warning for player 1): its beep on her copy alone,
 // on her own clock. Called once a tick on a floor from her step.
 void PartnerWeaponWarning();
+
+// coop-wellsound: a voice sound of player 2's own (400-499: her recover at a healing spring, her items' recover), from her
+// member's voice set at where she stands, on every copy; the game's SndSePlay takes it from player 1's member's set.
+void PartnerVoiceSound(int se_no);
 
 // coop-atlaopen: player 2's chest and Atla presentations' special sounds (retail's SndSPSePlay: the acquired jingle,
 // the Atla's chime), from her own special set on kCoopSpecialPort, so player 1's (the game's MIDI_PORT_SE_SPECIAL set)

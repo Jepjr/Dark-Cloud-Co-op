@@ -9,6 +9,8 @@
 #include "btactstatus.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_core.hpp"
+#include "coop/coop_actor.hpp"  // coop-downmenu: kMaxPlayers
+#include "coop/coop_combat.hpp" // coop-downmenu: PlayerDown
 #include "dun/gameloop.hpp"
 #include "mathutil.hpp"
 #include "monstorunit.hpp"
@@ -17,8 +19,8 @@
 #include "userstatus.hpp"
 
 // The monster script opcodes that read where the player stands, retail's (ps2/src/runscript_opcodes.cpp)
-// with CharaMain's position replaced by that of whichever of the two co-op players the monster goes
-// after. Without co-op, or with the partner off the floor or down, that is always the player.
+// with CharaMain's position replaced by that of whichever co-op player the monster goes after. Without co-op, or
+// with the partner off the floor, that is always the player; a player lying down is no one's (coop-downmenu).
 
 namespace {
 
@@ -26,7 +28,7 @@ namespace {
 // between the two does not swap every tick.
 constexpr float kSwitchMargin = 15.0f;
 
-// Whom each monster goes after: 0 the player, 1 the partner.
+// Whom each monster goes after: a player index (player number - 1): 0 the player, 1 the partner.
 int g_target[16];
 
 int GetStackInt(RS_STACKDATA *argument) {
@@ -65,46 +67,81 @@ struct Target {
     bool  partner;
 };
 
-// The player the current monster goes after: the nearer one, held until the other is nearer by
-// kSwitchMargin.
-Target TargetOf(int monster_no) {
-    Target target;
-    float  monster_position[4];
-
-    sceVu0CopyVector(target.position, CharaMain.pos);
-    sceVu0CopyVector(target.heading, BtActStatus.input_direction);
-    target.since_attack = BtActStatus.frames_since_attack;
-    target.chara = UserStatus->cur_chara;
-    target.partner = false;
-
-    Target partner = target;
-
-    if (monster_no < 0 || monster_no >= 16 ||
-        !CoopPartnerTarget(partner.position, partner.heading, &partner.since_attack, &partner.chara)) {
-        if (monster_no >= 0 && monster_no < 16) {
-            g_target[monster_no] = 0;
-        }
-
-        return target;
+// The body of player index + 1 as a monster's target: where it stands, its heading, its swing timer and member. False while it cannot be
+// gone after: no body on the floor (players past 2 have none yet), or lying down.
+// coop-downmenu (the developer's rc5b playtest, 11-19: "enemies dont stop targeting dead players"): the pick began from player 1 whatever he was and
+// asked only the partner whether she stood (CoopPartnerTarget), so with him down every monster near him kept going after him, swinging at
+// a body its blows cannot hurt, while she stood by untouched. Retail never had a player lying down in play (its down is the game over),
+// so its scripts never asked. Now a player lying down is no one's target; a revived one is again. With every player down the game's death
+// runs that tick (PlayerDownStep: the game over), and the monsters read player 1 as retail's do through it.
+// DC_COOP_MUTATE=target_down (twin): a downed player is a target as before (either one).
+bool TargetFor(int index, Target &out) {
+    if (index == 0) {
+        sceVu0CopyVector(out.position, CharaMain.pos);
+        sceVu0CopyVector(out.heading, BtActStatus.input_direction);
+        out.since_attack = BtActStatus.frames_since_attack;
+        out.chara = UserStatus->cur_chara;
+        out.partner = false;
+        return !coop::PlayerDown(1) || coop::Mutated("target_down");
     }
+    if (index == 1) {
+        out.partner = true;
+        if (CoopPartnerTarget(out.position, out.heading, &out.since_attack, &out.chara)) {
+            return true;
+        }
+        if (!coop::Mutated("target_down") || !coop::PlayerDown(2)) {
+            return false;
+        }
+        sceVu0CopyVector(out.position, coop::g_partner.pos); // (the twin: down, still gone after)
+        sceVu0CopyVector(out.heading, coop::g_partner.heading);
+        out.since_attack = coop::g_partner.since_attack;
+        out.chara = coop::g_partner.loaded_chara;
+        return true;
+    }
+    return false;
+}
+
+// The player the current monster goes after: the nearest it can go after, held until another is nearer by kSwitchMargin (or the one
+// held can no longer be gone after).
+Target TargetOf(int monster_no) {
+    Target players[coop::kMaxPlayers];
+    bool   can[coop::kMaxPlayers];
+    float  distance[coop::kMaxPlayers] = {};
+    int    any = 0;
+
+    for (int i = 0; i < coop::kMaxPlayers; i++) {
+        can[i] = TargetFor(i, players[i]);
+        any += can[i] ? 1 : 0;
+    }
+
+    if (monster_no < 0 || monster_no >= 16) {
+        return players[0];
+    }
+    if (any == 0) { // every player down: retail's player (the game's death runs)
+        g_target[monster_no] = 0;
+        return players[0];
+    }
+
+    float monster_position[4];
 
     NowMonstorUnit->chara[monster_no][0].GetPosition(monster_position);
 
-    float to_player = DistVector(monster_position, target.position);
-    float to_partner = DistVector(monster_position, partner.position);
+    int nearest = -1;
 
-    if (g_target[monster_no] == 0 && to_partner + kSwitchMargin < to_player) {
-        g_target[monster_no] = 1;
-    } else if (g_target[monster_no] == 1 && to_player + kSwitchMargin < to_partner) {
-        g_target[monster_no] = 0;
+    for (int i = 0; i < coop::kMaxPlayers; i++) {
+        if (can[i]) {
+            distance[i] = DistVector(monster_position, players[i].position);
+            nearest = nearest < 0 || distance[i] < distance[nearest] ? i : nearest;
+        }
     }
 
-    if (g_target[monster_no] == 1) {
-        partner.partner = true;
-        return partner;
-    }
+    int held = g_target[monster_no];
 
-    return target;
+    if (held < 0 || held >= coop::kMaxPlayers || !can[held] || distance[nearest] + kSwitchMargin < distance[held]) {
+        held = nearest;
+    }
+    g_target[monster_no] = held;
+    return players[held];
 }
 
 } // namespace

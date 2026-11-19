@@ -364,7 +364,14 @@ void Ask(std::uint32_t op, int page, int slot, int expected, int purpose, const 
         std::memcpy(msg.bytes, data, size);
     }
     g_asks[msg.id] = Asked{msg, std::chrono::steady_clock::now()};
-    SendMsg(msg);
+    // Test hook (DC_COOP_TEST_STORAGE_ASK_HOLD=ms, coop-wave1a): the asker's first ask reaches the host that much later, as over a slow
+    // link (its first send and its resends held): the pair may be ready to merge meanwhile.
+    if (static const int hold = TestEnvInt("DC_COOP_TEST_STORAGE_ASK_HOLD", 0); hold > 0 && msg.id == 1) {
+        g_asks[msg.id].sent = std::chrono::steady_clock::now() + std::chrono::milliseconds(hold - 500);
+        std::fprintf(stderr, "coop-storage: test: ask %u held %d ms (a slow link)\n", msg.id, hold);
+    } else {
+        SendMsg(msg);
+    }
     std::fprintf(stderr, "coop-storage: player %u asks the host: %s of the storage's %s slot %d (ask %u)\n", msg.from,
                  op == kOpPut ? "a put" : op == kOpClaim ? "a claim" : "a sort", PageName(page), slot, msg.id);
     std::fflush(stderr);
@@ -528,6 +535,13 @@ void CoopStorageSort(int page) {
     command.kind = kCmdStorageMove;
     command.a = (std::uint8_t) (page | kMoveSort << 2);
     NetplayQueueCommand(command);
+}
+
+// coop-wave1a (localaudit 3.3): every ask of this copy's answered. An ask is heard outside the lockstep: one the host takes after
+// a merge's link has come up changes the board on the host's copy alone (HostTakes applies at once), so a merge waits for the
+// asks as it waits for the slot records and the progress (MergeReady). DC_COOP_MUTATE=storage_ask_merges (twin): it does not.
+bool CoopStorageIdle() {
+    return g_asks.empty() || Mutated("storage_ask_merges");
 }
 
 bool CoopStorageWaiting() {

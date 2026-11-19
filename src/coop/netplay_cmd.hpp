@@ -38,6 +38,17 @@ enum NetCommandKind : std::uint8_t {
     kCmdQuit = 15, // coop-quittitle (15 at the repin's rebase onto train 56: 12-14 are coop-small2's and coop-opt7's): the sender's Quit Game from its in-game menu (no fields): the host's (player 1's) ends the session for
                    // every player, anyone else's takes that player alone to the title (netplay.cpp ApplyQuit)
     kCmdDialogPick = 16, // coop-pt1111e: a pointer's click on a dialog framework choice: b = the choice + 1, selected in the clicker's session on every copy (coop_town.cpp)
+    kCmdSetting = 17, // coop-soakjoin: player 1's change of a shared setting (one of netplay_hello's adopted keys) while linked: a = the key, c = its
+                      // value; every copy runs by it from that tick (netplay.cpp ApplySetting)
+    kCmdOwnOptions = 18, // coop-settings: the sender's own Element Quick Select, Swap Keeps Lock-On and QTE Always Win: a = their bits (1, 2, 4);
+                         // every copy sets that player's row from that tick (netplay.cpp ApplyOwnOptions)
+    kCmdFishBuy = 19, // coop-fishpools2: a buy at the fishing exchange claimed: b = the item, c = its price; granted or refused on every copy (coop_inventory.cpp)
+    kCmdTalkEnd = 20, // coop-wave2: the sender's talk in retail's window, run on its copy alone, ended: a = retail's result | the villager's talk flags it set << 4,
+                      // b = the shop it named, c = its choice (the event of result 4); every copy ends the talk on its tick (coop_town.cpp CoopTalkStep)
+    kCmdQuestion = 21, // coop-wave2: the swap question answered on the asked player's copy (a = 1 YES, 2 Circle, 3 NO) or withdrawn on the asker's (a = 4),
+                       // c = the question (the link tick it was asked on); every copy takes it at the question's step (coop_prompt.cpp StepSwapQuestion)
+    kCmdPrompt = 22, // coop-wave2: a use prompt's press on its player's copy (a chest's, the clown's, a gate's, a floor or door message): a = the transition
+                     // (coop_useprompt.cpp PromptAct), b = its row, c = which prompt and step (id << 16 | seq); every copy runs it at that player's step
 };
 
 // This copy's own player's command, applied on every copy on its frame's tick (see above).

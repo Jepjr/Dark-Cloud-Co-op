@@ -1,6 +1,8 @@
 #include "coop/game_ns.hpp"
 #include "coop/coop_audio.hpp"
 #include "coop/coop_present.hpp" // coop-router
+#include "coop/coop_party.hpp"   // coop-entrance2: PlayerDrawnAt
+#include "coop/coop_actor.hpp"   // coop-farcull: ActorLocalIndex
 #include "snd.hpp"              // coop-pt1109c: SndBgmLoad, SndBgmPlay, SndBgmStop
 
 namespace dc::game {
@@ -18,6 +20,7 @@ extern float        now_bgm_fade_vol;
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 #include "boxvu0.hpp"
@@ -26,6 +29,7 @@ extern float        now_bgm_fade_vol;
 #include "camerafollow.hpp"
 #include "character.hpp"
 #include "dun/gameloop.hpp"
+#include "itemdata.hpp" // coop-comboaudio: CHARA_*
 #include "menu_draw.hpp"
 #include "monstorunit.hpp"
 #include "shot_freefuncs.hpp"
@@ -36,6 +40,7 @@ extern float        now_bgm_fade_vol;
 
 #include "coop/coop.hpp"
 #include "coop/coop_camera.hpp"
+#include "coop/coop_combat.hpp" // coop-comboaudio: PartnerMeleeKey
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
 #include "coop/coop_town.hpp" // coop-soundpt: CoopTownListener
@@ -77,6 +82,36 @@ bool PresentEngine(); // coop_opener.hpp (not included: its PlayerPresenting(int
 }
 
 namespace coop {
+
+// coop-comboaudio (the combo rows): the key sounds each player's attack plays, in order (KeySoundRecord: the player's through
+// SndSePlay, hers through PartnerSound). Read by the test bot only; nothing in the tick reads it.
+namespace {
+struct KeySounds {
+    int list[2][64] = {};
+    int count[2] = {};
+} g_key_sounds;
+
+bool KeySound(int se_no) {
+    return (se_no >= SE_CHARA_ACTION && se_no <= SE_CHARA_ACTION_4) || (se_no >= SE_CHARA_SHOUT && se_no <= SE_CHARA_SHOUT_4) || se_no == SE_GORO_SMASH;
+}
+} // namespace
+
+void KeySoundRecord(int player, int se_no) {
+    if (player < 1 || player > 2 || !KeySound(se_no) || g_key_sounds.count[player - 1] >= 64) {
+        return;
+    }
+    g_key_sounds.list[player - 1][g_key_sounds.count[player - 1]++] = se_no;
+}
+
+void KeySoundsClear(int player) {
+    g_key_sounds.count[player - 1] = 0;
+}
+
+int KeySoundsRead(int player, const int **list) {
+    *list = g_key_sounds.list[player - 1];
+    return g_key_sounds.count[player - 1];
+}
+
 namespace {
 
 // Where a placed sound is heard at full volume and where it fades out: the player's footsteps'
@@ -394,7 +429,77 @@ struct Voice {
     int   down = 0;
     int   swings = 0;
     bool  attack_hit = false;
+    int   key_motion = -1; // coop-comboaudio: her attack's motion last step
 } g_voice;
+
+// coop-comboaudio (Jep's rc3 playtest 11-13: "P2 can do their full combo as Toan, but the audio always plays the sound from the first attack
+// instead of the ones from the rest of the combo"): a melee member's key plays its swing and shout sounds at its motions' frames, each stage
+// its own pair. These are the keys' tables, as they stand there: ToanKey_Play (charakey.cpp:165-176: 825/833/842/852/864 the five stages,
+// 193 the leap's strike, 717 the rising slash), UngagaKey_Play (charakey.cpp:693-695) and GoroKey_Play (charakey.cpp:986-1004, half-open).
+// The old cues (kStrikeCue: 400 and 420 on every hit) gave every stage the first one's. DC_COOP_AUDIO_MUTATE=combo_cue (the rows' twin): as before.
+struct KeyCue {
+    float from;
+    float to;
+    bool  closed;
+    int   se_no;
+};
+
+constexpr KeyCue kToanCues[] = {
+    {825.0f, 825.3f, true, 0x190}, {833.0f, 833.3f, true, 0x191}, {842.0f, 842.3f, true, 0x190}, {852.0f, 852.3f, true, 0x190},
+    {864.0f, 864.3f, true, 0x191}, {193.0f, 193.3f, true, 0x191}, {717.0f, 717.3f, true, 0x191}, {825.0f, 825.3f, true, 0x1A4},
+    {833.0f, 833.3f, true, 0x1A5}, {842.0f, 842.3f, true, 0x1A5}, {852.0f, 852.3f, true, 0x1A4}, {864.0f, 864.3f, true, 0x1A6},
+};
+constexpr KeyCue kUngagaCues[] = {{675.0f, 675.3f, true, 0x1A4}, {687.0f, 687.3f, true, 0x1A5}, {700.0f, 700.3f, true, 0x1A5}};
+constexpr KeyCue kGoroCues[] = {
+    {98.0f, 98.3f, false, SE_CHARA_SHOUT},     {471.0f, 471.4f, false, SE_CHARA_SHOUT_2}, {471.0f, 471.4f, false, SE_CHARA_ACTION_3},
+    {478.0f, 478.4f, false, SE_CHARA_ACTION_3}, {481.0f, 481.4f, false, SE_CHARA_ACTION_4},
+};
+
+// The keys' sounds at a motion's start (their SndSePlay where the key moves to it): Toan's strike out of the air (3: SE_CHARA_SHOUT_3,
+// charakey.cpp:542) and rising slash (0x18: SE_CHARA_SHOUT_4, charakey.cpp:462), Ungaga's charge pose (14 after his 13: SE_CHARA_SHOUT_3,
+// charakey.cpp:849), Goro's smash (14: SE_GORO_SMASH, charakey.cpp:1091). -1 none.
+int KeyStartCue(int chara, int motion, int was) {
+    if (chara == CHARA_TOAN) {
+        return motion == 3 ? SE_CHARA_SHOUT_3 : motion == 0x18 ? SE_CHARA_SHOUT_4 : -1;
+    }
+    if (chara == CHARA_UNGAGA) {
+        return motion == 14 && was == 13 ? SE_CHARA_SHOUT_3 : -1;
+    }
+    if (chara == CHARA_GORO) {
+        return motion == 14 ? SE_GORO_SMASH : -1;
+    }
+    return -1;
+}
+
+void PartnerSound(int se_no);
+
+// Her key's sounds this step (her attack runs her member's key).
+void StepKeyCues() {
+    const int chara = g_voice.chara;
+    const int motion = g_partner.attacking ? g_partner.attack_motion : -1;
+
+    if (motion >= 0 && motion != g_voice.key_motion) {
+        const int cue = KeyStartCue(chara, motion, g_voice.key_motion);
+        if (cue >= 0) {
+            PartnerSound(cue);
+        }
+    }
+    g_voice.key_motion = motion;
+
+    if (motion < 0) {
+        return;
+    }
+
+    const KeyCue *cues = chara == CHARA_TOAN ? kToanCues : chara == CHARA_UNGAGA ? kUngagaCues : chara == CHARA_GORO ? kGoroCues : nullptr;
+    const int     count = chara == CHARA_TOAN ? (int) std::size(kToanCues) : chara == CHARA_UNGAGA ? (int) std::size(kUngagaCues) : chara == CHARA_GORO ? (int) std::size(kGoroCues) : 0;
+    const float   time = g_partner.chara->motion_type.state.time;
+
+    for (int i = 0; i < count; i++) {
+        if (time >= cues[i].from && (cues[i].closed ? time <= cues[i].to : time < cues[i].to)) {
+            PartnerSound(cues[i].se_no);
+        }
+    }
+}
 
 // The voice cues of a swing, as retail's own attacks play them: at its start (BattleActionOn_Jinn's
 // wind-up) and where it strikes (BattleActionPlay_Jinn's throw, BattleActionPlay_Ruby's shot, the
@@ -408,6 +513,7 @@ constexpr int kStrikeCue[6][2] = {
 // Plays one sound of the partner's at where it stands: its voice set's from the partner's port, the
 // rest as any placed sound.
 void PartnerSound(int se_no) {
+    KeySoundRecord(2, se_no); // coop-comboaudio (the tests')
     float volume;
     float pan;
     SndGetVolPan(&volume, &pan, g_partner.pos, kNear, kFar);
@@ -487,12 +593,18 @@ void StepVoice() {
         g_voice.time = now;
     }
 
-    // A swing's start and its strike.
-    const int chara_no = std::clamp(g_voice.chara, 0, 5);
-    if (g_partner.swings != g_voice.swings && g_partner.attacking && kStartCue[chara_no] >= 0) {
+    // A swing's start and its strike; a melee member's key, its own sounds at its frames (coop-comboaudio).
+    const int  chara_no = std::clamp(g_voice.chara, 0, 5);
+    const bool key = PartnerMeleeKey() && !AudioMutated("combo_cue");
+    if (key) {
+        StepKeyCues();
+    } else {
+        g_voice.key_motion = -1;
+    }
+    if (!key && g_partner.swings != g_voice.swings && g_partner.attacking && kStartCue[chara_no] >= 0) {
         PartnerSound(kStartCue[chara_no]);
     }
-    if (g_partner.attack_hit && !g_voice.attack_hit && g_partner.attacking) {
+    if (!key && g_partner.attack_hit && !g_voice.attack_hit && g_partner.attacking) {
         for (int cue : kStrikeCue[chara_no]) {
             PartnerSound(cue);
         }
@@ -518,6 +630,26 @@ void StepVoice() {
 }
 
 } // namespace
+
+// coop-wellsound (Jep's rc4 playtest: "P2 on Xiao hears Toan's sound effect when entering the well", the floor's healing fountain):
+// her own recover voice. Retail's HealingWater and usedActiveItem play SE_CHARA_RECOVER (440) with SndSePlay, which takes a
+// 400-499 sound from the game's voice set (now_voice_set): the controlled member's, so Xiao's when player 1 plays Xiao. Her
+// spring heal and her items called the same SndSePlay, and the game's set is player 1's member's on every copy: Toan's "ahh"
+// for Xiao. Now from her member's set at where she stands, on every copy (PartnerSound), as her hurt and fall voices are.
+// DC_COOP_AUDIO_MUTATE=gamevoice (twin): the game's voice set, as before.
+void PartnerVoiceSound(int se_no) {
+    const bool game = AudioMutated("gamevoice");
+    // the voice set the sound is taken from (PartnerSound's: her member's, loaded on her body's load)
+    const int set_no = game ? now_voice_set : g_voice.loaded ? g_voice.chara : -1;
+
+    std::fprintf(stderr, "coop-audio: player 2's voice sound %d from voice set %d (her member %d, the game's set %d) on player %d's copy at link tick %lld\n",
+                 se_no, set_no, g_partner.loaded_chara, now_voice_set, NetplayLocalPlayer(), (long long) NetplayLinkTick());
+    if (game) {
+        SndSePlay(se_no, -1, 0);
+        return;
+    }
+    PartnerSound(se_no);
+}
 
 void AudioSnapshotBefore() {
     g_bgm_driver_no = now_bgm_no;
@@ -608,6 +740,66 @@ SoundFrom::~SoundFrom() {
     g_from = at_;
 }
 
+namespace {
+bool g_monster_step = false; // coop-farcull: inside motionDrive's monster step (MonsterSounds)
+} // namespace
+
+MonsterSounds::MonsterSounds() : was_(g_monster_step) {
+    g_monster_step = true;
+}
+
+MonsterSounds::~MonsterSounds() {
+    g_monster_step = was_;
+}
+
+// coop-farcull: the monster stepping now, when its flat sound is to be placed (MonsterSounds); its place and fall-off.
+// *motion: the sound is its motion's (SoundCheck's own, which retail turns down after it starts with SndSetSeVolf); any other (its
+// script's SET_SND_NOW, the unit's hit sounds) was flat.
+static bool MonsterSoundPlace(int se_no, float *at, float *near_dist, float *far_dist, float *from_own, float *wake, bool *motion) {
+    if (!g_monster_step || !Enabled() || !NetplayHasPlayer() || NowMonstorUnit == nullptr) {
+        return false;
+    }
+    const int i = NowMonstorUnit->current_monster;
+
+    if (i < 0 || i >= 16) {
+        return false;
+    }
+    const MONSTOR_SOUND &sounds = NowMonstorUnit->sound[i];
+
+    *motion = sounds.sequence_id == se_no;
+    for (int k = 0; k < 16; k++) {
+        *motion = *motion || sounds.id[k] == se_no;
+    }
+    if (AudioMutated("monsterflat")) { // (the twin's: said, so its row ends on it)
+        if (Logging()) {
+            std::printf("coop-audio: monster %d's sound %d flat on player %d's copy (monsterflat), %s\n", i, se_no, NetplayLocalPlayer(),
+                        *motion ? "its motion's" : "a flat one");
+        }
+        return false;
+    }
+    sceVu0FVECTOR own;
+
+    if (ActorLocalIndex() == 1) {
+        sceVu0CopyVector(own, g_partner.pos);
+    } else {
+        PlayerDrawnAt(own);
+    }
+    NowMonstorUnit->chara[i][0].GetPosition(at);
+    at[3] = 1.0f;
+    own[3] = 1.0f;
+    *from_own = DistVector(own, at);
+    *wake = NowMonstorUnit->monster[i].clip_distance;
+    *near_dist = NowMonstorUnit->monster[i].kind == MONSTER_KIND_NO_LOCK_ON ? 350.0f : 50.0f;
+    *far_dist = NowMonstorUnit->monster[i].kind == MONSTER_KIND_NO_LOCK_ON ? 1000.0f : 500.0f;
+    const bool placed = *from_own >= *wake; // (inside it retail steps the monster for this player: its sounds as retail's)
+
+    if (!placed && Logging()) {
+        std::printf("coop-audio: monster %d's sound flat as retail's, %.0f from this copy's player (wakes within %.0f) on player %d's copy\n", i, *from_own,
+                    *wake, NetplayLocalPlayer());
+    }
+    return placed;
+}
+
 void PartnerWeaponWarning() {
     static int count = 0;
     const int  chara = g_partner.loaded_chara;
@@ -651,6 +843,10 @@ SoundOwner::SoundOwner(int player, bool menu_only) : player_(g_owner.player), me
 SoundOwner::~SoundOwner() {
     g_owner.player = player_;
     g_owner.menu_only = menu_only_;
+}
+
+int SoundOwnerPlayer() {
+    return g_owner.player;
 }
 
 // coop-warmreset (WS7): the partner voice's edge memory as a fresh copy has it, so the job's first step copies the partner's state
@@ -702,6 +898,7 @@ void CoopAudioStep() {
 // retail's, and on the partner's copy the player's fighting sounds are placed where he stands.
 namespace dc::game { // repin: was PORT_OVERRIDE; a recipe removes the game's own definition
 void SndSePlay(int se_no, int vol, int voice) {
+    coop::KeySoundRecord(1, se_no); // coop-comboaudio (the tests'): the player's own key sounds
     // coop-soundpt: the game's one SE_WARNING is motionDrive's beep for player 1's weapon about to break: his alone (Jep's
     // playtest, 2026-10-30: player 2 heard it). Player 2's own (PartnerWeaponWarning) comes owned by her.
     // DC_COOP_AUDIO_MUTATE=hiswarning: nobody's, on both copies, as before (twin).
@@ -728,15 +925,44 @@ void SndSePlay(int se_no, int vol, int voice) {
         return;
     }
 
+    // coop-farcull: a monster's flat sound, from the monster when only another player woke it (MonsterSounds).
+    if (!coop::OwnedNow(se_no)) {
+        sceVu0FVECTOR at;
+        float         near_dist;
+        float         far_dist;
+        float         from_own;
+        float         wake;
+        bool          motion = false;
+
+        if (coop::MonsterSoundPlace(se_no, at, &near_dist, &far_dist, &from_own, &wake, &motion)) {
+            float volume;
+            float pan;
+            SndGetVolPan(&volume, &pan, at, near_dist, far_dist);
+            const int level = coop::Level(info, vol, volume);
+            CSnd.SE_Play(coop::PortOf(info), info->bank, info->prog, coop::HardwarePan(pan), 127, level, voice);
+            if (coop::Logging()) {
+                std::printf("coop-audio: monster %d's sound %d placed vol %d pan %d, %.0f from the listener, %.0f from this copy's player (wakes within %.0f) on player %d's copy, %s\n",
+                            NowMonstorUnit->current_monster, se_no, level, coop::HardwarePan(pan), DistVector(camera_pos, at), from_own, wake, NetplayLocalPlayer(),
+                            motion ? "its motion's" : "a flat one");
+            }
+            return;
+        }
+    }
+
+    // coop-entrance2 (the cave's carried walk-in, DCO-45): his sounds placed where he is drawn, not at CharaMain.pos ((0 0 0) while a
+    // scene's node carries him: his steps down the cave's stairs went silent on her copy). DC_COOP_MUTATE=farplayer_main_pos: as before.
+    sceVu0FVECTOR player_drawn;
+
+    coop::PlayerDrawnAt(player_drawn);
     if (coop::PartnerListens() && coop::PlayerSound(se_no) && !coop::AudioMutated("flat")) {
         float volume;
         float pan;
-        SndGetVolPan(&volume, &pan, CharaMain.pos, coop::kNear, coop::kFar);
+        SndGetVolPan(&volume, &pan, player_drawn, coop::kNear, coop::kFar);
         const int level = coop::Level(info, vol, volume);
         CSnd.SE_Play(coop::PortOf(info), info->bank, info->prog, coop::HardwarePan(pan), 127, level, voice);
         if (coop::Logging()) {
             std::printf("coop-audio: player sound %d placed vol %d pan %d, listener %.0f from the player\n", se_no, level,
-                        coop::HardwarePan(pan), DistVector(camera_pos, CharaMain.pos));
+                        coop::HardwarePan(pan), DistVector(camera_pos, player_drawn));
         }
         return;
     }
@@ -759,6 +985,9 @@ void SndSePlay(int se_no, int vol, int voice) {
 // Atla's chime, a gate key's) come from where he stands, as his chest's own sound does.
 namespace dc::game { // repin: was PORT_OVERRIDE; a recipe removes the game's own definition
 void SndSPSePlay(int se_no, int vol) {
+    sceVu0FVECTOR player_drawn; // (coop-entrance2, DCO-45: where he is drawn)
+
+    coop::PlayerDrawnAt(player_drawn);
     SND_SE_INFO *info = se_no >= 0 && se_no < 64 ? &special_se_info[se_no] : nullptr;
 
     if (info == nullptr) {
@@ -771,13 +1000,13 @@ void SndSPSePlay(int se_no, int vol) {
     if (coop::PartnerListens() && coop::PlayerPresenting() && !coop::AudioMutated("chestflat")) {
         float volume;
         float pan;
-        SndGetVolPan(&volume, &pan, CharaMain.pos, coop::kNear, coop::kFar);
+        SndGetVolPan(&volume, &pan, player_drawn, coop::kNear, coop::kFar);
         const int base = vol >= 0 ? vol : CSnd.GetSeInfTbl()[info->vol_no * 2 + 1];
         const int level = std::clamp(static_cast<int>(static_cast<float>(base) * volume), 0, 127);
         CSnd.SE_Play(MIDI_PORT_SE_SPECIAL, info->bank, info->prog, coop::HardwarePan(pan), 127, level, 0);
         if (coop::Logging()) {
             std::printf("coop-audio: player special sound %d placed vol %d pan %d, listener %.0f from the player\n", se_no, level,
-                        coop::HardwarePan(pan), DistVector(camera_pos, CharaMain.pos));
+                        coop::HardwarePan(pan), DistVector(camera_pos, player_drawn));
         }
         return;
     }

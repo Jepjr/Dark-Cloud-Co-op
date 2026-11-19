@@ -2,12 +2,16 @@
 #include "coop/snapshot_state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +30,7 @@
 namespace dc::game {
 void RunScriptForEachHeapBlock(void (*visit)(void *start, std::size_t size, const char *name, void *context), void *context);
 } // namespace dc::game
+bool NetplayMutated(const char *name); // netplay_test.cpp (coop-p2tick: apply_one_thread)
 
 namespace {
 
@@ -119,8 +124,7 @@ bool ReadGlobals(std::vector<Region> &out) {
         // snapshot-allow.txt took out (the swap list's, coop_fullmenu.cpp) put back in, as before.
         // (and DC_COOP_MUTATE=merge_menu_retail or scriptmenu_merge_retail: retail's menu stepped in the lockstep through the merge, which the taker can only
         // step with the sender's menu state, as before: its twins' rows fail on their checks, not on a stale pointer)
-        // (and coop-pt1111m: the menus in the lockstep, game.coop_menus off: every copy steps them alike, so the taker needs them: MenuWorkInSet)
-        if (Mutated("menu_in_set") || coop::MenuRetailLockstepMutated() || coop::MenuWorkInSet()) {
+        if (Mutated("menu_in_set") || coop::MenuRetailLockstepMutated()) {
             struct Add {
                 std::vector<Region> *list;
             } add{&fresh};
@@ -136,6 +140,38 @@ bool ReadGlobals(std::vector<Region> &out) {
                         }
                     }
                     into->push_back({kPs2, reinterpret_cast<std::uintptr_t>(start) - ImageBase(), start, size, std::string("menu")});
+                },
+                &add);
+        }
+        // coop-soundset: DC_SNAPSHOT_MUTATE=sound_in_set (twin): the special sound set (coop_ownlook.cpp), which snapshot-allow.txt took
+        // out, put back in, as before.
+        if (Mutated("sound_in_set")) {
+            struct Add {
+                std::vector<Region> *list;
+            } add{&fresh};
+
+            coop::OwnSoundRegionsAll(
+                [](void *at, std::size_t size, void *context) {
+                    auto *into = static_cast<Add *>(context)->list;
+                    auto *start = static_cast<unsigned char *>(at);
+
+                    into->push_back({kPs2, reinterpret_cast<std::uintptr_t>(start) - ImageBase(), start, size, std::string("sound")});
+                },
+                &add);
+        }
+        // coop-wave4: DC_SNAPSHOT_MUTATE=look_in_set (twin): the message look (coop_ownlook.cpp), which snapshot-allow.txt took out,
+        // put back in, as before.
+        if (Mutated("look_in_set")) {
+            struct Add {
+                std::vector<Region> *list;
+            } add{&fresh};
+
+            coop::OwnLookRegionsAll(
+                [](void *at, std::size_t size, void *context) {
+                    auto *into = static_cast<Add *>(context)->list;
+                    auto *start = static_cast<unsigned char *>(at);
+
+                    into->push_back({kPs2, reinterpret_cast<std::uintptr_t>(start) - ImageBase(), start, size, std::string("look")});
                 },
                 &add);
         }
@@ -808,11 +844,259 @@ void AddExtras(std::vector<Region> &regions, const std::vector<SnapshotExtra> &e
 
 namespace {
 SnapshotTakeStats g_take_stats; // coop-offthread
+
+// jointake: a page of game memory all zero (64 bytes a branch).
+bool PageZero(const unsigned char *at, std::size_t length) {
+    bool        zero = true;
+    std::size_t k = 0;
+
+    for (; k + 64 <= length && zero; k += 64) {
+        std::uint64_t w[8];
+        std::memcpy(w, at + k, 64);
+        zero = (w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]) == 0;
+    }
+    for (; k < length && zero; k++) {
+        zero = at[k] == 0;
+    }
+    return zero;
+}
+
+#ifdef _WIN32
+std::uintptr_t OsPage() {
+    static const std::uintptr_t page = [] {
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return (std::uintptr_t) info.dwPageSize;
+    }();
+    return page;
+}
+#endif
+
+// jointake: the arena blocks are mapped write-watched (recipe K008). Reset: the watch of the OS pages under [start, start + size)
+// starts again (true when it could). Else: marks (1) in written the range's pages (kPage each, from start) that hold an OS
+// page the watch names (written since its last reset), 0 the rest; false (written left as it was) where it cannot say.
+bool ArenaWatch(const unsigned char *start_at, std::size_t size, unsigned char *written, std::size_t count, bool reset) {
+#ifdef _WIN32
+    const std::uintptr_t os_page = OsPage();
+    const auto           start = reinterpret_cast<std::uintptr_t>(start_at);
+    const std::uintptr_t from = start & ~(os_page - 1);
+    const std::uintptr_t to = (start + size + os_page - 1) & ~(os_page - 1);
+
+    if (to <= from) {
+        return false;
+    }
+    if (reset) {
+        return ResetWriteWatch(reinterpret_cast<void *>(from), to - from) == 0;
+    }
+    thread_local std::vector<void *> named;
+    ULONG_PTR                        got = (to - from) / os_page;
+    DWORD                            granularity = 0;
+
+    named.resize(got);
+    if (GetWriteWatch(0, reinterpret_cast<void *>(from), to - from, named.data(), &got, &granularity) != 0 || granularity == 0) {
+        return false;
+    }
+    std::memset(written, 0, count);
+    for (ULONG_PTR k = 0; k < got; k++) {
+        const auto at = reinterpret_cast<std::uintptr_t>(named[k]);
+        const auto lo = std::max(at, start) - start;
+        const auto hi = std::min<std::uintptr_t>(at + granularity, start + size) - start;
+        if (hi <= lo) {
+            continue;
+        }
+        for (std::size_t i = lo / kPage; i <= (hi - 1) / kPage && i < count; i++) {
+            written[i] = 1;
+        }
+    }
+    return true;
+#else
+    (void) start_at;
+    (void) size;
+    (void) written;
+    (void) count;
+    (void) reset;
+    return false;
+#endif
+}
+
+// jointake: the take's preparation, made on threads of its own from the take's checkpoint on (SnapshotTakePrepare): each
+// arena's watch reset, then its pages tested; and the room for the set, its pages touched. A take after it tests an arena's
+// page only when the preparation found it not zero or the watch names it written since (a write after the reset is always
+// named, so a page untested is still zero: the same bytes as testing every page).
+struct TakePrep {
+    struct Arena {
+        const unsigned char       *start = nullptr;
+        std::size_t                size = 0;
+        bool                       watched = false;
+        std::vector<unsigned char> nonzero; // a kPage each
+    };
+    std::vector<Arena>         arenas;
+    std::vector<unsigned char> room;
+    std::size_t                room_size = 0;
+    std::atomic<bool>          done{false};
+    double                     ms = 0.0;
+    double                     touch_ms = 0.0;    // coop-firsttick: the reads before the reset
+    unsigned                   generation = 0;    // coop-firsttick: its watch resets' number (PrepCurrent)
+    std::atomic<unsigned>      touch_sum{0};
+};
+std::shared_ptr<TakePrep> g_prep;
+std::size_t               g_room = 24u << 20; // the set's room (the largest set yet and 1 MB)
+constexpr unsigned        kScanThreads = 4;
+
+unsigned TakeHelpers() {
+    return std::min(kScanThreads, std::max(1u, std::thread::hardware_concurrency()) - 1);
+}
 } // namespace
+
+namespace {
+// The preparation's work (SnapshotTakePrepare, SnapshotApplyPrepare), on threads of its own: each arena's pages read first, then
+// its watch reset, then its pages tested.
+// coop-firsttick (P2's first play tick 254-296 ms after P1's, l-lobby-handed's join as played): every take said "prepared ahead"
+// yet tested every arena page (311 MB, 14-16 ms of the taker's game thread; 396 MB, 11-18 ms at every stayer's merge in the
+// rows' logs): the watch named 99% of the arenas' pages written since its reset, though they were still zero. An arena page
+// never touched since the block was mapped (or zeroed: ArenaMemoryZero decommits and commits again) is a demand-zero page, and
+// Windows' write watch names a demand-zero page written once it is first brought in, even by a read: the preparation's own
+// zero test, after the reset, marked every untouched page it read. Each page is now read once before the reset (brought in
+// then, so the reset clears that mark; the test after it reads pages already in). The watch's meaning is unchanged (a write
+// after the reset is still named), so the set is the same bytes. DC_SNAPSHOT_MUTATE=prep_touch_after (twin): no read before
+// the reset, as before (the take tests every arena page again).
+// coop-firsttick: the arenas' watch has one reset for all its users (the take's preparation and the apply's): a preparation counts
+// only while no other has reset the watch since its own (a write between the two resets is named by neither). Its user holds
+// g_watch_reset_lock from that check through its own reads of the watch, so no reset comes between them.
+std::mutex            g_watch_reset_lock;
+std::atomic<unsigned> g_watch_resets{0};
+
+bool PrepCurrent(const std::shared_ptr<TakePrep> &prep) {
+    return prep && prep->done.load(std::memory_order_acquire) && prep->generation == g_watch_resets.load();
+}
+
+void PrepRun(const std::shared_ptr<TakePrep> &prep, std::int64_t delay_ms) {
+    if (delay_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::pair<std::size_t, std::size_t>> chunks; // (arena, its first page), 1 MB each
+    for (std::size_t a = 0; a < prep->arenas.size(); a++) {
+        TakePrep::Arena &arena = prep->arenas[a];
+        arena.nonzero.assign((arena.size + kPage - 1) / kPage, 1);
+        for (std::size_t i = 0; i < arena.nonzero.size(); i += 256) {
+            chunks.emplace_back(a, i);
+        }
+    }
+    auto on_two = [](auto &fn) {
+        std::thread other([&fn] { fn(); }); // (two threads: the stayer's game goes on beside them)
+        fn();
+        other.join();
+    };
+    if (!Mutated("prep_touch_after")) {
+        std::atomic<std::size_t> next{0};
+        auto                     touch = [&]() {
+            unsigned char sum = 0;
+            for (std::size_t c = next.fetch_add(1); c < chunks.size(); c = next.fetch_add(1)) {
+                const TakePrep::Arena &arena = prep->arenas[chunks[c].first];
+                for (std::size_t i = chunks[c].second; i < std::min(arena.nonzero.size(), chunks[c].second + 256); i++) {
+                    sum = (unsigned char) (sum + *(volatile const unsigned char *) (arena.start + i * kPage));
+                }
+            }
+            prep->touch_sum.fetch_add(sum, std::memory_order_relaxed); // (kept, so the reads stay)
+        };
+        on_two(touch);
+    }
+    prep->touch_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    {
+        std::lock_guard<std::mutex> lock(g_watch_reset_lock);
+        for (TakePrep::Arena &arena : prep->arenas) {
+            arena.watched = ArenaWatch(arena.start, arena.size, nullptr, 0, true);
+        }
+        prep->generation = ++g_watch_resets;
+    }
+    // (after every reset: a page written after its arena's reset is named at the take, whatever this read of it saw)
+    std::atomic<std::size_t> next{0};
+    auto                     scan = [&]() {
+        for (std::size_t c = next.fetch_add(1); c < chunks.size(); c = next.fetch_add(1)) {
+            TakePrep::Arena &arena = prep->arenas[chunks[c].first];
+            if (!arena.watched) {
+                continue;
+            }
+            for (std::size_t i = chunks[c].second; i < std::min(arena.nonzero.size(), chunks[c].second + 256); i++) {
+                arena.nonzero[i] = PageZero(arena.start + i * kPage, std::min(kPage, arena.size - i * kPage)) ? 0 : 1;
+            }
+        }
+    };
+    on_two(scan);
+    prep->room.resize(prep->room_size); // (its pages touched here, not at the take)
+    prep->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    prep->done.store(true, std::memory_order_release);
+}
+
+std::shared_ptr<TakePrep> PrepStart(std::size_t room_size, std::int64_t delay_ms) {
+    auto prep = std::make_shared<TakePrep>();
+
+    for (const Region &region : Arenas()) {
+        TakePrep::Arena arena;
+        arena.start = region.start;
+        arena.size = region.size;
+        prep->arenas.push_back(std::move(arena));
+    }
+    prep->room_size = room_size;
+    std::thread([prep, delay_ms] { PrepRun(prep, delay_ms); }).detach();
+    return prep;
+}
+
+std::shared_ptr<TakePrep> g_apply_prep; // coop-firsttick: SnapshotApplyPrepare's, for the next apply
+} // namespace
+
+static SnapshotApplyStats g_apply_stats;
+
+SnapshotApplyStats SnapshotLastApply() {
+    return g_apply_stats;
+}
+
+void SnapshotTakePrepare() {
+    g_prep.reset(); // (a preparation not taken up is let go: its thread ends on its own copy)
+    if (Mutated("no_write_watch") || Mutated("scan_one_thread")) {
+        return;
+    }
+#ifdef _WIN32
+    // coop-takeprep (tests): DC_SNAPSHOT_TEST_PREP_DELAY_MS=N: the preparation starts N ms late, as on a loaded PC (x-gate-flow
+    // -Returns -PrepDelay): the take must wait for it, not go on unprepared.
+    static const std::int64_t delay_ms = TestEnvInt("DC_SNAPSHOT_TEST_PREP_DELAY_MS", 0);
+    g_prep = PrepStart(g_room, delay_ms);
+#endif
+}
+
+// coop-firsttick: the taker's side. Her apply put every page of the set's 365 MB, its bytes or zeros (35-51 ms, all but 15 MB
+// zeros), on a copy black till it lands. The arenas are prepared as a take's are, while the set's parts come: an arena page
+// zero then and not written since is zero still, so the apply leaves it as it is (the same bytes as putting zeros).
+// DC_NETPLAY_MUTATE=apply_zeros_all (twin, netplay's): no preparation, every zero put, as before.
+void SnapshotApplyPrepare() {
+    g_apply_prep.reset();
+    if (Mutated("no_write_watch")) {
+        return;
+    }
+#ifdef _WIN32
+    g_apply_prep = PrepStart(0, 0);
+#endif
+}
+
+bool SnapshotTakePrepHeld() {
+    return g_prep != nullptr;
+}
+
+bool SnapshotTakePrepDone() {
+    return !g_prep || g_prep->done.load(std::memory_order_acquire);
+}
 
 SnapshotTakeStats SnapshotLastTake() {
     return g_take_stats;
 }
+
+namespace {
+template <typename T> void PutAt(std::vector<unsigned char> &out, std::size_t &at, T value) {
+    std::memcpy(out.data() + at, &value, sizeof value);
+    at += sizeof value;
+}
+} // namespace
 
 bool SnapshotTakeBytes(std::vector<unsigned char> &out, std::string &why, const std::vector<SnapshotExtra> &extras) {
     using Clock = std::chrono::steady_clock;
@@ -837,57 +1121,219 @@ bool SnapshotTakeBytes(std::vector<unsigned char> &out, std::string &why, const 
 
     // coop-offthread: the copy is all that stays on the game thread, so it copies once: the page list of a region first (a
     // page is kept unless all zero, as TakeRegion), then its kept pages straight from the game's memory into the set (not
-    // through a buffer of their own), into room kept from the last take (the set grew from nothing, copied on each growth).
-    static std::size_t room = 24u << 20;
-    std::vector<std::uint32_t> pages;
+    // through a buffer of their own).
+    // cand1112c (j-joinload-rejoin-town, Jep's rule: a join never affects the player there): the zero test read every byte of
+    // the set's regions (283 MB, 15 MB kept) on the game thread, 23-31 ms of one tick, so the stayer's frame took two ticks at a
+    // merge (worst tick 34.4 ms). The pages are tested on helper threads (kScanThreads) while the game thread waits for them, so
+    // the set is still the one tick's state, 64 bytes a branch. DC_SNAPSHOT_MUTATE=scan_one_thread (twin): the game thread
+    // alone, 8 bytes a branch, as before.
+    // jointake (Jep 11-12, j-joinload-town: the take still held the stayer's game thread 16-17 ms, over a tick under load: the
+    // zero test 8.5 ms reading 283 MB, of which the arenas' 226 MB; the set's layout 2 ms, most of it zeroing fresh room; the
+    // kept pages' copy 1.5 ms): the arenas are tested ahead, on threads of their own, from the take's checkpoint on
+    // (SnapshotTakePrepare: each arena's write watch reset, then its pages tested), so the take tests an arena page only when
+    // that found it not zero or the watch names it written since; the globals, the heap and the extras are tested as before.
+    // The set goes into room touched ahead too (no zeroing), its layout written in place, the kept pages copied on the helper
+    // threads. The set is the same bytes. DC_SNAPSHOT_MUTATE=no_write_watch (twin): no preparation, every page tested at the
+    // take and the copy on the game thread alone, as before. DC_SNAPSHOT_TEST_WATCH_CHECK=1 (rows): the untested pages are
+    // tested too, after, and any not zero is said (and kept); that check's time is said apart and left out of the copy's.
+    const bool                one_thread = Mutated("scan_one_thread");
+    const bool                watch = !one_thread && !Mutated("no_write_watch");
+    std::unique_lock<std::mutex> watch_lock(g_watch_reset_lock); // (coop-firsttick: no reset till the watch is read, below)
+    std::shared_ptr<TakePrep>    prep = watch && PrepCurrent(g_prep) ? g_prep : nullptr;
+    g_take_stats.prepared = prep != nullptr;
+    g_take_stats.prep_ms = prep ? prep->ms : 0.0;
+    g_prep.reset(); // (once: the next take's checkpoint prepares again)
 
-    out.clear();
-    out.reserve(room);
-    out.insert(out.end(), kBytesMagic, kBytesMagic + 8);
-    Put(out, (std::uint32_t) regions.size());
-
-    for (const Region &region : regions) {
-        const std::size_t count = (region.size + kPage - 1) / kPage;
-
-        pages.clear();
-        for (std::size_t i = 0; i < count; i++) {
-            const unsigned char *at = region.start + i * kPage;
-            const std::size_t    length = std::min(kPage, region.size - i * kPage);
-            bool                 zero = true;
-            std::size_t          k = 0;
-
-            for (; k + 8 <= length && zero; k += 8) {
-                std::uint64_t word;
-                std::memcpy(&word, at + k, 8);
-                zero = word == 0;
+    std::vector<std::size_t> first(regions.size() + 1, 0); // each region's first page in nonzero
+    for (std::size_t r = 0; r < regions.size(); r++) {
+        first[r + 1] = first[r] + (regions[r].size + kPage - 1) / kPage;
+    }
+    std::vector<unsigned char> nonzero(first.back(), 0);
+    std::vector<unsigned char> test(first.back(), 1); // jointake: 0 for an arena page found zero ahead and not written since
+    if (prep) {
+        const auto                 watch_start = Clock::now();
+        std::vector<unsigned char> written;
+        for (std::size_t r = 0; r < regions.size(); r++) {
+            if (regions[r].kind != kArena) {
+                continue;
             }
-            for (; k < length && zero; k++) {
-                zero = at[k] == 0;
-            }
-            if (!zero) {
-                pages.push_back((std::uint32_t) i);
+            const std::size_t count = first[r + 1] - first[r];
+            for (const TakePrep::Arena &arena : prep->arenas) {
+                if (arena.start != regions[r].start || arena.size != regions[r].size || !arena.watched || arena.nonzero.size() != count) {
+                    continue;
+                }
+                written.assign(count, 1);
+                if (ArenaWatch(regions[r].start, regions[r].size, written.data(), count, false)) {
+                    for (std::size_t i = 0; i < count; i++) {
+                        test[first[r] + i] = (written[i] | arena.nonzero[i]) != 0 ? 1 : 0;
+                    }
+                    g_take_stats.watched += regions[r].size;
+                }
+                break;
             }
         }
-        Put(out, region.kind);
-        Put(out, (std::uint64_t) region.id);
-        Put(out, (std::uint64_t) region.size);
-        if (region.kind == kArena) {
-            Put(out, (std::uint64_t) ArenaLead(region));
-            Put(out, (std::uint64_t) reinterpret_cast<std::uintptr_t>(ArenaBlock(reinterpret_cast<const void *>(ImageBase() + region.id), 0, 0)));
+        g_take_stats.watch_ms = std::chrono::duration<double, std::milli>(Clock::now() - watch_start).count();
+    }
+    watch_lock.unlock();
+    const unsigned helpers = one_thread ? 0 : TakeHelpers();
+    // fn on the helper threads and on the game thread, until each has run out of work.
+    auto on_helpers = [helpers](auto &fn, bool alone) {
+        std::vector<std::thread> threads;
+        for (unsigned h = 0; !alone && h < helpers; h++) {
+            threads.emplace_back([&fn] { fn(); });
         }
-        Put(out, (std::uint32_t) pages.size());
-        for (std::uint32_t page : pages) {
-            Put(out, page);
+        fn(); // (the game thread works too)
+        for (std::thread &thread : threads) {
+            thread.join();
         }
-        for (std::uint32_t page : pages) {
-            const unsigned char *at = region.start + (std::size_t) page * kPage;
-            out.insert(out.end(), at, at + std::min(kPage, region.size - (std::size_t) page * kPage));
+    };
+    auto page_zero = [&](std::size_t r, std::size_t i) {
+        const Region        &region = regions[r];
+        const unsigned char *at = region.start + i * kPage;
+        const std::size_t    length = std::min(kPage, region.size - i * kPage);
+
+        if (!one_thread) {
+            return PageZero(at, length);
+        }
+        bool        zero = true; // (the twin's: 8 bytes a branch, as before)
+        std::size_t k = 0;
+        for (; k + 8 <= length && zero; k += 8) {
+            std::uint64_t word;
+            std::memcpy(&word, at + k, 8);
+            zero = word == 0;
+        }
+        for (; k < length && zero; k++) {
+            zero = at[k] == 0;
+        }
+        return zero;
+    };
+    const auto scan_start = Clock::now();
+    {
+        constexpr std::size_t                            kChunkPages = 256; // 1 MB a piece of work
+        std::vector<std::pair<std::size_t, std::size_t>> chunks;            // (region, its first page)
+        for (std::size_t r = 0; r < regions.size(); r++) {
+            for (std::size_t i = 0; i < first[r + 1] - first[r]; i += kChunkPages) {
+                chunks.emplace_back(r, i);
+            }
+        }
+        std::atomic<std::size_t> next{0};
+        auto                     scan = [&]() {
+            for (std::size_t c = next.fetch_add(1); c < chunks.size(); c = next.fetch_add(1)) {
+                const std::size_t r = chunks[c].first;
+                const std::size_t count = first[r + 1] - first[r];
+                for (std::size_t i = chunks[c].second; i < std::min(count, chunks[c].second + kChunkPages); i++) {
+                    if (test[first[r] + i] != 0) {
+                        nonzero[first[r] + i] = page_zero(r, i) ? 0 : 1;
+                    }
+                }
+            }
+        };
+        on_helpers(scan, one_thread);
+        g_take_stats.scan_threads = helpers + 1;
+    }
+    for (std::size_t r = 0; r < regions.size(); r++) {
+        for (std::size_t i = 0; i < first[r + 1] - first[r]; i++) {
+            if (test[first[r] + i] != 0) {
+                g_take_stats.tested += std::min(kPage, regions[r].size - i * kPage);
+            }
         }
     }
-    room = std::max(room, out.size() + (1u << 20));
+    g_take_stats.scan_ms = std::chrono::duration<double, std::milli>(Clock::now() - scan_start).count();
+    static const bool check = TestEnv("DC_SNAPSHOT_TEST_WATCH_CHECK") != nullptr;
+    double            check_ms = 0.0;
+    if (check && prep) {
+        const auto check_start = Clock::now();
+        long long  missed = 0;
+        for (std::size_t r = 0; r < regions.size(); r++) {
+            for (std::size_t i = 0; i < first[r + 1] - first[r]; i++) {
+                if (test[first[r] + i] == 0 && !PageZero(regions[r].start + i * kPage, std::min(kPage, regions[r].size - i * kPage))) {
+                    nonzero[first[r] + i] = 1; // (kept: the set stays right)
+                    if (missed++ == 0) {
+                        std::fprintf(stderr, "snapshot: write watch check: %s page %zu untested, yet not zero\n", Label(regions[r]).c_str(), i);
+                    }
+                }
+            }
+        }
+        g_take_stats.check_missed = missed;
+        check_ms = std::chrono::duration<double, std::milli>(Clock::now() - check_start).count();
+        g_take_stats.check_ms = check_ms;
+    }
+
+    // The set's layout: its size first, then the headers and page lists written in place (small, on the game thread), then the
+    // kept pages copied into their places.
+    const auto emit_start = Clock::now();
+    struct Copy {
+        std::size_t          to;
+        const unsigned char *from;
+        std::size_t          length;
+    };
+    std::vector<Copy>          copies;
+    std::vector<std::uint32_t> kept_count(regions.size(), 0);
+    std::size_t                total = 8 + 4;
+    for (std::size_t r = 0; r < regions.size(); r++) {
+        for (std::size_t i = 0; i < first[r + 1] - first[r]; i++) {
+            kept_count[r] += nonzero[first[r] + i];
+        }
+        total += 4 + 8 + 8 + (regions[r].kind == kArena ? 16 : 0) + 4 + 4 * (std::size_t) kept_count[r];
+        for (std::size_t i = 0; i < first[r + 1] - first[r]; i++) {
+            if (nonzero[first[r] + i] != 0) {
+                const std::size_t length = std::min(kPage, regions[r].size - i * kPage);
+                copies.push_back({total, regions[r].start + i * kPage, length});
+                total += length;
+            }
+        }
+    }
+    if (prep && prep->room.size() >= total) {
+        out.swap(prep->room); // (touched ahead: shrinking it writes nothing)
+        out.resize(total);
+    } else {
+        out.clear();
+        out.resize(total);
+    }
+    std::size_t at = 0;
+    std::memcpy(out.data(), kBytesMagic, 8);
+    at = 8;
+    PutAt(out, at, (std::uint32_t) regions.size());
+    std::size_t copy_index = 0;
+    for (std::size_t r = 0; r < regions.size(); r++) {
+        const Region &region = regions[r];
+
+        PutAt(out, at, region.kind);
+        PutAt(out, at, (std::uint64_t) region.id);
+        PutAt(out, at, (std::uint64_t) region.size);
+        if (region.kind == kArena) {
+            PutAt(out, at, (std::uint64_t) ArenaLead(region));
+            PutAt(out, at, (std::uint64_t) reinterpret_cast<std::uintptr_t>(ArenaBlock(reinterpret_cast<const void *>(ImageBase() + region.id), 0, 0)));
+        }
+        PutAt(out, at, kept_count[r]);
+        for (std::size_t i = 0; i < first[r + 1] - first[r]; i++) {
+            if (nonzero[first[r] + i] != 0) {
+                PutAt(out, at, (std::uint32_t) i);
+            }
+        }
+        for (std::uint32_t k = 0; k < kept_count[r]; k++) {
+            at += copies[copy_index++].length;
+        }
+    }
+    const double layout_ms = std::chrono::duration<double, std::milli>(Clock::now() - emit_start).count();
+    {
+        constexpr std::size_t    kCopyPages = 64;
+        std::atomic<std::size_t> next{0};
+        auto                     copy = [&]() {
+            for (std::size_t c = next.fetch_add(kCopyPages); c < copies.size(); c = next.fetch_add(kCopyPages)) {
+                for (std::size_t k = c; k < std::min(copies.size(), c + kCopyPages); k++) {
+                    std::memcpy(out.data() + copies[k].to, copies[k].from, copies[k].length);
+                }
+            }
+        };
+        on_helpers(copy, !watch); // (the twins': on the game thread alone, as before)
+    }
+    g_room = std::max(g_room, total + (1u << 20));
+    g_take_stats.layout_ms = layout_ms;
+    g_take_stats.emit_ms = std::chrono::duration<double, std::milli>(Clock::now() - emit_start).count();
     g_take_stats.kept = out.size();
     g_take_stats.list_ms = std::chrono::duration<double, std::milli>(listed - began).count();
-    g_take_stats.copy_ms = std::chrono::duration<double, std::milli>(Clock::now() - listed).count();
+    g_take_stats.copy_ms = std::chrono::duration<double, std::milli>(Clock::now() - listed).count() - check_ms;
     return true;
 }
 
@@ -1088,6 +1534,148 @@ bool SnapshotApplyBytes(const unsigned char *data, std::size_t size, std::string
             }
         }
     };
+
+    // coop-p2tick (l-lobby-handed: her apply 141-158 ms of the 357-474 ms from his first play tick to hers, 113 ms of it this
+    // loop): every page of the 365 MB the set covers is put, its bytes or zeros, and all but 15 MB are zeros, one page at a time
+    // on the game thread. The pages go now in runs of 1 MB on the take's helper threads and the game thread (each run its own
+    // pages and its own bytes, found from the part's page list: the same bytes put). Not with DC_SNAPSHOT_HEAPPTR (its trace
+    // counts its lines). DC_NETPLAY_MUTATE=apply_one_thread (twin): the game thread alone, as before.
+    if (!heap_trace && !NetplayMutated("apply_one_thread")) {
+        // coop-firsttick (SnapshotApplyPrepare): per region, an arena's pages known zero (zero at the preparation, not written
+        // since). Only a preparation that is done and of this very block (its start and size) counts; none, and every zero is put.
+        std::vector<std::vector<unsigned char>> known_zero(regions.size());
+        std::unique_lock<std::mutex>            watch_lock(g_watch_reset_lock); // (no reset till the watch is read, below)
+        std::shared_ptr<TakePrep>               prep = PrepCurrent(g_apply_prep) ? g_apply_prep : nullptr;
+        std::atomic<std::size_t>                left_zero{0};
+        std::atomic<long long>                  left_missed{0};
+        static const bool                       watch_check = TestEnv("DC_SNAPSHOT_TEST_WATCH_CHECK") != nullptr;
+
+        g_apply_prep.reset(); // (once: the next apply prepares again)
+        g_apply_stats = SnapshotApplyStats{};
+        g_apply_stats.prepared = prep != nullptr;
+        for (std::size_t r = 0; prep && r < regions.size(); r++) {
+            const Region &region = regions[r];
+            const std::size_t count = (region.size + kPage - 1) / kPage;
+
+            for (const TakePrep::Arena &arena : prep->arenas) {
+                if (region.kind != kArena || arena.start != region.start || arena.size != region.size || !arena.watched || arena.nonzero.size() != count) {
+                    continue;
+                }
+                std::vector<unsigned char> written(count, 1);
+                if (ArenaWatch(region.start, region.size, written.data(), count, false)) {
+                    known_zero[r].assign(count, 0);
+                    for (std::size_t i = 0; i < count; i++) {
+                        known_zero[r][i] = (written[i] | arena.nonzero[i]) == 0 ? 1 : 0;
+                    }
+                }
+                break;
+            }
+        }
+        watch_lock.unlock();
+        struct Run {
+            std::size_t part;        // in parts
+            std::size_t first, end;  // pages
+        };
+        std::vector<Run> runs;
+        constexpr std::size_t kRunPages = 256; // (1 MB)
+
+        for (std::size_t q = 0; q < parts.size(); q++) {
+            const Part   &part = parts[q];
+            const Region &region = regions[part.index];
+
+            if (region.kind == kArena && Mutated("skip_arenas")) {
+                continue;
+            }
+            if (region.kind != kArena && Mutated("skip_pause") &&
+                (region.name.find("EditLoop()::old_mode") != std::string::npos || region.name.find("::g_pause") != std::string::npos)) {
+                continue;
+            }
+            const std::size_t page_count = (part.src_size + kPage - 1) / kPage;
+
+            for (std::size_t first = 0; first < page_count; first += kRunPages) {
+                runs.push_back(Run{q, first, std::min(page_count, first + kRunPages)});
+            }
+            if (page_count == 0) {
+                runs.push_back(Run{q, 0, 0}); // (the tail alone)
+            }
+            put_regions++;
+        }
+        std::atomic<std::size_t> next_run{0}, bytes_total{0};
+        auto                     work = [&]() {
+            std::size_t mine = 0;
+
+            for (std::size_t r = next_run.fetch_add(1); r < runs.size(); r = next_run.fetch_add(1)) {
+                const Run    &run = runs[r];
+                const Part   &part = parts[run.part];
+                const Region &region = regions[part.index];
+                const unsigned char *list = data + part.at;
+                auto                 listed_at = [&](std::size_t k) {
+                    std::uint32_t v = 0;
+                    std::memcpy(&v, list + k * 4, 4);
+                    return (std::size_t) v;
+                };
+                // (the first listed page at or past the run's first: the list is in page order)
+                std::size_t lo = 0, hi = part.pages;
+                while (lo < hi) {
+                    const std::size_t mid = (lo + hi) / 2;
+                    if (listed_at(mid) < run.first) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                std::size_t next = lo;
+                std::size_t bytes_at = part.at + (std::size_t) part.pages * 4 + next * kPage; // (only a region's last page is short)
+
+                if (run.first == 0 && region.size > part.src_size) {
+                    std::memset(region.start + part.src_size, 0, region.size - part.src_size); // the block's tail past the taker's
+                }
+                for (std::size_t page = run.first; page < run.end; page++) {
+                    const std::size_t length = std::min(kPage, part.src_size - page * kPage);
+
+                    if (next < part.pages && listed_at(next) == page) {
+                        std::memcpy(region.start + page * kPage, data + bytes_at, length);
+                        bytes_at += length;
+                        mine += length;
+                        next++;
+                    } else if (!known_zero[part.index].empty() && known_zero[part.index][page] != 0) {
+                        left_zero.fetch_add(length, std::memory_order_relaxed); // (zero already: left as it is)
+                        // (rows, DC_SNAPSHOT_TEST_WATCH_CHECK: each page left tested after all; one not zero is said, and put)
+                        if (watch_check && !PageZero(region.start + page * kPage, length)) {
+                            if (left_missed.fetch_add(1) == 0) {
+                                std::fprintf(stderr, "snapshot: write watch check: %s page %zu left as zero, yet not zero\n", Label(region).c_str(), page);
+                            }
+                            std::memset(region.start + page * kPage, 0, length);
+                        }
+                    } else {
+                        std::memset(region.start + page * kPage, 0, length);
+                    }
+                }
+            }
+            bytes_total.fetch_add(mine);
+        };
+        std::vector<std::thread> threads;
+
+        for (unsigned h = 0; h < TakeHelpers(); h++) {
+            threads.emplace_back(work);
+        }
+        work(); // (the game thread works too)
+        for (std::thread &thread : threads) {
+            thread.join();
+        }
+        put_bytes = bytes_total.load();
+        g_apply_stats.left_zero = left_zero.load();
+        if (watch_check && prep) {
+            std::fprintf(stderr, "snapshot: write watch check at the apply: %lld pages left as zero not zero\n", left_missed.load());
+        }
+        if (regions_put != nullptr) {
+            *regions_put = put_regions;
+        }
+        if (bytes_put != nullptr) {
+            *bytes_put = put_bytes;
+        }
+        return true;
+    }
 
     for (const Part &part : parts) {
         const Region &region = regions[part.index];

@@ -55,8 +55,10 @@ constexpr int   kShots = 4;
 constexpr int kDownMotion = 0x17;
 
 // Ticks the partner cannot be hit after a hit, lies down at no life, and swings at most.
+// coop-revive2 (Jep 11-18): kDownTicks is the free get-up's wait, 3 s, and only while the session's debug mode is on
+// (ReviveFreeGetUp); in the base game a player lying down gets up only by a Revive Powder.
 constexpr int kInvincibleTicks = 60;
-constexpr int kDownTicks = 600;
+constexpr int kDownTicks = 180;
 constexpr int kAttackTicks = 90;
 
 // coop-party: kStandInLife (Toan's 70 for everyone) is gone; a stand-in has its own character's most life.
@@ -69,11 +71,9 @@ int PartnerWeaponBlock();
 // under it (WheelBlock).
 constexpr int kWheelTextureBlock = 0x44;
 
-// coop-party: how near the player stands still, and for how long, to get a downed partner up.
+// coop-revive2: how near an alive player stands to one lying down to see its red mark and ask with Cross (the free
+// stand-still revive, kReviveTicks, is gone: Jep 11-18, the base game needs a Revive Powder).
 constexpr float kReviveDistance = 30.0f;
-constexpr int   kReviveTicks = 120;
-// coop-revive: with the Revive Powder rule on, how long the player stands still beside it before being asked.
-constexpr int   kReviveAskTicks = 30;
 
 // coop-party: the nearest the partner stands to the player's centre (KeepApart).
 constexpr float kApart = 10.0f;
@@ -140,6 +140,21 @@ struct Partner {
     // coop-party: the partner's equipped weapon, held in its "weapon" frame.
     CCharacter *weapon = nullptr;
     bool        weapon_loaded = false;
+    // coop-p2eyehand: her first-person view's raised hand (retail's CharaHand, its member's hand_up.cfg: Xiao and Ruby), loaded with
+    // her body below weapon_mark; the motion it last took, and whether her weapon hangs from it (retail's EquipReAttach(.., 1)).
+    CCharacter *hand = nullptr;
+    bool        hand_loaded = false;
+    int         hand_motion = -1;
+    bool        held_out = false;
+    // coop-p2eyehand: the hand's (and the held slingshot's) motion clocks and the two fields above as the state set was taken: the
+    // hand is each copy's own object, loaded again with the body at a set's apply, so the taker's goes on from the sender's
+    // (PartnerMotionTake, PartnerSnapshotApplied), as body_kept does for the body.
+    struct HandKept {
+        bool     set = false;
+        int      motion = -1;
+        bool     held_out = false;
+        BodyKept hand, weapon;
+    } hand_kept;
 
     // coop-party: the arena's use just after the body (the weapon goes above it, and a reload rewinds
     // to it), the floor NewFloorCheck last saw and the floor of the last Load.

@@ -69,6 +69,7 @@
 #include "userstatus.hpp"
 
 #include "coop/coop_core.hpp"
+#include "coop/coop_ready.hpp" // coop-readyscreen: the table test
 #include "savedata.hpp" // coop-pt1109a: the floor hour hook
 #include "editloop.hpp"
 #include "coop/coop_actor.hpp" // coop-players
@@ -96,6 +97,9 @@ extern CFrameVu1 *CharaFrame;
 extern int        statusAlarmRate;
 extern s32        gameTask;
 extern s32        iventMarker;
+extern float      targetCursorCnt; // gameloop.cpp: his lock-on cursor's count (coop-p2hurt2's guard hook)
+unsigned int PortRandState();               // coop-entrance2: the desync test hook (app/runtime.cpp)
+void         PortRandSetState(unsigned int state);
 } // namespace dc::game
 
 // coop-harness3 (Jep, 2026-10-31; harness-review-2 N2): DC_QA_ONE_STREAM=1, which the harness's Start-Copy sets on every
@@ -742,7 +746,7 @@ bool PlaceBesideChest() {
     float              dx = 0.0f;
     float              dz = 0.0f;
 
-    if (mode == nullptr || gameTask != GAME_TASK_PLAY || std::sscanf(mode, "chestside:%f:%f", &dx, &dz) != 2) {
+    if (mode == nullptr || !CoopPlainPlay() || std::sscanf(mode, "chestside:%f:%f", &dx, &dz) != 2) {
         return false;
     }
 
@@ -958,6 +962,7 @@ void Walk() {
     }
 
     StepShots();
+    StepHerLock(); // coop-lockon1118: her lock-on kept or let go by player 1's rule, every tick (whatever holds her)
     PartnerWeaponWarning(); // coop-soundpt: her weapon about to break, on her copy
     StepWheel(pad); // coop-party: pad 2's character wheel (her Select; coop-wheelcrash)
     // Test hook (DC_COOP_TEST_UNHURT=1, t-wheel): neither player takes a blow, so the floor's monsters cannot knock either
@@ -982,6 +987,12 @@ void Walk() {
 
     bool hurt = StepHurt(); // coop-p2hurt: a blow's flinch or knockdown holds her until it has played
 
+    // coop-p2actions: the press that closed her picker or her prompt is not combat's (her Circle or Triangle closed it while combat
+    // was not stepped, so its own last buttons were from before: a new press, a lock-on or her panel, one tick later).
+    InputPadState combat_pad = pad;
+
+    combat_pad.buttons &= ~(KeyPickHeldAfter(2) | (Mutated("pick_press_leaks") ? 0 : UsePromptHeldAfter(2)));
+
     // (coop-serve, DC_COOP_DEBUG: her stick held but her walk held back, and by what, once a second: a job after her Atla
     // job left her standing, 2026-11-01)
     const bool  stick_held = lx != 0.0f || ly != 0.0f;
@@ -994,7 +1005,7 @@ void Walk() {
     } else if (menu || picking) { // coop-menus, coop-keypick
         lx = ly = 0.0f;
         held_by = menu ? "menu" : "picking";
-    } else if (CombatInput(pad, pressed)) { // coop: combat (swings, charge, lock-on, aim, items, panel)
+    } else if (CombatInput(combat_pad, pressed)) { // coop: combat (swings, charge, lock-on, aim, items, panel)
         lx = ly = 0.0f;
         held_by = "combat";
     }
@@ -1008,8 +1019,8 @@ void Walk() {
         ly *= 0.4f;
     }
 
-    // coop: cameras
-    float angle = PartnerCameraAngleH();
+    // coop: cameras. coop-wave3: the steer row, the yaw her own copy's camera had as her pad was read.
+    float angle = SteerAngle(1, PartnerCameraAngleH());
     float move_x = lx * cosf(angle) + ly * sinf(angle);
     float move_z = ly * cosf(angle) - lx * sinf(angle);
 
@@ -1126,6 +1137,18 @@ void Walk() {
         // a step that ends within 6 of an awake monster's body, heading at it, is cut to a fall in place. Her own place,
         // step, lock-on and height (CharaHeight reads the save's cur_chara: hers for the one call). The monsters already
         // stop at her (MoveCheck2, coop_target.cpp). DC_COOP_MUTATE=monsterpush_off (twin): no check, she walks through.
+        // coop-comboaudio: her leap's tick as the player's (DunMoveChara, movechara.cpp:1068-1135: his step zeroed while he can't act,
+        // then the jump's speed added, which loses 0.1 a tick); a leap cut short (a hit, a fall back to P1) lets go of it.
+        if (g_combat.jumping && !g_partner.attacking) {
+            g_combat.jumping = false;
+        }
+
+        if (g_combat.jumping) {
+            g_partner.velocity[0] = g_partner.velocity[2] = 0.0f;
+            g_partner.velocity[1] = g_combat.jump_vy;
+            g_combat.jump_vy -= 0.1f;
+        }
+
         float before = MonsterBodyDepth(g_partner.pos, true);
         float step[4];
 
@@ -1141,6 +1164,10 @@ void Walk() {
 
         MoveCheck(g_partner.pos, g_partner.velocity, moved, &info, polys, count, 1);
         g_partner.velocity[1] -= 0.1f;
+
+        if (info.ground_found != 0) {
+            g_combat.ground_height = moved[1] - info.ground_point[1]; // coop-comboaudio: BtActStatus.ground_height's (movechara.cpp:1247)
+        }
 
         if (g_partner.velocity[1] < -10.0f) {
             g_partner.velocity[1] = -10.0f;
@@ -1190,6 +1217,7 @@ void Walk() {
     if (g_partner.down == 0) {
         TakeHits();
         PickUp(); // coop-party
+        PartnerStealArrives(); // coop-stealback
         PartnerTrapCircle(); // coop: gaps2
     }
 
@@ -1326,7 +1354,7 @@ void WarpForTest() {
     static const char *warp_at = TestEnv("DC_COOP_WARP_AT");
     static int         ticks = 0;
 
-    if (warp_at == nullptr || gameTask != GAME_TASK_PLAY || ++ticks != std::atoi(warp_at)) {
+    if (warp_at == nullptr || !CoopPlainPlay() || ++ticks != std::atoi(warp_at)) {
         return;
     }
 
@@ -1366,7 +1394,7 @@ void CrystalForTest() {
     static const char *crystal_at = TestEnv("DC_COOP_CRYSTAL_AT");
     static int         ticks = 0;
 
-    if (crystal_at == nullptr || gameTask != GAME_TASK_PLAY || ++ticks != std::atoi(crystal_at)) {
+    if (crystal_at == nullptr || !CoopPlainPlay() || ++ticks != std::atoi(crystal_at)) {
         return;
     }
 
@@ -1389,7 +1417,7 @@ void StaminaForTest() {
     static int         ticks = 0;
 
     // (Not g_partner.visible: the tick clears it before this runs and draws set it again.)
-    if (stamina_at == nullptr || gameTask != GAME_TASK_PLAY || g_partner.loaded_chara < 0 || g_partner.chara == nullptr) {
+    if (stamina_at == nullptr || !CoopPlainPlay() || g_partner.loaded_chara < 0 || g_partner.chara == nullptr) {
         return;
     }
     if (on_load && NetplayStateLoadPending()) {
@@ -1460,7 +1488,7 @@ void HurtForTest() {
         }
     }
 
-    if (spec == nullptr || gameTask != GAME_TASK_PLAY || g_partner.loaded_chara < 0 || g_partner.chara == nullptr) {
+    if (spec == nullptr || !CoopPlainPlay() || g_partner.loaded_chara < 0 || g_partner.chara == nullptr) {
         return;
     }
 
@@ -1488,7 +1516,7 @@ void HurtForTest() {
     // 40 units out the first of eight ways from his right that his walk's MoveCheck reaches without a drop: a fixed spot
     // to his right was over a hole on some floor 1 layouts (train 49, floor fa0f4a02), the fall put her back 14 from him
     // and his still stand revived her. DC_COOP_MUTATE=p2hurt_fixed_spot: the fixed spot, as before.
-    if (ticks == (kind == "rumble" || loads ? 2 : 60) && (kind == "poison" || kind == "corner" || kind == "rumble")) {
+    if (ticks == (kind == "rumble" || loads ? 2 : 60) && (kind == "poison" || kind == "corner" || kind == "rumble" || kind == "swing")) {
         sceVu0FVECTOR rotation;
         sceVu0FVECTOR spot = {0.0f, 0.0f, 0.0f, 1.0f};
         int           way = -1;
@@ -1549,8 +1577,10 @@ void HurtForTest() {
         if (kind == "thirst") {
             // coop-p2hurt: her water out, as walking dry leaves it (her thirst's messages follow; DngMessMan's are his).
             UserStatus->water_now[g_partner.loaded_chara] = 0.0f;
-        } else if (kind == "corner") {
-            // Nothing on her: the corner icon case's ailments come from DC_COOP_STAMINA_AT and DC_COOP_PLAYER_POISON.
+        } else if (kind == "corner" || kind == "swing" || kind == "downs") {
+            // Nothing on her: the corner icon case's ailments come from DC_COOP_STAMINA_AT and DC_COOP_PLAYER_POISON; the swing's
+            // hits are set below, every tick of its window.
+            BtActStatus.recoil_frames = 0;
         } else if (kind == "poison") {
             SetLife(1);
             PartnerSetAilment(AILMENT_POISON);
@@ -1634,6 +1664,116 @@ void HurtForTest() {
 
         std::fprintf(stderr, "coop-p2hurt: test rumble's blow on the player at tick %d (hit %d), player at (%.1f %.1f), she at (%.1f %.1f)\n", ticks, hit,
                      CharaMain.pos[0], CharaMain.pos[2], g_partner.pos[0], g_partner.pos[2]);
+    }
+
+    // coop-p2iframes: swing (DC_COOP_TEST_P2HURT=swing:N; DC_COOP_TEST_SWING=<model>, e.g. e77a Rockanoff, else the floor's first
+    // monster): on tick N that monster is woken where it is (state 2) if it sleeps; once its script has given it an attack
+    // sphere of kind 2 to 4 (_SET_DMG_COL/_SET_DMG_PARA) it is held still (stop_timer: its own CheckDmg sets nothing), and from
+    // there for 600 ticks that sphere's hit (its kind and radius, damage 1, no side effects) is set afresh on each player's body
+    // every tick, as CheckDmg sets a swing's hit every tick of its motion's window, owned by that monster. Each copy writes a
+    // line on the tick a body's recoil starts (the player's BtActStatus.recoil_frames, hers g_partner.invincible: each rises
+    // only where a hit lands), counted from the window's start, and one at its end. All game state, the same on both copies.
+    // coop-p2hurt2: downs (DC_COOP_TEST_P2HURT=downs:N): on tick N she goes down (no life), and 700 ticks on he does (his life
+    // out, PlayerGoesDown, as his walk calls it), each getting up by the down rule; GetUp and PlayerGetsUp write what each got.
+    if (kind == "downs" && ticks == at && g_partner.down == 0) {
+        SetLife(0);
+        PartnerFalls("the downs test");
+    }
+    if (kind == "downs" && ticks == at + 700) {
+        UserStatus->hp[(int) UserStatus->cur_chara] = 0;
+        BtActStatus.invincible_frames = 0;
+        PlayerGoesDown();
+    }
+    if (kind == "downs" && ticks == at + 1500) {
+        std::fprintf(stderr, "coop-p2hurt2: downs over\n");
+    }
+
+    static int swing_from = -1;
+
+    if (kind == "swing" && ticks >= at && (swing_from < 0 ? ticks <= at + 900 : ticks <= swing_from + 600)) {
+        static int monster = -2;
+        static int sphere = -1;
+        static int was[2] = {0, 0};
+        CMonstorUnit *unit = NowMonstorUnit;
+
+        if (monster == -2 && unit != nullptr) {
+            const char *want = TestEnv("DC_COOP_TEST_SWING");
+
+            monster = -1;
+            for (int m = 0; m < 16 && monster < 0; m++) {
+                const int model = unit->monster[m].base_model;
+                const char *name = model >= 0 && model < 9 ? unit->model[model].model_name[0] : "";
+
+                std::fprintf(stderr, "coop-p2iframes: floor monster %d state %d model '%s'\n", m, unit->monster[m].state, name);
+                if (unit->monster[m].state < 1 || unit->monster[m].hp <= 0 || (want != nullptr && std::strncmp(name, want, 4) != 0)) {
+                    continue;
+                }
+                monster = m;
+                unit->monster[m].state = 2;
+            }
+            std::fprintf(stderr, "coop-p2iframes: woke monster %d\n", monster);
+        }
+
+        // (DC_COOP_TEST_SWING_GUARD: from the wake on, and the window starts once his guard is up)
+        static const bool guards = TestEnvOn("DC_COOP_TEST_SWING_GUARD");
+
+        if (monster >= 0 && guards) {
+            // (retail's guard drops when nothing is locked on: he is held locked on the swinging monster, as camtest locks)
+            lockOnTargetNo = monster;
+            lockOnTargetFlag = 1;
+            targetCursorCnt = 0.0f; // (held: a lock out of its keep range lets go once the count reaches 8)
+            g_combat.guard = 9;
+        }
+
+        if (monster >= 0 && swing_from < 0) {
+            for (int i = 0; i < 16 && sphere < 0; i++) {
+                if (unit->effect2[monster].active[i] != 0 && unit->effect2[monster].kind[i] >= 2 && unit->effect2[monster].kind[i] <= 4) {
+                    sphere = i;
+                }
+            }
+            if (sphere >= 0 && (!guards || BtActStatus.action_on == 6)) {
+                const int model = unit->monster[monster].base_model;
+
+                swing_from = ticks;
+                unit->monster[monster].stop_timer = 100000;
+                std::fprintf(stderr, "coop-p2iframes: swing of monster %d '%s' sphere %d kind %d radius %.1f damage %d from tick %d\n", monster,
+                             unit->model[model].model_name[0], sphere, unit->effect2[monster].kind[sphere],
+                             unit->effect2[monster].radius[sphere], unit->effect2[monster].damage[sphere], ticks);
+            } else if (ticks == at + 900) {
+                std::fprintf(stderr, "coop-p2iframes: no attack sphere on monster %d\n", monster);
+            }
+        }
+
+        if (swing_from >= 0 && ticks < swing_from + 600) {
+            const float radius = std::min(unit->effect2[monster].radius[sphere], 12.0f); // under her 36 from him
+            float      *bodies[2] = {CharaMain.pos, g_partner.pos};
+            // coop-p2hurt2: DC_COOP_TEST_SWING_KIND=K sets the sphere's hits as kind K (a heavy hit: 2); DC_COOP_TEST_SWING_GUARD=1
+            // keeps him locked on the swinging monster from its wake on (his R1, held by the test's input, then
+            // raises retail's own guard: action_on 6) and holds hers up (guard 9), as R1 held keeps raising it after each hit.
+            static const int  forced_kind = TestEnvInt("DC_COOP_TEST_SWING_KIND", 0);
+            const int         hit_kind = forced_kind > 0 ? forced_kind : unit->effect2[monster].kind[sphere];
+
+            for (float *body : bodies) {
+                float position[4];
+
+                sceVu0CopyVector(position, body);
+                position[1] += 5.0f;
+                NowColData->Set(position, 1, 2, radius, 0.0f, 1, hit_kind, 0, 0);
+                NowColData->SetUserID(monster * 5 + 200, sphere);
+            }
+        }
+
+        const int now[2] = {(int) BtActStatus.recoil_frames, g_partner.invincible};
+
+        for (int b = 0; b < 2; b++) {
+            if (now[b] > was[b] && swing_from >= 0 && ticks > swing_from) {
+                std::fprintf(stderr, "coop-p2iframes: player %d hit at +%d (recoil %d)\n", b + 1, ticks - swing_from, now[b]);
+            }
+            was[b] = now[b];
+        }
+        if (swing_from >= 0 && ticks == swing_from + 600) {
+            std::fprintf(stderr, "coop-p2iframes: swing over at +600\n");
+        }
     }
 
     if (ticks > at && ticks <= at + 300 && (ticks - at) % 10 == 0) {
@@ -1728,6 +1868,32 @@ void FollowAfterEvent(bool in_event) {
 
 void CoopStep(bool playing) {
     CoopPerfScope perf(kCoopPerfStep); // coop: perf
+    // coop-fpsound test hooks. DC_COOP_TEST_FP_TRACE=1: every 10 link ticks, player 1's view, down, lock, motion, heading and place,
+    // player 2's place and swing, and whether her step runs (playing). DC_COOP_TEST_FP_FREEZE_AT=N[,N...]: player 1 frozen (his
+    // AILMENT_FREEZE, 300 ticks, as a freezing item's) at each link tick N, every copy alike.
+    static const std::vector<long long> freeze_at = [] {
+        std::vector<long long> ticks;
+        for (const char *at = TestEnv("DC_COOP_TEST_FP_FREEZE_AT"); at != nullptr && *at != 0;) {
+            char *end = nullptr;
+            ticks.push_back(std::strtoll(at, &end, 10));
+            at = end != nullptr && *end == ',' ? end + 1 : "";
+        }
+        return ticks;
+    }();
+    if (!freeze_at.empty() && UserStatus != nullptr && std::find(freeze_at.begin(), freeze_at.end(), (long long) NetplayLinkTick()) != freeze_at.end()) {
+        const int frozen = UserStatus->cur_chara;
+        UserStatus->ailments[frozen] |= AILMENT_FREEZE;
+        UserStatus->ailment_frames[frozen] = 300;
+        std::fprintf(stderr, "coop-test: player 1 frozen at link tick %lld\n", (long long) NetplayLinkTick());
+    }
+    if (static const bool trace = TestEnvOn("DC_COOP_TEST_FP_TRACE"); trace && NetplayLinkTick() % 10 == 0 && UserStatus != nullptr) {
+        sceVu0FVECTOR rot;
+        CharaMain.GetRotation(rot);
+        std::fprintf(stderr, "fp-trace: tick %lld view %d down %d locked %d motion %d rot %.3f pos %.1f %.1f her %.1f %.1f swings %d playing %d\n",
+                     (long long) NetplayLinkTick(), (int) viewMode__2, (int) PlayerLiesDown(), (int) BtActStatus.movement_locked,
+                     (int) BtActStatus.motion_no, rot[1], CharaMain.pos[0], CharaMain.pos[2], g_partner.pos[0], g_partner.pos[2],
+                     (int) g_partner.attacking, (int) playing);
+    }
     // The camera stepped with the distance CoopBeforeMotion widened; DunMoveChara gets its own back.
     if (g_partner.camera_widened) {
         NowCamera__3->SetDistance(g_partner.camera_distance);
@@ -1735,6 +1901,7 @@ void CoopStep(bool playing) {
     }
 
     PresenceTrace("dungeon", g_partner.visible); // coop-p2absent
+    CoopBodyBudgetFloorTest();                    // coop-memberstage4 (test only: DC_COOP_TEST_BODY_BUDGET)
 
     // coop-floorjoin2 (DC_COOP_DEBUG): once a second of floor ticks, whether the last tick left the partner to be drawn and
     // where (the draw itself does not run headless), with the renderer's texture misses so far, for x-floor-join -Case
@@ -1767,6 +1934,13 @@ void CoopStep(bool playing) {
         was_event = event;
     }
 
+    // coop-entrance2 test hook (DC_NETPLAY_TEST_DESYNC_AT=N, the cave's desync path): copy 2's game random knocked once at link tick N,
+    // so the next checksum parts the copies and the link resyncs as after a real desync (read each tick: no test switch in the state set).
+    if (const char *desync_at = TestEnv("DC_NETPLAY_TEST_DESYNC_AT"); desync_at != nullptr && NetplayLocalPlayer() > 1 &&
+                                                                      NetplayLinkTick() == std::atoll(desync_at)) {
+        PortRandSetState(PortRandState() ^ 0x5a5a5a5au);
+        std::fprintf(stderr, "netplay: test: copy 2's game random knocked at link tick %s (a desync)\n", desync_at);
+    }
     StandInWeaponStep(); // coop: p2weapon
     ArrivalTrailTick();  // coop-arrivalfull: this copy's own arrival, recorded
     ArrivalWalkTick();   // coop-arrivalfull: the arriver's, played again
@@ -1775,6 +1949,12 @@ void CoopStep(bool playing) {
     CoopWorldsSimTick(); // coop-worlds: its test exit
     KeyRingTest();       // coop-keyring: its test hook, apart too
     ItemSceneTest();     // pt1111c: the item scene's test hook
+    // coop-readyscreen test hook (DC_COOP_TEST_READY_TABLE=1, x-ready-table): the ready check's decision for three and four players,
+    // once, on the first floor tick after its fixture's load (the link holds two copies today: a third player's own run is not possible yet).
+    if (static bool ready_table = TestEnvOn("DC_COOP_TEST_READY_TABLE"); ready_table && CoopWorldsStateFileWasLoaded()) {
+        ready_table = false;
+        coop::ready::TableTest();
+    }
     GateOpenTick();      // coop-gateopen: a gate opened once stays open, apart too
     KeyDoorTick();       // coop-keydoor: key doors opening beside the game, apart too
 
@@ -1793,7 +1973,10 @@ void CoopStep(bool playing) {
     // joined floor scene plays on with her copy's player, her member drawn as it, and the partner stood beside it as her member
     // too (PickPartner: the party's next, hers): two of her, nothing of his. He is not on the floor until her scene's end (the
     // handover places him): no partner through it. DC_COOP_MUTATE=scene_partner_shown (twin): she stands beside herself, as before.
-    const bool her_scene = CoopWorldsSceneOwner() == 2 && !Mutated("scene_partner_shown");
+    // (coop-entrwin: but for his own entrance as a walker of her walk-in, which the partner draws as his member: EntranceWalkByPartner)
+    const bool her_scene = CoopWorldsSceneOwner() == 2 && !Mutated("scene_partner_shown") && !EntranceWalkByPartner();
+
+    ZoneTestFloorStep(); // coop-forcefloor: the test floor's force, at its start script, apart too
 
     if (!Enabled() || BtAllDrawFlag == 0 || (BtEventMode != 0 && !FloorIntro() && !scene_stand) || NowDngMap == nullptr || CharaFrame == nullptr ||
         (CoopWorldsApart() && !NetplayStayerMerge()) || her_scene) {
@@ -1837,7 +2020,7 @@ void CoopStep(bool playing) {
 
     ZoneStep(); // coop-pt1111k: a character-limited floor's member kept played (and its test hooks)
 
-    int chara = PickPartner();
+    int chara = EntranceWalkMember() >= 0 ? EntranceWalkMember() : PickPartner(); // coop-entrwin: his member, as a walker of her walk-in
 
     if (g_partner.chara == nullptr || g_partner.loaded_chara != chara || BlockEmpty()) {
         if (!Load(chara)) {
@@ -1856,6 +2039,7 @@ void CoopStep(bool playing) {
     StandBesideArrival(); // coop: cameras
 
     if (ArrivalWalkPartner()) { // coop-arrivalfull: her arrival plays again after her catch-up
+    } else if (ForestTailOn()) { // coop-entrance2: her forest walk-in curving to its end past his (StandBesideArrival)
     } else if (playing && !scene_stand) {
         Walk();
     } else if (!FloorIntro() && g_partner.down == 0 && !g_partner.attacking && g_partner.motion != 0 &&
@@ -1876,6 +2060,7 @@ void CoopStep(bool playing) {
     PartnerFramePlace(place); // coop-openpos: on the box while she opens a chest
     partner->SetPosition(place);
     partner->SetRotation(rotation[0], rotation[1], rotation[2]);
+    SpotJumpPoseFor(2, partner); // coop-xiaogap2: her jump at a Xiao gap, its real motion (every copy)
     partner->Step();
     partner->ShadowStep();
 
@@ -1887,12 +2072,44 @@ void CoopStep(bool playing) {
     }
 
     g_partner.visible = true;
+    PartnerHandStep(); // coop-p2eyehand (after visible: her view needs her shown)
+    EntranceWalkDrawnTrace();   // candfix2b: the walker drawn at its start, said once
     StepPartnerCamera(playing); // coop: cameras
     CamTestTick();              // coop: cameras
     ActorTableTrace();          // coop-players: test hook
     InventoryStep(playing);     // coop-inventory: P1's send (R3) and its test bot
     DebugLog();
     ActorTestTick();            // coop-actorswap: the swap-roundtrip self-test
+}
+
+// coop-wave1a: his first-person view as his own row (coop.hpp). In the twin his view is retail's GAME_TASK_EYE_CAMERA again.
+bool CoopPlainPlay() {
+    return gameTask == GAME_TASK_PLAY && viewMode__2 == 0;
+}
+
+bool CoopEyePlay() {
+    return gameTask == GAME_TASK_EYE_CAMERA || (gameTask == GAME_TASK_PLAY && viewMode__2 != 0);
+}
+
+// coop-wave1a (localaudit 3.2, class R): this copy's own player's first-person view, for the look on the left stick (the
+// keyboard's and mouse's look and the gyro's "first person": a local input mapping), on a floor or in a town. Linked on her copy, hers (her R2,
+// PartnerFirstPerson); else his row. It read the world's task, so his view turned her look on and hers never did.
+// DC_COOP_MUTATE=look_left_shared (twin): his view on every copy, as before.
+bool CoopOwnFirstPerson(bool dungeon, bool town_view) {
+    const bool hers = NetplayLocalPlayer() == 2 && !CoopWorldsApart() && !Mutated("look_left_shared");
+    const bool on = dungeon ? (hers ? PartnerFirstPerson() : CoopEyePlay()) : town_view && !hers; // (a town's view is his alone)
+    static bool said = false;
+
+    if (on != said) {
+        said = on;
+        std::fprintf(stderr, "coop: this copy's look on the left stick %s (player %d's first-person view) at link tick %lld\n", on ? "on" : "off",
+                     hers ? 2 : 1, (long long) NetplayLinkTick());
+    }
+    return on;
+}
+
+int CoopEyeTask() {
+    return Mutated("eye_task_shared") ? GAME_TASK_EYE_CAMERA : GAME_TASK_PLAY;
 }
 
 bool CoopPartnerTarget(float *out_position, float *out_heading, int *out_since_attack, int *out_chara) {
@@ -1917,7 +2134,7 @@ bool CoopPartnerTarget(float *out_position, float *out_heading, int *out_since_a
     return true;
 }
 
-void CoopResetForSession() {
+void CoopResetForSession(bool own_take) {
     // Party (coop_party.cpp): the partner unloaded, no pick, nobody down, stand-in lives full.
     // The DC_COOP_MUTATE=sessionreset twin skips it, and its test must then fail.
     if (!Mutated("sessionreset")) {
@@ -1929,7 +2146,7 @@ void CoopResetForSession() {
     KeyPickResetForSession();     // coop-keypick: her key picker closed (coop_interact.cpp)
     UsePromptResetForSession();   // coop-p2prompt: no prompt open (coop_useprompt.cpp)
     PromptResetForSession();      // no swap question waiting (coop_prompt.cpp)
-    FullMenuResetForSession();    // the game's menu not open beside the world (coop_fullmenu.cpp)
+    FullMenuResetForSession(own_take); // the game's menu not open beside the world (coop_fullmenu.cpp; a self-take keeps its own local one)
     TownResetForSession();        // the town partner reloads on the next town tick (coop_town.cpp)
     CoopGeoramaResetForSession(); // the town editor back to player 1 (coop_georama.cpp)
     CoopP2GeoramaResetForSession(); // coop-town: player 2's own Georama closed

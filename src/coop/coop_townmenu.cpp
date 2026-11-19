@@ -36,6 +36,8 @@
 #include <vector>
 
 #include "battlemenu.hpp"
+#include "platform/arena.hpp" // coop-crashmenuchar: the menu work area
+#include "dataread.hpp" // coop-crashmenuchar: read_buffer
 #include "dun/gameloop.hpp"
 #include "editloop.hpp"
 #include "edit.hpp"
@@ -70,6 +72,7 @@
 #include "coop/coop_townmenu.hpp"
 #include "coop/coop_writeguard.hpp" // coop-guard
 #include "coop/coop_worlds.hpp"
+#include "coop/coop_whereis.hpp" // coop-whereis
 #include "coop/netplay.hpp"
 
 using namespace coop;
@@ -98,6 +101,9 @@ s16 *PortGetItemShopList(int shop_no);
 namespace {
 
 constexpr int kTownMode = 2; // GAME_MODE_EDIT
+// coop-joinload (daytrans2's owed item, design for three): the player whose own town menu this file runs (player 2's today); read by
+// number where its player is asked of (CoopDayTransHolds), not a literal index.
+constexpr int kMenuPlayer = 2;
 
 int  g_p1_menu = -1; // the menu the walk opened last (ED_MENU_*), for "his battle menu"
 int  g_p1_ticks = 0;  // ticks his battle menu has been open (its step's count)
@@ -220,7 +226,7 @@ bool HisGeorama() {
 }
 
 bool Allowed() {
-    return Linked() && MenusOn() && !MenuPanelOn() && !Mutated("p2townmenu_off") && TownPartnerShown(nullptr, nullptr);
+    return Linked() && MenusOn() && !Mutated("p2townmenu_off") && TownPartnerShown(nullptr, nullptr);
 }
 
 // Her pad on the game pad's first port, as it is now and as it was the tick before (Down reads the change).
@@ -280,7 +286,11 @@ bool OwnSet() {
 // Her menu in place around its init, step and draw: its globals (the ones in place aside), the town menu allocator over
 // its own buffer, her pad as the game pad, her member and bag. HerOut puts all back.
 // coop-stage4 4b: an engine's in and out, hers (g_own) or his (g_his): its globals, allocator and pad; her member and bag hers.
+// coop-townally: the player whose town menu engine is in place now (its step and draw), 0 none: the Allies page's picker.
+int g_engine_player = 0;
+
 void EngineIn(Own &engine, int player) {
+    g_engine_player = player;
     if (OwnSet()) {
         MenuStateSave(engine.aside);
         MenuStateLoad(engine.state);
@@ -295,6 +305,7 @@ void EngineIn(Own &engine, int player) {
 }
 
 void EngineOut(Own &engine, int player) {
+    g_engine_player = 0;
     if (player == 2) {
         g_in_hers = false;
         ViewEnd();
@@ -589,10 +600,30 @@ const spRGBA *KeepLiveStill() {
     if (Mutated("townmenu_still_open")) {
         return &kDimOld;
     }
-    if (CTexture *still = TexManager.GetTexture(const_cast<char *>("frame_image"), -1)) {
-        MGMoveFrameBuffImage(reinterpret_cast<sceGsTex0 *>(&still->tex0), 0, 0, 0);
-    }
+    MenuStillFromScreen(); // (coop-swapmenulook: shared with the floor's menus)
     return &kDim;
+}
+
+// coop-crashmenuchar: every 60 of his menu's draws, how many had his Items page's character built (the model MenuCharaPolyDraw steps and
+// draws) and where its work area lies: inside the world's read_buffer (retail's span, which the town's loads read into while it runs on)
+// or outside it. With his engine's globals in place.
+void ModelDrawTally() {
+    static int draws = 0;
+    static int built = 0;
+
+    draws++;
+    built += MenuExTextureReadFlag == MENU_EX_TEX_READY && MenuExCashBuffer.base != nullptr ? 1 : 0;
+    if (draws < 60) {
+        return;
+    }
+    const auto      *read = reinterpret_cast<const unsigned char *>(read_buffer);
+    const std::ptrdiff_t past = MenuExCashBuffer.base - read;
+    const bool       inside = MenuExCashBuffer.base != nullptr && past >= 0 && past < std::ptrdiff_t{0x3A2E0} * 16;
+
+    std::fprintf(stderr, "coop-townmenu: his menu's character model built in %d of %d draws, chara %d, its work area %s the world's read buffer\n", built, draws,
+                 ItemMenuMode.chara, MenuExCashBuffer.base == nullptr ? "not set, so outside" : inside ? "inside" : "outside");
+    draws = 0;
+    built = 0;
 }
 
 // His engine's draw over the live town, his copy: the town dimmed under it, as under hers.
@@ -616,7 +647,10 @@ void HisDraw() {
     DrawRng             rng;
 
     spRGBA *dim = const_cast<spRGBA *>(KeepLiveStill());
+    if (Mutated("menulook")) { // coop-swapmenulook: retail's dim (fade and all) comes with the menu's draw (MenuBackdrop)
         set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), dim, dim, dim, dim);
+        MenuOldFillTrace(dim->a);
+    }
     if (++dims % 60 == 1) {
         std::printf("coop-townmenu: player 1's menu over the live town, dimmed (%d draws)\n", dims);
     }
@@ -633,6 +667,7 @@ void HisDraw() {
     g_drawing_his = true;
     BattleMenuDraw();
     g_drawing_his = false;
+    ModelDrawTally();
     FullMenuWritesEnd();
     EngineOut(g_his, 1);
     if (!Mutated("hisdraw_view")) {
@@ -645,6 +680,22 @@ void HisDraw() {
 static void HisEngineStart(int page);
 static void HerEngineStart(const InputPadState &pad, bool local, bool beside, int page, int kind = ED_MENU_BATTLE);
 static void HerEngineStep(const InputPadState &agreed);
+
+// coop-crashmenuchar (soak seed 51117109, the host's crash in MenuCharaPolyDraw -> CCharacter::Step -> SetMotionEX after the time of
+// day's event with his menu on its Items page): retail's InitWorkBuffer puts the town menu's work area (EdMenuBuffer, 0x3A2E0 quads) 1.5 MB
+// before read_buffer, so its far end runs into read_buffer: the Items page's character pack and the model built after it sit there (his
+// model at read_buffer + 80 KB). Retail stands the town while its menu is open, so nothing else reads a file then. Together the town runs
+// on under every player's menu, and its loads read into read_buffer (the period's villagers, EdLoadVillager's LoadFile2): the model's
+// motions were overwritten under the open page and its next step read a wild pointer. The menu works in a block of its own now, the
+// same size, so the world's reads never meet it, whichever menu (his, a carried one, a shop) uses EdMenuBuffer.
+unsigned char *CoopTownMenuWorkBuffer(unsigned char *retail) {
+    static const char kMenuWorkArena = 0;
+
+    if (Mutated("menuwork_readbuffer")) {
+        return retail;
+    }
+    return ArenaBlock(&kMenuWorkArena, std::size_t{0x3A2E0} * 16);
+}
 
 void CoopTownNoteMenu(int menu_no) {
     g_p1_menu = menu_no;
@@ -790,7 +841,10 @@ void CoopTownP1MenuDraw() {
         static int          dims = 0;
 
         spRGBA *dim = const_cast<spRGBA *>(KeepLiveStill());
-        set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), dim, dim, dim, dim);
+        if (Mutated("menulook")) { // coop-swapmenulook: retail's dim comes with the menu's draw (MenuBackdrop)
+            set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), dim, dim, dim, dim);
+            MenuOldFillTrace(dim->a);
+        }
         if (++dims % 60 == 1) {
             std::printf("coop-townmenu: player 1's menu over the live town, dimmed (%d draws)\n", dims);
         }
@@ -895,6 +949,12 @@ bool CoopTownP1MenuOpensLocal(int menu_no) {
     const bool retail_only = Mutated("retailmenu_lockstep");
 
     if ((menu_no != ED_MENU_BATTLE && (!IsShop(menu_no) || retail_only)) || (EdCheckItemOver() != 0 && retail_only) || !HisLocalOn() || !Allowed() || PlayerInMenu(1)) {
+        // coop-menuaudit (diagnostic): retail's town menu while linked (the lockstep's, beside local menus)
+        if (NetplayPartnerLinked()) {
+            std::printf("coop-menuaudit: retail's town menu %d opens while linked at link tick %lld (linked %d, allowed %d, local %d, in menu %d/%d, overflow %d, indoors %d)\n",
+                        menu_no, (long long) NetplayLinkTick(), Linked() ? 1 : 0, Allowed() ? 1 : 0, HisLocalOn() ? 1 : 0, PlayerInMenu(1) ? 1 : 0,
+                        PlayerInMenu(2) ? 1 : 0, EdCheckItemOver() != 0 ? 1 : 0, EdInteriorFlag != 0 ? 1 : 0);
+        }
         return false;
     }
     g_his.kind = menu_no;
@@ -930,6 +990,10 @@ static void HisEngineStart(int page) {
     FeedPadTo(g_his, pad); // (his Triangle no fresh press in the menu)
     FeedPadTo(g_his, pad);
     g_his.alloc = EdMenuBuffer; // the town menu allocator, as retail's (her engine's has its own buffer)
+    if (Mutated("menuwork_readbuffer")) {
+        // (the twin, here too: a saved state's EdMenuBuffer is the work area InitWorkBuffer gave it, so his engine's allocator alone takes retail's span)
+        g_his.alloc.base = reinterpret_cast<unsigned char *>(read_buffer) - 0x180000;
+    }
     if (OwnSet()) {
         MenuStateSave(g_his.state);
     }
@@ -1099,6 +1163,14 @@ void CoopTownMenuParkCarriedForResync() {
 
 bool CoopP2TownPaused() {
     return g_paused;
+}
+
+// coop-daytrans2 (design for three): whether walker n (1 up, beside the game's player) has their own town pause or town menu up, every copy
+// alike; the game's player's are retail's (GameMode, EdPauseFlag), and walkers past the second have none of their own yet.
+bool CoopTownWalkerPaused(int player) {
+    const bool paused[coop::kMaxPlayers] = {false, g_paused || HerMenuOpen()};
+
+    return player >= 1 && player <= coop::kMaxPlayers && paused[player - 1];
 }
 
 void CoopP2TownPauseForTest() {
@@ -1468,7 +1540,7 @@ void CoopP2TownMenuTick() {
         g_own.before = pad;
         return;
     }
-    if (!HerMenuOpen() && (pressed & kInputStart) != 0 && Allowed() && !Mutated("townstart_handover") && !CoopP2Building() && change_time_event == 0 &&
+    if (!HerMenuOpen() && (pressed & kInputStart) != 0 && Allowed() && !Mutated("townstart_handover") && !CoopP2Building() && change_time_event == 0 && !CoopDayTransHoldsPlayer(kMenuPlayer) && // (coop-daytrans)
         (TownWalks() || CoopTownP1Menu() || ::GameMode == ED_MODE_RETURN_MENU_WALK || HisGeorama())) { // coop-inbuild: TownWalks
         g_paused = true;
         g_paused_ticks = 0;
@@ -1493,7 +1565,7 @@ void CoopP2TownMenuTick() {
         // Outdoors only (a room has no Georama). DC_COOP_MUTATE=townmenu_notingeorama (twin): as before.
         const bool p1_georama = EdInteriorFlag == 0 && CoopP1GeoramaBesideHerMenu() && !Mutated("townmenu_notingeorama");
 
-        if ((pressed & kInputTriangle) != 0 && Allowed() && (walk || beside || p1_georama) && !CoopP2Building() && change_time_event == 0 &&
+        if ((pressed & kInputTriangle) != 0 && Allowed() && (walk || beside || p1_georama) && !CoopP2Building() && change_time_event == 0 && !CoopDayTransHoldsPlayer(kMenuPlayer) && // (coop-daytrans)
             !(HisLocalMenu() && Mutated("townmenuboth_off"))) { // (coop-stage4 4b: the twin's one at a time beside his local menu too)
             // coop-stage4: local, the bit on every copy now and the engine on hers alone.
             const bool local = LocalOn();
@@ -1536,7 +1608,44 @@ void CoopP2TownMenuTick() {
     HerEngineStep(pad);
 }
 
+// coop-warplight test hook (DC_COOP_TEST_P2_WARP=<map>, every copy): her menu's "go to the dungeon" for map, as its close command
+// takes it on every copy (CoopTownMenuClosedByCommand), on the first town-walk tick after a state file's load (one link tick on all)
+// and the test warps the copy runs with (CoopWorldsTestWarpsDone).
+// =<map>:apart: player 1's own pick first (his close command: his copy leaves, hers stays), then hers on her copy once it walks
+// apart (retail's own menu there, its TownMapJump). =<map>:p1: his pick alone. The menu's pages are not what the warp-light rows check.
+static void TestP2Warp() {
+    COOP_TEST_SWITCH(const char *, spec, TestEnv("DC_COOP_TEST_P2_WARP"));
+    static int phase = 0; // 0 waits for the load, 1 his pick made (apart), 2 done
+
+    COOP_TEST_TRACE_RESET(phase, 0);
+    int map = -1;
+
+    if (spec == nullptr || phase >= 2 || std::sscanf(spec, "%d", &map) != 1 || !NetplayStateFileLoaded() || !TownWalks() || !CoopWorldsTestWarpsDone()) {
+        return;
+    }
+    const bool apart = std::strstr(spec, ":apart") != nullptr;
+    const bool his = std::strstr(spec, ":p1") != nullptr; // (his pick alone: the -p1 row)
+
+    if (phase == 0 && (apart || his)) {
+        phase = his ? 2 : 1;
+        g_his_jump = map;
+        std::fprintf(stderr, "coop-townmenu: test: player 1's pick of map %d (his close command) at link tick %lld\n", map, (long long) NetplayLinkTick());
+        std::fflush(stderr);
+        return;
+    }
+    if (phase == 1 && !(CoopWorldsApart() && NetplayRole() == 2)) {
+        return;
+    }
+    phase = 2;
+    g_own.jump = map;
+    g_own.map = MapNo;
+    std::fprintf(stderr, "coop-townmenu: test: player 2's pick of map %d (%s) at link tick %lld\n", map, apart ? "her copy apart" : "her close command",
+                 (long long) NetplayLinkTick());
+    std::fflush(stderr);
+}
+
 int CoopP2TownMenuTakeJump() {
+    TestP2Warp();
     const int map = MapNo == g_own.map ? g_own.jump : -1; // a town left meanwhile drops it
 
     g_own.jump = -1;
@@ -1568,8 +1677,13 @@ static void DrawPause() {
 
 void CoopP2TownMenuDraw() {
     CoopTownCaveDraw(); // coop-doorfix: the user's own screen fades as they walk into the cave
+    coop::DrawWhereIs(); // coop-whereis: the where-is-everyone list (a placeholder), with the town's late 2D
     // coop-gatepopup3: an apart call's question and the asker's waiting box, with the town's late 2D (over the characters).
     if (!Mutated("call_under_world")) {
+        // coop-firstvisit: a held story arrival waits on black (the transition's), its box or question over it.
+        if (CoopWorldsArrivalBlack()) {
+            MGFillBox(CRect_i_(0, 0, 0x2800, SCREEN_HALF_HEIGHT << 4), 0, 0, 0, 0x80);
+        }
         DrawCallQuestion();
 
         // (once a call: the test's line that it went with the late 2D, after the town's characters)
@@ -1611,7 +1725,10 @@ void CoopP2TownMenuDraw() {
         static int          dims = 0;
 
         spRGBA *dim = const_cast<spRGBA *>(KeepLiveStill());
-        set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), dim, dim, dim, dim);
+        if (Mutated("menulook")) { // coop-swapmenulook: retail's dim comes with the menu's draw (MenuBackdrop)
+            set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 512), dim, dim, dim, dim);
+            MenuOldFillTrace(dim->a);
+        }
         if (++dims % 60 == 1) {
             std::printf("coop-townmenu: the town dimmed under player 2's menu (%d draws)\n", dims);
         }
@@ -1691,7 +1808,7 @@ void CoopTownMenuClosedByLoad() {
         HisEnd("player 1 loaded a save"); // coop-stage4 4b
     }
     if (NetplayLocalPlayer() == 2 && !Mutated("saveload_nonotice")) {
-        NetplayShowNotice("Player 1 loaded a save");
+        NetplayShowNotice((NetplayShownName(1) + " loaded a save").c_str());
         std::printf("coop-saveload: notice on player 2's copy: player 1 loaded a save\n");
     }
 }
@@ -1726,4 +1843,10 @@ void CoopP2TownMenuResetForSession() {
     g_his_close_code = 0;
     g_his_jump = -1;
     g_his_room_out = false;
+}
+
+// coop-townally: the player whose town menu steps now, 0 when no co-op engine runs (retail's own town menu: alone, apart, or the
+// lockstep's on every copy). Must be outside the anonymous namespace: g_engine_player is file-local.
+int CoopTownMenuStepPlayer() {
+    return g_engine_player;
 }

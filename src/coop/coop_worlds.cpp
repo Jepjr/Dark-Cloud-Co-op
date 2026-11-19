@@ -1,13 +1,16 @@
 #include <nlohmann/json.hpp> // coop-pt1111e: the quests' progress slots (first: a game header's macro breaks it after)
 #include "coop/game_ns.hpp"
 #include "coop/coop_worlds.hpp"
+#include "coop/coop_ready.hpp" // coop-readyscreen: the one ready check
 #include "coop/netplay_session.hpp" // coop-session
 #include "coop/netplay_cmd.hpp" // coop-localmenu: recorded commands
 
 #include <libvu0.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +18,7 @@
 #include <unordered_map>
 #include <string>
 #include <unordered_set>
+#include <thread>
 #include <vector>
 
 #include "btmisc.hpp"
@@ -42,6 +46,7 @@
 #include "snd.hpp"       // coop-floorgate: SndSePlay
 #include "savedata.hpp"
 #include "stockitem.hpp"
+#include "sysmes.hpp" // coop-notices: ItemGetMes (the apart item test)
 #include "framevu1.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_core.hpp"
@@ -54,6 +59,7 @@
 #include "coop/coop_inventory.hpp" // coop-dungeonp2: the bags apart
 #include "coop/coop_party.hpp" // coop-dungeonjoin: her member loaded as the partner
 #include "coop/coop_actor.hpp" // pt1111c: kMaxPlayers
+#include "coop/coop_zonechara.hpp" // swapduel: ZonePlayerOnFloor, ZoneMemberOf
 #include "coop/coop_interact.hpp" // coop-keyring: KeyRingTest's lines
 #include "coop/coop_menu.hpp"     // coop-p2prompt: MenuNotePrompt
 #include "coop/coop_prompt.hpp"
@@ -64,8 +70,11 @@
 #include "coop/netplay_socket.hpp"
 #include "coop/netplay_test.hpp"
 #include "coop/coop_storage.hpp" // coop-small2: the party storage's asks apart
+#include "coop/coop_whereis.hpp"  // coop-whereis
+#include "coop/coop_message.hpp" // coop-notices: the others' finds apart
 #include "dun/gameloop.hpp"
 #include "app/gameloop.hpp"
+#include "menuitemstep.hpp" // coop-meltdesync: the melt timer at the split (log)
 #include "gfx/gfx.hpp"
 #include "platform/paths.hpp"
 #include "main.hpp"
@@ -101,6 +110,7 @@ bool SaveSlotWriteNumbered(int file_no, std::vector<unsigned char> *written); //
 unsigned int PortRandState();                // runtime.cpp (coop-flagsync: StepWater)
 void         PortRandSetState(unsigned int state);
 void         BtAtraListMake(int dungeon); // dungeonparts.cpp (coop-joinatla)
+extern int   EdMoveCharaRotCount; // ebattle.cpp (coop-doorcam: the town walk's camera swing behind its walker)
 } // namespace dc::game
 
 void PickJoinMerged(); // coop-cutscenejoin (below)
@@ -108,10 +118,16 @@ static bool g_prelink_drawn = false; // coop-localrace (CoopWorldsPrelinkSaid, b
 static bool g_prelink_spot = false;
 namespace dc::game {
 int  EdInSceneEvent(); // edit_in.cpp (coop-scenejoin)
+extern CRunScript EdEventScript; // editloop3.cpp (coop-arrivalwait: the town event's place, in the call's diagnostic)
 } // namespace dc::game
 
 extern bool g_become_due; // coop-p2entry (below): her member at the floor's next tick of play, apart
+bool CoopWorldsPartSceneAlone(); // coop-windmill (CoopWorldsTakeInterior's neighbours)
+static void PartSceneLatch(int player, int event_no, bool fade); // coop-storygaps (below, by CoopWorldsPartSceneHeld)
+
 namespace {
+bool IntoDungeonOnly(const void *program, int event_no); // (below: coop-storygaps's story start reads them too)
+bool PickupOnly(const void *program, int event_no, int *flag_out);
 
 constexpr std::uint32_t kMagic = 0x44435757; // "WWCD"
 
@@ -121,6 +137,12 @@ enum Kind : std::uint32_t {
     kProgressAck = 3,
     kSceneView = 4, // coop-cutsceneview: the sender's view of the floor's opening scene it plays, each tick (SceneView)
     kCharaNow = 5,  // coop-apartstats: the sender's characters' life, water and ailments now, with each presence (statsync::NowMsg)
+    // coop-hostquit: a Message of these kinds carries only magic, player and kind (ready: kQuit's ended word).
+    kQuit = 6,  // the sender's player left (seq 1 its Quit Game, 2 its game closing); ready 1: the host's Quit Game, the session over for every player
+    kAlive = 7, // the sender is still there apart, its game not ticking (a load): its keepalive thread's, so the check-in waits
+    kProbe = 8,    // apart, the other has been quiet: are you there? (seq the probe's number)
+    kProbeAck = 9, // the answer
+    kLeftAck = 10, // a kQuit heard (seq its how): the leaver stops resending
 };
 
 // What a progress message carries.
@@ -144,11 +166,66 @@ enum What : std::int32_t {
                         // row in the door table (doorgate::Find), b 1 the cave door (a unused). A notice only, as kWhatCall
     kWhatCommand = 15, // coop-localmenu (a catch-up's recording only): a command (netplay_cmd.hpp's NetplayApplyRecordedCommand)
     kWhatDoorAnswer = 14, // coop-doorgate: the answer to that call (a, b as kWhatDoorCall; c 0 coming, 1 not now, 2 busy, 3 no answer). A note only
+    kWhatUra = 16, // coop-choosing: a floor's back half unlocked (its door's item used): c dungeon, a floor (0 up), b the door's script, d the item
+    kWhatArrive = 18, // coop-firstvisit: a town's story arrival's gather: a the town, b its arrival event, c the step (0 the starter's
+                      // call, 1 yes, 2 no, 3 started: its seen mark set), d the starter (started: the seen flag, set with it)
+    kWhatTrade = 17, // coop-swapcombo: a trade across zones (coop_prompt's apart trade), d its step: 0 the ask (a the asker's member, b the
+                     // member it wants), 1 the answer (b 1 yes, 0 no, 2 cannot (stale or busy), 3 no answer; a, c the ask's a, b), 2 the
+                     // asker applied it (a, b the ask's), 3 the asker withdrew it. A question, no state: each copy applies its own side
+    kWhatNotice = 19, // coop-notices: the sender's player found an item others hear of: a the item, b 1 every player (0 the find's floor
+                      // alone), c dungeon, d floor (c -1 off a floor). A notice only, as kWhatDoorCall
 };
+
+// coop-forcefloor: kWhatCall's b for a fenced floor's call: kForceCallBase + the caller's member (0 a story call, 1 a withdrawal);
+// kWhatCallAnswer's b 4: the holder swapped (each copy takes its own side of the trade).
+constexpr std::int32_t kForceCallBase = 16;
 
 // coop-joinatla: the random state this copy laid each dungeon's Atla out from (CoopWorldsAtlaListMake), for kWhatFloor's b.
 unsigned g_atla_rand[6] = {};
 bool     g_atla_rand_set[6] = {};
+
+// coop-floorrand: each floor's (map * 256 + floor) build count apart since the last link came up: this copy's own builds,
+// and the highest count heard from the other's presence. The next build apart of a floor the other is not heard on counts
+// on from the higher of the two, so the two copies' builds of it agree in their count as well (CoopWorldsAgreedFloorRand).
+struct FloorCounts {
+    int own = 0;
+    int heard = 0;
+};
+std::unordered_map<int, FloorCounts> g_floor_counts;
+std::uint32_t                        g_floor_counts_seed = 0; // the link word they count under (NetplayLinkFloorSeed)
+int                                  g_floor_build_count = 0; // this copy's present floor build's count (0 not built apart)
+std::uint32_t                        g_floor_build_seed = 0;  // and the link word it counted under (a later link's floor is the pair's)
+
+// The counts belong to one link: a new link's word starts them afresh.
+std::unordered_map<int, FloorCounts> &FloorCountsNow() {
+    std::uint32_t seed = 0;
+    if (NetplayLinkFloorSeed(&seed) && seed != g_floor_counts_seed) {
+        g_floor_counts.clear();
+        g_floor_counts_seed = seed;
+    }
+    return g_floor_counts;
+}
+
+// The other's count of the floor it is on, heard with the link word it counted under: one of another link's is not this one's.
+void FloorCountHeard(int map, int floor, int count, std::uint32_t word) {
+    std::uint32_t seed = 0;
+    if (count <= 0 || !NetplayLinkFloorSeed(&seed) || word != seed) {
+        return;
+    }
+    FloorCounts &c = FloorCountsNow()[map * 256 + floor];
+    c.heard = std::max(c.heard, count);
+}
+
+// This copy's present floor's count apart, under the link word now (0 when it was built linked or under an earlier link).
+int FloorBuildCountNow(std::uint32_t *word) {
+    std::uint32_t seed = 0;
+    if (g_floor_build_count <= 0 || !NetplayLinkFloorSeed(&seed) || seed != g_floor_build_seed) {
+        *word = 0;
+        return 0;
+    }
+    *word = seed;
+    return g_floor_build_count;
+}
 
 #pragma pack(push, 1)
 struct Progress {
@@ -196,6 +273,27 @@ struct Message {
     // (coop-scenejoin 2: in a scene, which merges; coop-buildarrive 3: building apart in the game's Georama or her menu apart,
     // BuildsApart: no merge till it closes, and the other copy arriving there is not held black meanwhile)
     std::uint32_t busy;
+    // coop-whereis: what the sender's player does where it is (coop::WhereActivity: a scene, the Georama, fishing, a talk), for
+    // every other player's where-is-everyone list. Read by no merge, lockstep or checksum. (Protocol 24, the v0.1.2 candidate's one bump.)
+    std::uint8_t  activity;
+    // coop-choosing: the sender's half of its floor, and the half it last heard the other in (Zone::half).
+    std::int32_t  half;
+    std::int32_t  heard_half;
+    // coop-entrwin (Jep 11-11, playtest item 23, option A): the sender's own floor walk-in apart (the floor's entrance, script 100):
+    // the floor (map * 256 + floor) it walks into, -1000 none, and its place in the shared entrance window (CoopWorldsWalkInRole:
+    // 0 not decided, 1 the lead whose state the merge takes, 2 a walker who arrived within the lead's walk-in).
+    std::int32_t  walk_key;
+    std::uint32_t walk_role;
+    // coop-entrance2 rule 3: when the sender's walk-in began and when this was sent, on its clock (ClockMs; -1 none)
+    std::int64_t  walk_begun_ms;
+    std::int64_t  sent_ms;
+    // coop-memberstage4 (item 3): the sender's own player's member as its copy records it (coop::Member; -1 none kept), in every
+    // mode, so a copy apart learns a member the other changed where it is (MembersHeard: why net).
+    std::int32_t  member;
+    // coop-floorrand: with floor_rand, that floor's build count apart on the sender (CoopWorldsAgreedFloorRand), so a copy
+    // building it after the other's next round counts on from there.
+    std::int32_t  floor_rand_count;
+    std::uint32_t floor_rand_word; // and the link word it counted under (NetplayLinkFloorSeed)
 };
 #pragma pack(pop)
 
@@ -217,24 +315,34 @@ struct SceneView {
     std::int32_t  chara;  // the member it plays
     std::int32_t  motion; // the motion its player plays, and its flags
     std::int32_t  motion_flags;
-    std::uint32_t drawn; // its player is drawn
+    std::uint32_t drawn; // bit 1 (kSceneViewDrawn): its player is drawn; bit 2 (kSceneViewCovered): its screen all black;
+                         // bits 8-15: how black its screen was (CoopScreenBlack, 0 to 128)
 };
 #pragma pack(pop)
 
 static_assert(sizeof(SceneView) != sizeof(Message), "worlds messages are told apart by their size");
 static_assert(sizeof(SceneView) != kCoopWorldsScenePacksBytes && sizeof(Message) != kCoopWorldsScenePacksBytes, "worlds messages are told apart by their size");
 static_assert(sizeof(Progress) != sizeof(Message), "worlds messages are told apart by their size");
+static_assert(sizeof(SceneView) != kCoopWorldsSceneActorsBytes && sizeof(Message) != kCoopWorldsSceneActorsBytes &&
+                  sizeof(Progress) != kCoopWorldsSceneActorsBytes,
+              "worlds messages are told apart by their size"); // coop-sceneactors
 
 // Where a copy is: the town (mode EDIT, its map) or the dungeon floor (mode DUNGEON, the dungeon and
 // its floor); anything else (a load, the title) has map -1.
+// coop-choosing (Jep 11-12, ura): half, on a dungeon floor, which of its two maps (0 the floor, 1 its back half: BtUraDongeon).
+// The back half is another place than the floor: copies merge only in the same half. DC_WORLDS_MUTATE=halves_one (twin): the
+// halves one place, as before (a front and a back copy merge: OUT OF SYNC).
 struct Zone {
     int mode = -1;
     int map = -1;
     int floor = -1;
+    int half = 0;
 };
 
+bool HalvesOne();
+
 bool operator==(const Zone &a, const Zone &b) {
-    return a.mode == b.mode && a.map == b.map && a.floor == b.floor;
+    return a.mode == b.mode && a.map == b.map && a.floor == b.floor && (a.half == b.half || HalvesOne());
 }
 
 // coop-localfix2: the zone this copy is in and when it came into it.
@@ -243,6 +351,16 @@ struct Arrival {
     std::chrono::steady_clock::time_point at{};
 };
 Arrival g_arrival;
+
+// coop-whereis: each player's last presence, by its player number (entry k player k + 1), for the where-is-everyone list:
+// its zone, what it does there, and when it was heard. Kept per player, never as "the other copy".
+struct Heard {
+    bool                                  set = false;
+    Zone                                  zone;
+    int                                   activity = 0;
+    std::chrono::steady_clock::time_point at{};
+};
+Heard g_heard[coop::kMaxPlayers];
 
 struct State {
     bool         apart = false;
@@ -302,7 +420,16 @@ struct State {
     std::uint32_t peer_floor_rand = 0;
     int           peer_floor_rand_map = -1;
     int           peer_floor_rand_floor = -1;
+    int           peer_floor_rand_count = 0; // coop-floorrand (Message::floor_rand_count)
     bool          peer_floor_hold = false; // coop-localfix (Message::floor_hold)
+    int           peer_walk_key = -1000; // coop-entrwin: the other copy's own walk-in apart (Message::walk_key, walk_role)
+    int           peer_walk_role = 0;
+    // coop-entrance2 rule 3: the other's walk-in start on its clock (Message::walk_begun_ms), and the least (arrival here - its
+    // send) over its presences: its clock to this one's plus the quickest trip (a message held by a busy copy counts as no less)
+    long long     peer_walk_begun_ms = -1;
+    long long     peer_clock_delta = LLONG_MAX;
+    int           peer_player = 0;
+    int           sent_walk_role = -1;
     // coop-dungeonjoin: where the other copy's player last stood on a floor (Message::has_pos 2), and its member.
     struct {
         bool  set = false;
@@ -357,6 +484,25 @@ struct State {
     // Hello from the other with no word of its own apart play (a copy that came back new, not one that played on).
     bool                                  dropped = false;
     std::chrono::steady_clock::time_point fresh_wait_since{};
+    // coop-hostquit: apart with the link down, this copy's ticks of play since it last heard the other copy (a presence or its
+    // keepalive's word); past kGoneTicks (and kGoneMs) the other is gone, as a drop of the link says (CoopWorldsPeerGone).
+    int                                   quiet_ticks = 0;
+    std::chrono::steady_clock::time_point quiet_since{};
+    bool                                  quiet_on = false; // the watch runs (apart, the link down, the other not yet gone)
+    // coop-hostquit: a quit heard while this copy still plays its last linked ticks up to the split (the other split first, its
+    // copy a few ticks ahead): taken once this copy is apart too (0: none held).
+    int                                   quit_held_player = 0;
+    bool                                  quit_held_ended = false;
+    int                                   quit_held_ticks = 0;
+    const char                           *quit_held_why = "quit their game";
+    // the check-in on the other's silence (QuietWatchTick): probes sent this round, when the next is due, and the transport's
+    // counts as the check began (UDP resets) and when a datagram last came (UDP: anyone's)
+    int                                   probes_sent = 0;
+    int                                   alive_words = 0; // the other's keepalive words since its last presence (its game not ticking)
+    std::chrono::steady_clock::time_point probe_next{};
+    long long                             probe_resets = 0;
+    long long                             probe_heard = 0;
+    std::chrono::steady_clock::time_point probe_heard_at{};
     bool                                  was_linked = false; // the lockstep ran on the tick before (NetplayPartnerLinked)
     int                                   apart_hook_ticks = 0; // ticks of play apart (the party and script item hooks)
 
@@ -414,12 +560,17 @@ bool On() {
 }
 
 int Player();
+int  WalkInKey(); // coop-entrwin (below)
+long long WalkInBegunMs(); // coop-entrance2 rule 3 (below)
+long long ClockMs();
+void WalkInTick();
+bool OwnWalkInRuns();
 
 // coop-dungeonp2: player 2's copy apart, with separate bags, plays from her bag; together it is back.
 bool Mutated(const char *feature);
 
 const char *FloorName(int map, int to); // coop-floorgate (below)
-void        CallReceived(int from, int map, int to, int floor);
+void        CallReceived(int from, int map, int to, int floor, int force_mine = -1);
 void        CallAnswered(int map, int to, int answer);
 void        CallTick();
 void        CallWithdrawn(int from); // coop-gatepopup (below)
@@ -434,6 +585,7 @@ void        Withdrawn(int asker); // coop-gatepopup
 void        AskApart(int asker, int row, bool cave);
 void        Answered(int asked, int row, bool cave, int answer);
 void        Close(int answer);
+void        WatchJoiners(); // coop-joinwarp (the test line)
 } // namespace doorgate
 
 // coop-mergebags: a catch-up merge under way on this copy, from the host's checkpoint to the lockstep (its waits between
@@ -443,6 +595,16 @@ bool CatchupUnderWay() {
     return Mutated("scan_in_catchup") ? NetplayCatchingUp() : NetplayCatchUnderWay();
 }
 
+// coop-016 (option A): her stay waiting for her own menu's close (CoopWorldsStayOnFloor, below).
+struct StayDeferred {
+    bool  on = false;
+    int   chara = -1;
+    bool  placed = false;
+    float pos[4] = {};
+    long long since = 0;
+    int   steps = 0; // (her menu's steps since the split: her copy holds, its link tick stands)
+};
+StayDeferred g_stay;
 void FollowApart() {
     // Only while no link is up or catching up: a merge under way (its first try may drop, a catch-up replays) must
     // step both copies from the same bags, and a save on the way (CoopSaveBagsHome) must not swap them back in.
@@ -451,7 +613,15 @@ void FollowApart() {
     // DC_WORLDS_MUTATE=swap_in_catchup (twin): only the replay's own ticks keep the bags home, as before.
     const bool catching = Mutated("swap_in_catchup") ? NetplayCatchingUp() : NetplayCatchUnderWay();
 
-    slotsync::SwapBags(On() && g_state.apart && !g_state.up && !catching && Player() == 2 && coop::OwnBags());
+    // coop-016 (option A): her stay waiting for her menu's close keeps her bag where her menu reads it (her own, beside the pack); a
+    // link up first (a merge) drops the wait.
+    if (g_stay.on && (g_state.up || !g_state.apart)) {
+        g_stay.on = false;
+        std::fprintf(stderr, "worlds: staying: the waiting stay is dropped (%s): player %d is the partner again, her menu still open\n",
+                     g_state.up ? "linked again" : "no longer apart", Player());
+        std::fflush(stderr);
+    }
+    slotsync::SwapBags(On() && g_state.apart && !g_state.up && !catching && Player() == 2 && coop::OwnBags() && !g_stay.on);
 }
 
 // A merge whose link goes down this soon did not hold (one copy linked, the other did not): apart again.
@@ -546,9 +716,14 @@ Zone Here() {
         zone.floor = BtGameModeFlag == BT_GAME_MODE_ENTRANCE_MENU || g_state.floor_hold ? -1
                      : started || CoopWorldsPickJoining() || CoopWorldsSceneJoining() != 0 ? UserStatus->cur_floor
                                                                                           : -2;
+        zone.half = zone.floor >= 0 && BtUraDongeon != 0 ? 1 : 0; // coop-choosing: the floor's back half
     }
 
     return zone;
+}
+
+bool HalvesOne() {
+    return Mutated("halves_one");
 }
 
 // coop-houseenter (Jep, 2026-10-27: "P2 being in the mayor's house and then P1 entering caused P2 to get a black splash
@@ -595,7 +770,7 @@ void Describe(const Zone &zone, char *out, std::size_t size) {
     } else if (zone.mode == GAME_MODE_EDIT && zone.map >= 0) {
         std::snprintf(out, size, "in town (map %d)", zone.map);
     } else if (zone.mode == GAME_MODE_DUNGEON && zone.map >= 0 && zone.floor >= 0) {
-        std::snprintf(out, size, "in %s, floor %d", DungeonName(zone.map), zone.floor + 1);
+        std::snprintf(out, size, "in %s, floor %d%s", DungeonName(zone.map), zone.floor + 1, zone.half != 0 ? " (its back half)" : "");
     } else if (zone.mode == GAME_MODE_DUNGEON && zone.map >= 0) {
         std::snprintf(out, size, "at %s's entrance", DungeonName(zone.map));
     } else {
@@ -629,6 +804,15 @@ bool ApartBuilds() {
 // gate's script runs, so both copies said the same floor and merged there. It is not ready until it has left that floor
 // (map * 256 + floor; -1 when none). DC_WORLDS_MUTATE=gate_merge_back (twin): ready at once, as before.
 int g_floor_leaving = -1;
+// coop-readyscreen (A): this copy plays an item scene the others were left out of, apart on the same floor (ItemSceneSplit): not ready to
+// merge until its scene has begun and is over (0 none, 1 waiting for it to begin, 2 under way).
+int  g_item_scene_hold = 0;
+int  g_item_scene_script = -1; // (and its scene's script: begun when that script runs, so a member change before it is not the scene)
+bool g_item_left = false; // (and this copy was left out of one, apart on its floor: x-item-scene -Case leftapart's walk lines)
+bool g_ura_leaving = false; // coop-choosing: this copy goes through its floor's back-half door (MergeReady)
+int  g_ura_from = 0;        // the half it goes from
+bool g_back_presence_fresh = true; // a presence sent since its back half's scene ended (MergeReady)
+bool g_half_scene = false;         // coop-tram: this copy swapped halves of its floor and its door scene runs on (MergeReady)
 
 // coop-mayorhouse (Jep's 2026-10-27 playtest: P2 into the mayor's house while P1 talked to the mayor, or in his first-visit
 // scene, sat on black till he was done, 19.6 and 47 s): this copy's player in a talk or an event inside a building. A merge
@@ -715,7 +899,7 @@ bool DoorEventApart() {
 }
 
 bool BusyOutdoors() {
-    if (DoorEventApart()) {
+    if (DoorEventApart() || ::CoopWorldsPartSceneAlone()) { // coop-windmill
         return true;
     }
     return mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && GameMode == ED_MODE_EVENT && Player() == 2 && g_state.apart && !NetplayStayerMerge() &&
@@ -763,10 +947,30 @@ static bool MergeHeldForTestMenu() {
     return build ? !ApartBuilds() : !(EdInteriorFlag == 0 && (GameMode == ED_MODE_MENU_INIT || GameMode == ED_MODE_MENU));
 }
 
+} // namespace
+
+bool CoopWorldsArriveHoldsMerge(); // coop-firstvisit (below)
+void ArriveTick();                 // coop-firstvisit (below)
+void ArrivePad(int *buttons);      // coop-firstvisit
+bool ArriveBoxHere();              // coop-firstvisit
+void ArriveHeard(int from, int town, int event, int step, int d);
+
+namespace {
+
 bool MergeReady() {
     Zone here = Here();
 
     if (MergeHeldForTestMenu()) {
+        return false;
+    }
+    // coop-firstvisit: a held story arrival (its starter in its box, or a joiner held for it) merges once it runs.
+    if (CoopWorldsArriveHoldsMerge()) {
+        return false;
+    }
+    // coop-entrwin test hook (DC_WORLDS_TEST_LEAD_HOLDS_LINK=1, x-entrwin-closed): the entrance window's lead is not ready to merge while
+    // its own walk-in runs, so the walker's join comes after the lead's walk-in has ended: the window closes before the link
+    // (WalkInTick), every run, as it did by itself with the walker a moment before the lead's end (the probe's OUT OF SYNC).
+    if (static const bool lead_holds = TestEnvOn("DC_WORLDS_TEST_LEAD_HOLDS_LINK"); lead_holds && CoopWorldsWalkInRole() == 1 && OwnWalkInRuns()) {
         return false;
     }
 
@@ -781,6 +985,88 @@ bool MergeReady() {
                (Player() == 2 || (g_state.progress_out.empty() && (mode != GAME_MODE_EDIT || GameMode == ED_MODE_WALK)));
     }
 
+    // coop-readyscreen (A, Jep 11-13: "the decliner keeps playing"): a copy playing the item scene the others were left out of merges
+    // once its scene is over (the others play on, apart, on the same floor meanwhile); the merge then goes by its state (it stayed).
+    // DC_WORLDS_MUTATE=item_split_merge_now (twin): at once, mid-scene.
+    if (g_item_scene_hold != 0 && !Mutated("item_split_merge_now")) {
+        const bool runs = mode == GAME_MODE_DUNGEON && (!CoopPlainPlay() || BtEventMode != 0);
+
+        if (g_item_scene_hold == 1 && runs && BtEventMode != 0 && BtEventInfo.running_script_no == g_item_scene_script) {
+            g_item_scene_hold = 2;
+            Log("item scene: this copy's scene has begun: no merge till it is over");
+        } else if (g_item_scene_hold == 2 && !runs) {
+            g_item_scene_hold = 0;
+            Log("item scene: this copy's scene is over: ready to merge");
+        }
+        if (g_item_scene_hold != 0) {
+            return false;
+        }
+    }
+
+    // coop-choosing / coop-backmerge (x-back-half -Away: player 1 came later through the unlocked door while player 2 played the back
+    // half): a copy that has swapped into its floor's back half plays the rest of that door's scene after the swap (its fade in, its
+    // camera, its body put on the back half's spot by the scene's end). Merged mid-scene, by the other's state, its player stood where
+    // the scene had parked it, over the cave's water in the back half: the cave's fall (script 5, 40 life) took it to the floor's start,
+    // twice. Not ready while a script or scene runs there: it merges once it plays, its own scene its arrival's cover.
+    // DC_WORLDS_MUTATE=merge_in_back_scene (twin): at once, as before.
+    if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && BtUraDongeon != 0 && (!CoopPlainPlay() || BtEventMode != 0) &&
+        !Mutated("merge_in_back_scene")) {
+        g_back_presence_fresh = false;
+        return false;
+    }
+    // coop-tram (Jep's 0.1.6 playtest: "P2 watches P1's animation finish where they ride the tram"): the way back is the same door
+    // and the same scene (Divine Beast Cave's tram, program 200's ride: its fade, the tram's model dun/ex/urac01.chr, the ride, then
+    // _SET_URA_DUNGEON swaps the half mid-scene, its fade in, _RESET_CAMERA, _SET_FLOOR_TITLE), but the rule above held only in the
+    // back half: riding out to the front, the rest of the ride played with BtUraDongeon 0 and the merge was taken mid-scene (his
+    // log: "the state set is taken mid-scene (script 200, task 401)"), so her copy took his ride's state and played its end. Any
+    // half swap on one floor holds the merge until its scene is over, either way, and a presence from the spot it plays from.
+    // DC_WORLDS_MUTATE=merge_in_front_scene (twin): the front half as before (merged mid-scene).
+    {
+        static int half_key = -1;
+        const int  key = mode == GAME_MODE_DUNGEON && UserStatus != nullptr ? (selectMapNo * 256 + UserStatus->cur_floor) * 2 + (BtUraDongeon != 0 ? 1 : 0) : -1;
+
+        if (key >= 0 && half_key >= 0 && key / 2 == half_key / 2 && key != half_key) {
+            g_half_scene = !Mutated("merge_in_front_scene");
+            Log(g_half_scene ? "half swap: this copy's door scene goes on in its new half: no merge till it is over"
+                             : "half swap: this copy's door scene goes on in its new half, the merge not held (merge_in_front_scene)");
+        }
+        // (the twin's own line: its copy turns ready mid-ride in the half where the other plays, a merge mid-scene to come)
+        static int unheld_key = -1;
+
+        if (key >= 0 && half_key >= 0 && key / 2 == half_key / 2 && key != half_key && Mutated("merge_in_front_scene")) {
+            unheld_key = key;
+        }
+        if (unheld_key >= 0 && key == unheld_key && (!CoopPlainPlay() || BtEventMode != 0) && g_state.peer_heard && Here() == g_state.peer) {
+            unheld_key = -1;
+            Log("half swap: the merge not held mid-ride where the other plays (merge_in_front_scene)");
+        }
+        half_key = key;
+    }
+    if (g_half_scene) {
+        if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && (!CoopPlainPlay() || BtEventMode != 0)) {
+            g_back_presence_fresh = false;
+            return false;
+        }
+        g_half_scene = false;
+        Log("half swap: this copy's door scene is over: ready to merge once its presence says where it plays");
+    }
+    // (and the scene's end moves its body to the back half's spot: a merge by the other copy's state places this player where its
+    // presence said, so not before a presence has gone with the spot it plays from: a presence from mid-scene is the same fall.
+    // The same twin, merge_in_back_scene: both off. coop-tram: in the front half too after its door's scene: merge_in_front_scene.)
+    if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && (BtUraDongeon != 0 || !Mutated("merge_in_front_scene")) && !g_back_presence_fresh &&
+        !Mutated("merge_in_back_scene")) {
+        return false;
+    }
+
+    // coop-choosing: a copy on its way through its floor's back-half door (CoopWorldsUraEnter) is not ready until it is in the
+    // other half (the half it leaves is where the others play).
+    if (g_ura_leaving) {
+        if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && BtUraDongeon == g_ura_from) {
+            return false;
+        }
+        g_ura_leaving = false;
+    }
+
     if (g_floor_leaving >= 0) {
         if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && selectMapNo * 256 + UserStatus->cur_floor == g_floor_leaving) {
             return false;
@@ -789,12 +1075,13 @@ bool MergeReady() {
         g_floor_leaving = -1;
     }
 
-    // Player 2's progress all acknowledged first: the merge then starts from a host state that has it. Not while this
+    // Player 2's progress all acknowledged first (her slot records and, coop-wave1a, her storage asks too): the merge then starts
+    // from a host state that has it. Not while this
     // copy is still on its way out of the town it left (Jep's 2026-10-24 log: a catch-up merge in Norune while player 1's
     // jump to the cave was under way, then his copy left with the pair together, OUT OF SYNC).
     // coop-floorsnap: both on one floor (floor >= 0) merges too, by the host's snapshot (CoopWorldsFloorJoin);
     // DC_WORLDS_MUTATE=no_floor_join (twin) keeps them apart there, as before.
-    return g_state.apart && !g_state.leaving && g_state.progress_out.empty() && slotsync::Idle() && g_state.peer_heard &&
+    return g_state.apart && !g_state.leaving && g_state.progress_out.empty() && slotsync::Idle() && CoopStorageIdle() && g_state.peer_heard &&
            (here.mode == GAME_MODE_EDIT ||
             // coop-localfix (Jep's 2026-10-26 run: "P2 got locked into a black screen while P1 selected a level and then got entered into
             // P1s level at the same time instead of just being able to select B1 after P1"): not at the entrance's floor menu, where
@@ -807,7 +1094,7 @@ bool MergeReady() {
              // ran as he arrived, the join found her "not in its zone" and reloaded her floor): ready once this copy's floor
              // has played a tick (not "plays now": a knocked-out player alone on it waits on her change screen, and the merge is
              // what brings her partner). DC_WORLDS_MUTATE=floor_merge_in_scene (twin): during its opening too, as before.
-             (((g_floor_played && (!Mutated("floor_merge_needs_play") || (gameTask == GAME_TASK_PLAY && BtEventMode == 0))) || Mutated("floor_merge_in_scene"))))) &&
+             (((g_floor_played && (!Mutated("floor_merge_needs_play") || (CoopPlainPlay() && BtEventMode == 0))) || Mutated("floor_merge_in_scene"))))) &&
            // coop-localfix: inside a building, once its room is up (its presence then carries where she stands, for the merge's
            // stand: TownMergedIndoors). DC_COOP_MUTATE=room_merge_beside (twin): from the door's opening on, as before.
            (here.mode != GAME_MODE_EDIT || here.floor <= 0 || EdInteriorFlag != 0 || coop::Mutated("room_merge_beside")) &&
@@ -822,6 +1109,11 @@ bool MergeReady() {
 }
 
 void SendPresence() {
+    // coop-lastseen: DC_COOP_MUTATE=whereis_scene_mute (twin): apart, no presence while this copy's player is in a scene (the
+    // bug the w-whereis split row guards: the others' lists said "last seen" through a long scene).
+    if (g_state.apart && SceneHere() && coop::Mutated("whereis_scene_mute")) {
+        return;
+    }
     // coop-stayerhello: a stayer bit changed since the last Hello (there first a moment ago) goes in a Hello ahead of this
     // presence, which may say ready: the other copy links on that, by the Hello it holds.
     NetplayHelloSaysStayer();
@@ -854,6 +1146,17 @@ void SendPresence() {
     }
 
     message.floor_hold = g_state.floor_hold ? 1u : 0u;
+    message.half = here.half;
+    if (mode == GAME_MODE_DUNGEON && CoopPlainPlay() && BtEventMode == 0) {
+        g_back_presence_fresh = true; // (coop-choosing: this presence says where it plays from now)
+    }
+    message.heard_half = g_state.peer.half;
+    // coop-memberstage4: none kept for this copy's player (a start no lobby seeded: a test's --jump, a state file's), the body it
+    // is drawn as on a floor stands for it, as the heard floor body did before (t-zonechara-apart-trade-p2: her ask across zones).
+    message.member = coop::Member(Player() - 1);
+    if (message.member < 0 && UserStatus != nullptr && mode == GAME_MODE_DUNGEON && !coop::Mutated("heard_member_unseeded")) {
+        message.member = coop::OwnBodyChara(UserStatus->cur_chara);
+    }
 
     // coop-dungeonjoin: on a floor, where this copy's player stands and who it is (a merge by her state puts player 1's
     // member where his copy has him: CoopWorldsFloorBecomePartner).
@@ -875,11 +1178,31 @@ void SendPresence() {
         message.floor_rand = NetplayFloorBuildRand();
         message.floor_rand_map = built_map;
         message.floor_rand_floor = built_floor;
+        message.floor_rand_count = FloorBuildCountNow(&message.floor_rand_word);
     }
 
     message.busy = BusyHere() ? 1u : SceneHere() ? 2u : BuildsApart() ? 3u : TalkHere() ? 4u : 0u; // (coop-stage4 4e part 1: 4 in a talk, which merges)
+    message.activity = (std::uint8_t) CoopWorldsOwnActivity(); // coop-whereis
+    message.walk_key = WalkInKey(); // coop-entrwin
+    message.walk_role = (std::uint32_t) CoopWorldsWalkInRole();
+    message.walk_begun_ms = WalkInBegunMs();
+    message.sent_ms = ClockMs();
+    g_state.sent_walk_role = (int) message.walk_role;
     // coop-mayorhouse (coop-scenejoin: 2 in a scene, which merges; coop-exitscene: outdoors too; coop-dunfreeze: her town event apart is busy)
 
+    static const bool gaps = TestEnv("DC_COOP_TEST_WHEREIS") != nullptr; // coop-lastseen: each gap over a second (the test's)
+
+    if (gaps) {
+        static auto last = std::chrono::steady_clock::time_point{};
+        const auto  now = std::chrono::steady_clock::now();
+
+        if (last != std::chrono::steady_clock::time_point{} && now - last > std::chrono::milliseconds(1000)) {
+            std::fprintf(stderr, "coop-whereis: test: presence sent after %lld ms (activity %d, apart %d)\n",
+                         (long long) std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count(), (int) message.activity, g_state.apart ? 1 : 0);
+            std::fflush(stderr);
+        }
+        last = now;
+    }
     NetSocketSend(&message, sizeof message);
     statsync::Send(); // coop-apartstats: this copy's characters now, for the merge
     g_state.sent_here = here;
@@ -931,9 +1254,15 @@ void UpdateStatus() {
 int  g_town_starter = 1;
 int  g_reenter_building = 0; // the building both go back into after a merge there (its InteriorId), else 0
 bool g_reentering = false;   // that walk in under way: GotoInterior takes both, no split
+int  g_door_alone_building = 0; // coop-readyscreen: a story door's START NOW with nobody along: the opener's way in alone (below)
+int  g_door_alone_by = 0;       // (and whose)
+void ReadyKeysReset();          // coop-readyscreen (below)
+void ReadyHoldBusy();           // coop-askwait (below)
 int  g_door_yes_building = 0; // coop-gatepopup: the house both go into on a door call's yes (doorgate::DoorYes), the same way
 bool g_town_starter_ran = false;
 int  g_last_leaver = 1;
+// coop-doorcam: whose pad the town's walk (EdMoveChara) reads together: player 1's, the game's player (Toan).
+constexpr int kTownWalkPlayer = 1;
 bool g_flags_local = false; // coop-floorscene2: CoopWorldsLocalFlags
 
 // The last merge has held: its 15 s (kMergeHoldMs) have passed, or a split came on the pair's shared tick, which only a
@@ -978,6 +1307,25 @@ void SplitTo(const Zone &to, int next_map, bool stays, int leaver) {
     // only comes on a held link, as a floor's leaving does (FloorSplit). DC_WORLDS_MUTATE=door_split_unheld (twin): as before.
     if (!Mutated("door_split_unheld")) {
         MergeHeld();
+    }
+    // coop-doorcam (Jep's rc1 playtest: P1 went into the mayor's house, P2 outside, "P2's camera spun toward the house"; her log
+    // "after the split her eye moved at most 7.0 in a frame", her view 6.0 degrees a frame, none before): the town walk's swing
+    // of the game camera round behind its walker (EdMoveChara's rot_count, EdMoveCharaRotCount: 30 steps of 0.1 radians from the
+    // walker's button 0x20) is the walker's own camera state. Together the walk reads player 1's pad (the game's player), so a
+    // swing running at the split is player 1's. On every other player's copy the game camera is that copy's own player's from
+    // here (TownPlacePlayerAtPartner hands it their pose), and it went on swinging: 0.1 radians at her 70 is the 7.0 a frame,
+    // round to behind her, so on toward the house she faced. That player's camera keeps no swing of its own (hers has no
+    // button swing), so none goes on; player 1's copy keeps its own. Every split, either way, in a town or a building.
+    // DC_WORLDS_MUTATE=split_swing_kept (twin): the swing goes on on every copy, as before. DC_WORLDS_MUTATE=split_swing_all
+    // (twin): it stops on player 1's copy too, his own swing taken from him (t-doorcam-p2in: another's door turns his camera).
+    if (mode == GAME_MODE_EDIT && (NetplayLocalPlayer() != kTownWalkPlayer || Mutated("split_swing_all")) && EdMoveCharaRotCount != 0) {
+        const bool kept = Mutated("split_swing_kept");
+
+        std::fprintf(stderr, "worlds: split: player %d's camera swing behind (%d steps left) %s on this copy (player %d)\n", kTownWalkPlayer,
+                     EdMoveCharaRotCount, kept ? "goes on (split_swing_kept)" : "stops", NetplayLocalPlayer());
+        if (!kept) {
+            EdMoveCharaRotCount = 0;
+        }
     }
     g_state.apart = true;
     g_state.dropped = false; // coop-apartsync
@@ -1153,14 +1501,17 @@ enum Region : int {
     kP2Gilda,
     kRing,       // coop-worldkeys: the party's key ring (coop::g_ring, in no bag): item and its uses
     kQuest,      // coop-pt1111e: each quest's progress (quest/framework.cpp), its name and JSON (QuestSlotRead)
+    kFishGain,   // coop-fishpools2: each pool's changes made on each player's copy (coop::FishSlotRead 0: written on one copy alone, no clash)
+    kFishLog,    // coop-fishpools2: each player's own fishing log entries (coop::FishSlotRead 1: only that player's copy catches into it)
     kRegions
 };
 
 const char *const kRegionNames[kRegions] = {"storage item", "storage weapon", "storage attachment", "bag item", "bag header",
                                             "weapon",       "equipped weapon", "carried attachment", "gilda", "Georama plot",
                                             "Georama part", "Georama request", "Georama NPC",  "Georama chip",
-                                            "player 2 bag item", "player 2 bag header", "player 2 gilda", "key ring", "quest"};
-const int kRegionCount[kRegions] = {60, 30, 30, 103, 1, 66, 6, 43, 1, 6 * 24, 6 * 130, 6, 6 * 20, 6 * 128, 103, 1, 1, 103, 16};
+                                            "player 2 bag item", "player 2 bag header", "player 2 gilda", "key ring", "quest",
+                                            "fishing points", "fishing log"};
+const int kRegionCount[kRegions] = {60, 30, 30, 103, 1, 66, 6, 43, 1, 6 * 24, 6 * 130, 6, 6 * 20, 6 * 128, 103, 1, 1, 103, 16, 6 * 6, 6 * 64};
 
 #pragma pack(push, 1)
 struct SlotMsg {
@@ -1234,6 +1585,12 @@ void SwapBags(bool want) {
 
     std::swap(party->item_pack, coop::g_bag.pack);
     std::swap(party->money, coop::g_bag.gilda);
+    // coop-bagoverflow: and its overflow flag (retail's overflow_flag, the party status's): her bag past its room apart sets the
+    // game's flag on her copy (her menu's throw-away there), which goes back into her bag with it, so at the merge it is hers and
+    // never opens player 1's menu. DC_WORLDS_MUTATE=bag_swap_flag_kept (twin): the flag stays in the status, as before.
+    if (!Mutated("bag_swap_flag_kept")) {
+        std::swap(party->overflow_flag, coop::g_bag.overflow);
+    }
 
     for (int i = 0; i < 3; i++) {
         std::swap(party->active_item_vol[i], coop::g_bag.active_item_vol[i]);
@@ -1574,6 +1931,9 @@ int Read(int region, int index, std::uint8_t *out) {
             return 2;
         case kQuest:
             return QuestSlotRead(index, out);
+        case kFishGain:
+        case kFishLog:
+            return coop::FishSlotRead(region == kFishGain ? 0 : 1, index, out);
         default:
             return 0;
     }
@@ -1654,6 +2014,10 @@ void Write(int region, int index, const std::uint8_t *in) {
             break;
         case kQuest:
             QuestSlotWrite(in);
+            break;
+        case kFishGain:
+        case kFishLog:
+            coop::FishSlotWrite(region == kFishGain ? 0 : 1, index, in);
             break;
         default:
             break;
@@ -2032,7 +2396,7 @@ void Take(const SlotMsg &msg) {
         } else if (theirs) {
             char notice[96];
 
-            std::snprintf(notice, sizeof notice, "Player %u got there first (%s)", msg.player, name);
+            std::snprintf(notice, sizeof notice, "%s got there first (%s)", NetplayShownName((int) msg.player).c_str(), name);
             NetplayShowNotice(notice);
         }
     }
@@ -2433,11 +2797,22 @@ void QueueProgress(std::int32_t what, std::int32_t a, std::int32_t b, std::int32
     } else if (what == kWhatGate) {
         std::fprintf(stderr, "worlds: progress %u for player %d: gate open in dungeon %d floor %d (clock %lld ms)\n", progress.id, 3 - Player(), c, a,
                      ClockMs());
+    } else if (what == kWhatUra) {
+        std::fprintf(stderr, "worlds: progress %u for player %d: back half unlocked in dungeon %d floor %d (clock %lld ms)\n", progress.id, 3 - Player(), c,
+                     a, ClockMs());
     } else if (what == kWhatGain) {
         std::fprintf(stderr, "worlds: progress %u for player %d: gain %d of %d by %d (clock %lld ms)\n", progress.id, 3 - Player(), a, b, c, ClockMs());
     } else if (what == kWhatCall) {
         std::fprintf(stderr, "worlds: progress %u for player %d: a call to dungeon %d floor %d from floor %d (clock %lld ms)\n", progress.id, 3 - Player(), c,
                      a, d, ClockMs());
+    } else if (what == kWhatArrive) {
+        std::fprintf(stderr, "worlds: progress %u for player %d: story arrival in map %d (event %d) step %d, starter %d (clock %lld ms)\n", progress.id,
+                     3 - Player(), a, b, c, d, ClockMs());
+    } else if (what == kWhatNotice) {
+        std::fprintf(stderr, "worlds: progress %u for player %d: player %d found item %d (%s, dungeon %d floor %d) (clock %lld ms)\n", progress.id, 3 - Player(),
+                     Player(), a, b != 0 ? "every player hears" : "its floor hears", c, d, ClockMs());
+    } else if (what == kWhatTrade) {
+        std::fprintf(stderr, "worlds: progress %u for player %d: trade step %d (%d %d %d) (clock %lld ms)\n", progress.id, 3 - Player(), d, a, b, c, ClockMs());
     } else if (what == kWhatDoorCall) {
         std::fprintf(stderr, "worlds: progress %u for player %d: a call from %s (clock %lld ms)\n", progress.id, 3 - Player(),
                      b != 0 ? "the cave door" : "a room's door", ClockMs());
@@ -2605,6 +2980,10 @@ const char *ApplyProgress(const std::int32_t delta[5]) {
         // coop-gateopen: the gate the other player opened stays open here (its floor, built now or later).
         coop::GateOpenFromPeer(delta[3], delta[1]);
         std::snprintf(line, sizeof line, "applied: gate open in dungeon %d floor %d (clock %lld ms)", delta[3], delta[1], ClockMs());
+    } else if (delta[0] == kWhatUra) {
+        // coop-choosing: the back half the other player unlocked stays unlocked here (its floor, built now or later).
+        coop::UraOpenFromPeer(delta[3], delta[1], delta[2], delta[4]);
+        std::snprintf(line, sizeof line, "applied: back half unlocked in dungeon %d floor %d (clock %lld ms)", delta[3], delta[1], ClockMs());
     } else if (delta[0] == kWhatSlot) {
         return slotsync::Replay((std::uint32_t) delta[1]);
     } else if (delta[0] == kWhatLoaded) {
@@ -2618,7 +2997,14 @@ const char *ApplyProgress(const std::int32_t delta[5]) {
         std::snprintf(line, sizeof line, "applied: a call to dungeon %d floor %d (a question for this player)", delta[3], delta[1]);
     } else if (delta[0] == kWhatCallAnswer) {
         std::snprintf(line, sizeof line, "applied: the call to dungeon %d floor %d answered %s", delta[3], delta[1],
-                      delta[2] == 1 ? "coming" : delta[2] == 2 ? "busy" : "not now");
+                      delta[2] == 1 ? "coming" : delta[2] == 2 ? "busy" : delta[2] == 4 ? "swap" : delta[2] == 3 ? "no answer" : delta[2] == 5 ? "gave up (its go lapsed)" : "not now");
+    } else if (delta[0] == kWhatArrive) {
+        std::snprintf(line, sizeof line, "applied: story arrival in map %d (event %d) step %d, starter %d (a question, this copy's side)", delta[1], delta[2],
+                      delta[3], delta[4]);
+    } else if (delta[0] == kWhatNotice) {
+        std::snprintf(line, sizeof line, "applied: item %d found (a notice only)", delta[1]);
+    } else if (delta[0] == kWhatTrade) {
+        std::snprintf(line, sizeof line, "applied: trade step %d (%d %d %d) (a question, this copy's side)", delta[4], delta[1], delta[2], delta[3]);
     } else if (delta[0] == kWhatDoorCall) {
         std::snprintf(line, sizeof line, "applied: a call from %s (a notice only)", delta[2] != 0 ? "the cave door" : "a room's door");
     } else if (delta[0] == kWhatDoorAnswer) {
@@ -2634,6 +3020,12 @@ const char *ApplyProgress(const std::int32_t delta[5]) {
 }
 
 // Either copy: apply the other's progress once (each world is alone while apart, so nothing is in lockstep), then ack.
+// coop-notices: this copy's player stands on that dungeon floor now (its front or back half; not the dungeon's entrance menu).
+bool OnFloor(int dungeon, int floor) {
+    return dungeon >= 0 && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && BtGameModeFlag != BT_GAME_MODE_ENTRANCE_MENU && selectMapNo == dungeon &&
+           UserStatus->cur_floor == floor;
+}
+
 void TakeProgress(const Progress &progress) {
     // coop-catchuprace: her progress that reaches the host after its catch-up's last blob (it names J), or after its merge tick,
     // rides no blob to her replay: it goes by the lockstep (below), not dropped once he has merged (she took his state at the
@@ -2643,6 +3035,27 @@ void TakeProgress(const Progress &progress) {
 
     if (Player() == 0 || (!g_state.apart && !late) || progress.player != (std::uint32_t) (3 - Player())) {
         return; // only apart; a merge waits until neither copy has anything unacknowledged
+    }
+
+    // coop-firstvisit test hook (DC_WORLDS_TEST_PROGRESS_AFTER_TOWN=1, test_scenes' within-a-load row): apart, the other's progress is
+    // taken only once this copy has been seen in a town for a second (its arrival, a first visit's scene included, has begun there):
+    // before that it is neither applied nor acknowledged, so the other copy sends it again (twice a second). Both players reaching
+    // an unseen town within a load of each other then each start its first visit, every run, each mark reaching the other after.
+    if (static const bool after_town = TestEnvOn("DC_WORLDS_TEST_PROGRESS_AFTER_TOWN"); after_town && g_state.apart) {
+        static bool town_seen = false;
+        static auto town_at = std::chrono::steady_clock::now();
+
+        if (mode != GAME_MODE_EDIT) {
+            town_seen = false;
+            return;
+        }
+        if (!town_seen) {
+            town_seen = true;
+            town_at = std::chrono::steady_clock::now();
+        }
+        if (std::chrono::steady_clock::now() - town_at < std::chrono::seconds(1)) {
+            return;
+        }
     }
 
     // coop-flagsync: a flag's older value that lands after a newer one is acknowledged and dropped.
@@ -2666,7 +3079,8 @@ void TakeProgress(const Progress &progress) {
     // that moment and in no blob, so her replay never had it: OUT OF SYNC at the next checksum. Now it goes into the lockstep as
     // his command and both copies apply it on that command's tick (hers from her own, progress_sent). Nobody waits: the command
     // rides his next input frame, and it is acknowledged at once. A call or a door call is a question, no state: as before.
-    const bool state = progress.what != kWhatCall && progress.what != kWhatCallAnswer && progress.what != kWhatDoorCall && progress.what != kWhatDoorAnswer;
+    const bool state = progress.what != kWhatCall && progress.what != kWhatCallAnswer && progress.what != kWhatDoorCall && progress.what != kWhatDoorAnswer &&
+                       progress.what != kWhatTrade && progress.what != kWhatArrive && progress.what != kWhatNotice; // coop-swapcombo; coop-firstvisit; coop-notices
     const bool by_lockstep = !stale && late && state;
 
     if (by_lockstep && g_state.progress_applied.insert(progress.id).second) {
@@ -2687,7 +3101,7 @@ void TakeProgress(const Progress &progress) {
         Log(line);
 
         if (Player() == 1 && progress.what != kWhatCall && progress.what != kWhatCallAnswer && progress.what != kWhatDoorCall &&
-            progress.what != kWhatDoorAnswer) {
+            progress.what != kWhatDoorAnswer && progress.what != kWhatTrade && progress.what != kWhatArrive && progress.what != kWhatNotice) {
             NetplayCatchupDelta(delta); // a catch-up's recording keeps it, so a joiner's replay has it too
         }
 
@@ -2697,11 +3111,19 @@ void TakeProgress(const Progress &progress) {
         if (progress.what == kWhatCall && progress.b == 1) {
             CallWithdrawn((int) progress.player);
         } else if (progress.what == kWhatCall && !Mutated("gather_no_call")) {
-            CallReceived((int) progress.player, progress.c, progress.a, progress.d);
+            // coop-forcefloor: b kForceCallBase + the caller's member: the floor is fenced to a member this copy's player plays.
+            CallReceived((int) progress.player, progress.c, progress.a, progress.d, progress.b >= kForceCallBase ? progress.b - kForceCallBase : -1);
         }
 
         if (progress.what == kWhatCallAnswer) {
             CallAnswered(progress.c, progress.a, progress.b);
+        }
+
+        if (progress.what == kWhatArrive) { // coop-firstvisit: a town's story arrival's gather
+            ArriveHeard((int) progress.player, progress.a, progress.b, progress.c, progress.d);
+        }
+        if (progress.what == kWhatTrade) { // coop-swapcombo: the trade across zones, this copy's side
+            coop::PromptApartTradeHeard((int) progress.player, progress.d, progress.a, progress.b, progress.c);
         }
 
         // coop-doorgate: the other player's door that needs both did not open: come there. DC_WORLDS_MUTATE=door_no_call (twin):
@@ -2724,16 +3146,29 @@ void TakeProgress(const Progress &progress) {
             doorgate::Answered((int) progress.player, progress.a, progress.b != 0, progress.c);
         }
 
+        // coop-notices (Jep 11-18): another player's find, to this player if it is theirs to hear: an Atla (every player's), an item
+        // others hear of (every player's, or the find's floor's: this player on that dungeon floor, its front or back half). Shown in
+        // this player's own message window once free (coop_message ApartNoticeTick). DC_WORLDS_MUTATE=apart_notice_floor_off (twin):
+        // a same-floor find never reaches a player apart on its floor.
         if (progress.what == kWhatAtla) {
-            char notice[64];
-
-            std::snprintf(notice, sizeof notice, "Player %u found an Atla", progress.player);
-            NetplayShowNotice(notice);
+            if (coop::AtlaAudience() == coop::Audience::Everyone || OnFloor(progress.c, progress.d)) {
+                coop::ApartNoticeHeard((int) progress.player, 0, progress.c, progress.a);
+            }
             slotsync::BagDump("atla applied"); // coop-apartstats (DC_WORLDS_TEST_ATLADUMP)
+        }
+        if (progress.what == kWhatNotice) {
+            const bool same = OnFloor(progress.c, progress.d) && !Mutated("apart_notice_floor_off");
+
+            if (progress.b != 0 || same) {
+                coop::ApartNoticeHeard((int) progress.player, 1, progress.c, progress.a);
+            } else {
+                std::fprintf(stderr, "worlds: notice: player %u's item %d (dungeon %d floor %d) is its floor's alone: this copy (player %d, %s) is not told\n",
+                             progress.player, progress.a, progress.c, progress.d, Player(), mode == GAME_MODE_DUNGEON ? "on another floor" : "off the floors");
+            }
         }
         // coop-saveload: DC_COOP_MUTATE=saveload_nonotice (twin): no notice.
         if (progress.what == kWhatLoaded && !coop::Mutated("saveload_nonotice")) {
-            NetplayShowNotice("Player 1 loaded a save");
+            NetplayShowNotice((NetplayShownName(1) + " loaded a save").c_str());
             std::fprintf(stderr, "coop-saveload: notice on player 2's copy (apart): player 1 loaded a save\n");
         }
     }
@@ -2814,7 +3249,8 @@ struct NowMsg {
 #pragma pack(pop)
 
 static_assert(sizeof(NowMsg) != sizeof(Message) && sizeof(NowMsg) != sizeof(Progress) && sizeof(NowMsg) != sizeof(SceneView) &&
-                  sizeof(NowMsg) != sizeof(slotsync::SlotMsg) && sizeof(NowMsg) != kCoopWorldsScenePacksBytes,
+                  sizeof(NowMsg) != sizeof(slotsync::SlotMsg) && sizeof(NowMsg) != kCoopWorldsScenePacksBytes &&
+                  sizeof(NowMsg) != kCoopWorldsSceneActorsBytes && sizeof(slotsync::SlotMsg) != kCoopWorldsSceneActorsBytes,
               "worlds messages are told apart by their size");
 
 struct Sync {
@@ -3590,6 +4026,17 @@ struct SceneViewIn {
 SceneViewIn   g_scene_in;
 std::uint32_t g_scene_seq = 0;
 
+// coop-camflash2 (the cave entry camflash measured: P2 following P1 in saw one frame of the floor from its middle before his
+// walk-in): a copy sends its view from the moment its floor is built, while it is still at the floor menu under the floor's
+// black curtain, its camera the floor's unset one (eye 0 0 56), and on the first tick of its walk-in, whose camera the script
+// has not placed yet (SubCamera still at that eye) under a curtain at 127 of 128. Its own screen showed nothing of those
+// views; hers drew them at her own fade (113 of 128). Each view now carries how black the sender's screen was (the floor's
+// curtain and the event fade, CoopScreenBlack): a view sent all black is no view on the other copy (its screen stays black,
+// as his was), and one drawn there is drawn at least as black as his screen showed it (CoopViewEnd's curtain).
+// DC_WORLDS_MUTATE=scene_view_covered (proof): each view shown at the copy's own fade, as before.
+constexpr std::uint32_t kSceneViewDrawn = 1u;
+constexpr std::uint32_t kSceneViewCovered = 2u;
+
 // This copy, apart, on its way onto a floor it built (the floor's "go dungeon" not come yet) with a scene of that floor under
 // way, the other copy in this dungeon: its view, each tick. The other shows it only while its own floor start is held for
 // that scene (CoopWorldsSceneView); it is a few dozen bytes a tick, for a minute or two.
@@ -3624,7 +4071,10 @@ void SendSceneView() {
     view.motion = CharaMain.motion_no;
     view.motion_flags = CharaMain.motion_flags;
     // (Player 2's copy draws no player until her member plays: CoopWorldsHideDungeonPlayer.)
-    view.drawn = BtActStatus.player_visible != 0 && EdEventInfo.player_draw != 0 && (Player() != 2 || !g_entry_hide) ? 1u : 0u;
+    const int black = CoopScreenBlack();
+
+    view.drawn = (BtActStatus.player_visible != 0 && EdEventInfo.player_draw != 0 && (Player() != 2 || !g_entry_hide) ? kSceneViewDrawn : 0u) |
+                 (black >= 128 ? kSceneViewCovered : 0u) | ((std::uint32_t) black << 8);
     NetSocketSend(&view, sizeof view);
     CoopWorldsScenePicturesSend(kMagic, Player(), view.seq, built_map, built_floor); // coop-tutimages
     // Test hook (DC_COOP_TEST_SCENE_SHOTS=DIR:EVERY, x-floor-join -Case scene): this copy's frame of every EVERY-th view it
@@ -3662,7 +4112,7 @@ const SceneView *FreshSceneView() {
     const auto age = std::chrono::steady_clock::now() - g_scene_in.at;
 
     if (!g_scene_in.set || age > std::chrono::milliseconds(500) || UserStatus == nullptr || g_scene_in.view.map != selectMapNo ||
-        g_scene_in.view.floor != UserStatus->cur_floor) {
+        g_scene_in.view.floor != UserStatus->cur_floor || ((g_scene_in.view.drawn & kSceneViewCovered) != 0 && !Mutated("scene_view_covered"))) {
         return nullptr;
     }
     return &g_scene_in.view;
@@ -3767,20 +4217,330 @@ bool CoopWorldsSceneView(float *eye, float *ref, float *roll) {
     return true;
 }
 
+int CoopWorldsSceneViewBlack() {
+    return CoopWorldsSceneView(nullptr, nullptr, nullptr) ? (int) ((g_scene_in.view.drawn >> 8) & 0xFFu) : 0;
+}
+
+bool CoopWorldsSceneBlackKept() {
+    return !Mutated("scene_view_covered");
+}
+
 unsigned CoopWorldsSceneViewSeq() {
     return CoopWorldsSceneView(nullptr, nullptr, nullptr) ? g_scene_in.view.seq : 0u;
 }
 
 bool CoopWorldsSceneShowsOther() {
-    return CoopWorldsSceneView(nullptr, nullptr, nullptr) && g_scene_in.view.drawn != 0 && UserStatus != nullptr &&
+    return CoopWorldsSceneView(nullptr, nullptr, nullptr) && (g_scene_in.view.drawn & kSceneViewDrawn) != 0 && UserStatus != nullptr &&
            g_scene_in.view.chara == UserStatus->cur_chara && CharaMain.frame != nullptr && CharaMain.frame->reference == 0;
 }
 
 void CoopWorldsArrivalSeenOutTick(); // coop-soakfix3 (below, beside her arrival run as seen)
 
+// coop-joinload: the joiner's copy loading in, until its town's start event has placed its player (logged once, the rows' line).
+bool g_joinload_landing = false;
+
+void CoopWorldsJoinAsLoad(bool stays, int peer_mode, int peer_map, int peer_floor) {
+    char line[240];
+
+    g_state.apart = true;
+    g_state.dropped = false;
+    g_state.fresh_wait_since = {};
+    g_state.merge_pending = false;
+    g_merge_state_in = false;
+    FollowApart();
+    g_state.stayer = stays;
+    g_state.first_here = stays;
+    g_state.first_here_zone = Here();
+    g_state.split_tick = g_state.tick;
+    g_state.split_at = std::chrono::steady_clock::now();
+    g_state.leaving = false;
+    g_state.left_from = Here();
+    g_state.leaving_walk = 0;
+    g_state.peer = Zone{peer_mode, peer_map, peer_floor};
+    g_state.peer_heard = false;
+    g_state.peer_busy = false;
+    g_state.peer_talk = false;
+    g_state.peer_builds = false;
+    g_state.peer_sees_set = false;
+    g_state.peer_ready = false;
+    g_state.presence_due = std::chrono::steady_clock::now();
+    g_joinload_landing = !stays;
+    std::snprintf(line, sizeof line, "joinload: apart from the join on (no link): this copy (player %d) %s; player %d in mode %d map %d floor %d", Player(),
+                  stays ? "stays where it plays" : "loads in as a fresh load", 3 - Player(), peer_mode, peer_map, peer_floor);
+    Log(line);
+    // The deepest floors and the party as this copy holds them now (the joiner's: the host's save it just took), as a split does.
+    if (CUserStatus *floors = UserStatus != nullptr ? UserStatus : SaveData != nullptr ? (CUserStatus *) SaveData->GetDngStatus() : nullptr) {
+        std::memcpy(g_state.floors_told, floors->floor_reached, sizeof g_state.floors_told);
+        g_state.floors_set = true;
+        g_state.party_told = floors->party_size;
+    }
+    slotsync::Begin();
+    UpdateStatus();
+}
+
+void CoopWorldsHereZone(int *zone_mode, int *zone_map, int *zone_floor) {
+    const Zone here = Here();
+
+    *zone_mode = here.mode;
+    *zone_map = here.map;
+    *zone_floor = here.floor;
+}
+
+// coop-hostquit (soakquit, seeds 1475 1741 1600): apart, the link is down and only this channel crosses: a copy that went away
+// (its game closed, crashed, or its player quit) told nobody, and the other copy played on apart for good, its merge never to
+// come. Two ways now reach it:
+// - Its leaving (Quit Game, or its game closing) is said on this channel and acknowledged (CoopWorldsSayLeft, kQuit/kLeftAck).
+// - Its silence is checked in on (Jep's rule, 2026-11-17: never a drop from silence alone; a slow PC, a long load or a short
+//   network hiccup must never count). Quiet for kSuspectTicks of this copy's own play and kSuspectMs, this copy asks: kProbes
+//   probes, the gaps between them growing (kProbeGapMs), and any word from the other at any point (a presence, a probe's
+//   answer, or its keepalive's word while its game loads or stalls: CoopWorldsKeepaliveApart) ends the check. Unanswered,
+//   the transport is asked too (NetSocketPeerTransport): the other is gone only when it says the connection is closed (Steam's
+//   session closed or failed; or the system's word that a datagram found no one at the other's UDP port), or, where it cannot
+//   tell (UDP with no such word), after kUnknownSilentMs with no datagram from anyone. Then "<name> has left" and this copy
+//   plays on alone, as a dropped link leaves it. A connection that still says open keeps the check going, never a drop.
+// Counted in this copy's ticks as well as milliseconds, so this copy's own load or slow frames never count against the other.
+// DC_WORLDS_MUTATE=apart_silence_unwatched (twin): no check at all; apart_drop_on_silence (twin): the first landing's rule, a
+// drop after 300 ticks and 5 s of silence, no probe, no transport, and no keepalive word.
+constexpr int kSuspectTicks = 120;
+constexpr int kSuspectMs = 2000;
+constexpr int kProbes = 5;
+constexpr int kProbeGapMs[kProbes] = {500, 1000, 2000, 4000, 2000}; // after each probe; the last: the wait for its answer
+constexpr int kGoneTicksAtLeast = 300; // never gone before 5 s of this copy's play with nothing heard
+constexpr int kUnknownSilentMs = 30000;
+
+static std::atomic<bool>      g_alive_apart{false};
+static std::atomic<int>       g_alive_player{0};
+static std::atomic<long long> g_alive_tick_ms{0};
+
+static long long AliveNowMs() {
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void SendWord(std::uint32_t kind, std::uint32_t seq = 0, std::uint32_t ready = 0) {
+    Message message{};
+
+    message.magic = kMagic;
+    message.player = (std::uint32_t) Player();
+    message.kind = kind;
+    message.seq = seq;
+    message.ready = ready;
+    NetSocketSend(&message, sizeof message);
+}
+
+// The other copy heard (any word of its): the quiet count starts again and a check under way ends.
+static void CheckInHeard(const char *what) {
+    if (g_state.probes_sent > 0) {
+        char line[160];
+
+        std::snprintf(line, sizeof line, "apart: player %d answered the check-in (%s) after %d probes: still here", 3 - Player(), what, g_state.probes_sent);
+        Log(line);
+    }
+    g_state.quiet_ticks = 0;
+    g_state.quiet_since = std::chrono::steady_clock::now();
+    g_state.probes_sent = 0;
+}
+
+static void QuietWatchTick(std::chrono::steady_clock::time_point now) {
+    if (g_state.quit_held_player != 0 && g_state.apart && !NetplayLinkUp()) {
+        const int player = g_state.quit_held_player;
+
+        g_state.quit_held_player = 0;
+        NetplayPeerQuitApart(player, g_state.quit_held_ended, g_state.quit_held_why);
+    }
+    if (!g_state.apart || g_state.dropped || NetplayLinkUp() || Mutated("apart_silence_unwatched")) {
+        g_state.quiet_on = false;
+        return;
+    }
+    if (!g_state.quiet_on) {
+        g_state.quiet_on = true;
+        g_state.quiet_ticks = 0;
+        g_state.quiet_since = now;
+        g_state.probes_sent = 0;
+    }
+    g_state.quiet_ticks++;
+
+    const int  other = 3 - Player();
+    const long ms = (long) std::chrono::duration_cast<std::chrono::milliseconds>(now - g_state.quiet_since).count();
+    char       line[240];
+
+    if (Mutated("apart_drop_on_silence")) {
+        if (g_state.quiet_ticks >= 300 && ms >= 5000) {
+            std::snprintf(line, sizeof line, "apart: player %d not heard for %d ticks of play (%ld ms): gone (apart_drop_on_silence)", other, g_state.quiet_ticks, ms);
+            Log(line);
+            g_state.quiet_on = false;
+            NetplayPeerGoneApart(other, "not heard apart");
+        }
+        return;
+    }
+    if (g_state.probes_sent == 0) {
+        if (g_state.quiet_ticks < kSuspectTicks || ms < kSuspectMs) {
+            return;
+        }
+        long long heard = 0;
+
+        NetSocketPeerTransport(g_state.probe_resets, heard);
+        g_state.probe_heard = heard;
+        g_state.probe_heard_at = now;
+        std::snprintf(line, sizeof line, "apart: player %d not heard for %d ticks of play (%ld ms): checking in", other, g_state.quiet_ticks, ms);
+        Log(line);
+        g_state.probe_next = now;
+    }
+    if (now < g_state.probe_next) {
+        return;
+    }
+    if (g_state.probes_sent < kProbes) {
+        SendWord(kProbe, (std::uint32_t) g_state.probes_sent + 1);
+        g_state.probe_next = now + std::chrono::milliseconds(kProbeGapMs[g_state.probes_sent]);
+        g_state.probes_sent++;
+        return;
+    }
+
+    // Every probe unanswered: what the transport says.
+    long long  resets = 0, heard = 0;
+    const int  steam = NetSocketPeerTransport(resets, heard);
+    const bool reset = resets > g_state.probe_resets;
+
+    if (heard != g_state.probe_heard) {
+        g_state.probe_heard = heard;
+        g_state.probe_heard_at = now;
+    }
+
+    const long silent = (long) std::chrono::duration_cast<std::chrono::milliseconds>(now - g_state.probe_heard_at).count() + kSuspectMs;
+    const char *closed = steam == 4   ? "Steam says the other closed the session"
+                         : steam == 5 ? "Steam says the session failed"
+                         : steam == 0 ? "Steam has no session with the other"
+                         : steam == -2 && reset ? "the system says no one is at the other's port"
+                         : steam == -2 && silent >= kUnknownSilentMs ? "nothing at all heard over UDP for 30 s"
+                                                                     : nullptr;
+
+    if (closed != nullptr && g_state.quiet_ticks >= kGoneTicksAtLeast) {
+        std::snprintf(line, sizeof line, "apart: player %d answered none of %d probes (%d ticks, %ld ms) and %s: gone, as a drop of the link", other, kProbes,
+                      g_state.quiet_ticks, ms, closed);
+        Log(line);
+        g_state.quiet_on = false;
+        NetplayPeerGoneApart(other, "no answer, its connection closed");
+        return;
+    }
+    std::snprintf(line, sizeof line, "apart: player %d answered none of %d probes (%ld ms) but the connection does not say closed (%s): checking again", other,
+                  kProbes, ms, steam == -2 ? "UDP" : steam == 3 ? "Steam: connected" : steam < 0 ? "Steam: unknown" : "Steam: connecting");
+    Log(line);
+    g_state.probes_sent = 0; // (a new round; quiet_since kept)
+    g_state.probe_next = now + std::chrono::milliseconds(kProbeGapMs[kProbes - 2]);
+    g_state.probes_sent = 1; // (that round's first probe counts as sent at its time: the gaps go on from the longest)
+    SendWord(kProbe, 1);
+}
+
+// coop-hostquit: coop_worlds.hpp.
+void CoopWorldsPeerGone() {
+    g_state.dropped = true;
+    g_state.peer_heard = false;
+    g_state.peer_ready = false;
+    g_state.fresh_wait_since = {};
+    g_state.quiet_on = false;
+    g_state.probes_sent = 0;
+}
+
+// kQuit: magic, player, kind, seq (how: 1 its Quit Game, 2 its game closing), ready (1: the host's Quit Game, the session over for
+// every player). Sent until the other copy's kLeftAck (the same seq) comes, at most wait_ms. Read here from the socket itself:
+// the session is over on this copy (its title, or its exit), so nothing else read meanwhile matters.
+void CoopWorldsSayLeft(bool ended, int how, int wait_ms) {
+    if (!On() || Player() == 0 || Mutated("quit_apart_unsaid")) {
+        return;
+    }
+
+    const bool wait = !Mutated("left_unacked");
+    const auto began = std::chrono::steady_clock::now();
+    const int  other = 3 - Player();
+    bool       acked = false;
+    int        sends = 0;
+
+    alignas(8) unsigned char buffer[2048];
+
+    for (;;) {
+        SendWord(kQuit, (std::uint32_t) how, ended ? 1u : 0u);
+        sends++;
+        if (!wait) {
+            break;
+        }
+        const auto resend = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+
+        while (!acked && std::chrono::steady_clock::now() < resend) {
+            const int got = NetSocketReceive(buffer, sizeof buffer);
+
+            if (got == (int) sizeof(Message)) {
+                Message message;
+
+                std::memcpy(&message, buffer, sizeof message);
+                acked = message.magic == kMagic && message.kind == kLeftAck && message.player == (std::uint32_t) other && message.seq == (std::uint32_t) how;
+            } else if (got <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        if (acked || std::chrono::steady_clock::now() - began >= std::chrono::milliseconds(wait_ms)) {
+            break;
+        }
+    }
+
+    const long long ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+
+    std::fprintf(stderr, "worlds: player %d %s (%s, %s): %s after %d sends, %lld ms\n", Player(), how == 1 ? "quit" : "closed its game",
+                 ended ? "the host: the session over for every player" : "their own copy alone", g_state.apart ? "apart" : "linked",
+                 acked ? "acknowledged by player" : wait ? "NOT acknowledged" : "sent, no wait (left_unacked)", sends, ms);
+    std::fflush(stderr);
+}
+
+void CoopWorldsKeepaliveApart() {
+    if (!g_alive_apart.load() || AliveNowMs() - g_alive_tick_ms.load() < 1000 || Mutated("apart_drop_on_silence")) {
+        return;
+    }
+
+    Message message{};
+
+    message.magic = kMagic;
+    message.player = (std::uint32_t) g_alive_player.load();
+    message.kind = kAlive;
+    NetSocketSend(&message, sizeof message);
+}
+
+// Test hook (DC_WORLDS_TEST_APART_STALL=ms, coop-hostquit): apart, the first time this copy has heard the other, its game stops
+// for ms, as a long load or a slow PC's frame does (its keepalive thread goes on).
+static void ApartStallTest() {
+    static const int ms = TestEnvInt("DC_WORLDS_TEST_APART_STALL", 0);
+    static bool      done = false;
+
+    if (ms <= 0 || done || !g_state.apart || !g_state.peer_heard || NetplayLinkUp()) {
+        return;
+    }
+    done = true;
+    std::fprintf(stderr, "worlds: test: this copy (player %d) stalls %d ms apart\n", Player(), ms);
+    std::fflush(stderr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    std::fprintf(stderr, "worlds: test: this copy (player %d) stalled %d ms apart: playing again\n", Player(), ms);
+    std::fflush(stderr);
+}
+
 void CoopWorldsTick(bool up, std::int64_t tick) {
+    g_alive_player = Player(); // coop-hostquit: for CoopWorldsKeepaliveApart, on the keepalive's thread
+    g_alive_apart = On() && g_state.apart && !NetplayLinkUp();
+    g_alive_tick_ms = AliveNowMs();
+    // (a held quit waits 300 ticks of this copy's at most: a split comes within the link's delay; one that never came is not this session's end)
+    if (g_state.quit_held_player != 0 && !g_state.apart && ++g_state.quit_held_ticks > 300) {
+        g_state.quit_held_player = 0;
+    }
     CoopStorageTick(); // coop-small2: the storage asks apart, resent till answered
+    // coop-joinload: where the town's start event put the joiner (its first frame of walking there), once.
+    if (g_joinload_landing && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && ::GameMode == ED_MODE_WALK && Chara != nullptr) {
+        sceVu0FVECTOR at;
+        char          line[200];
+
+        g_joinload_landing = false;
+        Chara->GetPosition(at);
+        std::snprintf(line, sizeof line, "joinload: player %d stands at (%.0f %.0f %.0f) in town map %d, where its start event put it (a save load's spot)",
+                      Player(), at[0], at[1], at[2], (int) MapNo);
+        Log(line);
+    }
     CoopWorldsArrivalSeenOutTick();
+    ArriveTick(); // coop-firstvisit: a town's story arrival's gather
     // coop-localfix: out of a dungeon, the next one's first frames hide player 2's Toan (CoopWorldsHideDungeonPlayer).
     if (mode != GAME_MODE_DUNGEON) {
         g_entry_hide = true;
@@ -3811,6 +4571,36 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
         return;
     }
     CallTick(); // coop-floorgate
+    // coop-notices: the others' finds heard apart, shown once this player is free (not at a dungeon's entrance menu: its own screen)
+    coop::ApartNoticeTick(CoopWorldsPlayerFree() && !(mode == GAME_MODE_DUNGEON && BtGameModeFlag == BT_GAME_MODE_ENTRANCE_MENU));
+    // coop-notices test hooks. DC_WORLDS_TEST_ITEM=K:I: an apart copy's player gets item I's "acquired" after K ticks of its own play
+    // apart (a floor's play, or a town's), as a pickup, a chest or an event's _ITEM_GET_MES sets it (the game's ItemGetMes; the item
+    // itself is not put in a bag). DC_WORLDS_TEST_NOTICE_WALK=1: every 10 ticks while another player's find notice is up here, where
+    // this copy's player stands (its walk is not held by it).
+    if (static const char *item_test = TestEnv("DC_WORLDS_TEST_ITEM"); item_test != nullptr && g_state.apart &&
+        ((mode == GAME_MODE_DUNGEON && UserStatus != nullptr && BtGameModeFlag == BT_GAME_MODE_PLAY) || mode == GAME_MODE_EDIT)) {
+        static int  item_ticks = 0;
+        const char *colon = std::strchr(item_test, ':');
+
+        if (colon != nullptr && ++item_ticks == std::atoi(item_test)) {
+            std::fprintf(stderr, "worlds: test: this copy (apart, player %d) gets item %d in %s %d floor %d\n", Player(), std::atoi(colon + 1),
+                         mode == GAME_MODE_DUNGEON ? "dungeon" : "town", mode == GAME_MODE_DUNGEON ? (int) selectMapNo : (int) MapNo,
+                         mode == GAME_MODE_DUNGEON ? (int) UserStatus->cur_floor : -1);
+            ItemGetMes(std::atoi(colon + 1), -1, 0x78, 0);
+        }
+    }
+    if (static const bool walk_test = TestEnvOn("DC_WORLDS_TEST_NOTICE_WALK"); walk_test && coop::ApartNoticeUp() > 0 && Chara != nullptr) {
+        static int up_ticks = 0;
+
+        if (up_ticks++ % 10 == 0) {
+            sceVu0FVECTOR at;
+
+            Chara->GetPosition(at);
+            std::fprintf(stderr, "worlds: test: player %d's find notice %d up %d ticks: this player stands at (%.1f %.1f)\n", Player(), coop::ApartNoticeUp(),
+                         up_ticks - 1, at[0], at[2]);
+        }
+    }
+    coop::PromptApartTradeTick(); // coop-swapcombo part 2: the trade across zones, this copy's side
     ScenePoseTick(); // coop-cutsceneview
     if (mode == GAME_MODE_EDIT) {
         doorgate::Scan(); // coop-doorgate: the door table, once (at the first town tick)
@@ -3852,10 +4642,13 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
     // coop-mergebags: not while a catch-up merge replays the host's play from its checkpoint: the replay rewinds the slots
     // to the checkpoint's (the mayor's key gone from player 1's bag), and each rewound slot went to the host as this copy's
     // own change, emptying his bag there (Jep's 2026-10-25: "I never made it out of the house as p1 with the key").
+    // coop-apartfps: the slot sync's own part of the netplay tick (tick-stats' "netplay tick's parts" line, at 1 ms a tick or more)
+    NetplayTickPart("the worlds' slot sync");
     if (g_state.apart && (Mutated("scan_in_catchup") || !NetplayCatchUnderWay())) {
         slotsync::TestTick();
         slotsync::Tick();
     }
+    NetplayTickPart("CoopWorldsTick after the slot sync");
     TestApartPresses();
     TestPickOnPeer();
     if ((g_state.apart || !NetplayLinkUp()) && Player() == 2) { // (coop-georamaload: her copy waiting to join too)
@@ -3906,7 +4699,7 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
         Log(g_state.left_from.mode == GAME_MODE_DUNGEON ? "left the floor: this copy may merge again" : "left the town: this copy may merge again");
     } else if (g_state.leaving && mode == GAME_MODE_DUNGEON) {
         // Off a floor: undone once it plays on the floor again for 5 s (no fade, no Escape under way).
-        const bool plays = gameTask == GAME_TASK_PLAY && BtGameModeFlag == BT_GAME_MODE_PLAY;
+        const bool plays = CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY;
 
         g_state.leaving_walk = plays ? g_state.leaving_walk + 1 : 0;
         if (g_state.leaving_walk >= 300) {
@@ -3948,6 +4741,17 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
             std::fflush(stderr);
         }
     }
+
+    // coop-rc4: the pre-link latches (CoopWorldsPrelinkSaid) mean "said since this copy last linked", so they clear while it is
+    // linked. With p2boot's preload her window stands in his town before its first link and set them there; at a later link
+    // (his way out of a building after the split) they still read said, and the -HerFirst hook re-armed by its twin
+    // (said_wait_every_link, l-local-play-houseout~saidwait) held nothing. Only that test hook reads them.
+    if (NetplayLinkUp()) {
+        g_prelink_drawn = false;
+        g_prelink_spot = false;
+    }
+
+    doorgate::WatchJoiners(); // coop-joinwarp (the story yes's test line)
 
     // DC_COOP_DEBUG, coop-mergestand: once a second in a town outdoors, where this copy has both players (Toan's body,
     // which apart on player 2's copy is hers; the town partner, if shown), so a test can compare the positions before
@@ -4093,8 +4897,9 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
         if (++frames == 30) {
             char said[200];
 
-            std::snprintf(said, sizeof said, "30 frames after the split at tick %lld: this copy (player %d) is the one that %s, there first %d", (long long) g_state.split_tick,
-                          Player(), g_state.stayer ? "stayed" : "left", g_state.first_here ? 1 : 0);
+            std::snprintf(said, sizeof said, "30 frames after the split at tick %lld: this copy (player %d) is the one that %s, there first %d; melt timer %d %d %d",
+                          (long long) g_state.split_tick, Player(), g_state.stayer ? "stayed" : "left", g_state.first_here ? 1 : 0,
+                          (int) ItemVolumeStep.frame, (int) ItemVolumeStep.pending_volume, (int) ItemVolumeStep.enabled); // coop-meltdesync
             Log(said);
         }
     }
@@ -4299,12 +5104,16 @@ void CoopWorldsTick(bool up, std::int64_t tick) {
 
     // Twice a second, and at once when this copy is somewhere new; player 2 ready to merge in a town each tick, so the host
     // keeps her where she last stood (coop-spawn).
+    WalkInTick(); // coop-entrwin: this copy's own walk-in and its place in the entrance window
     if (now >= g_state.presence_due || !(Here() == g_state.sent_here) || MergeReady() != g_state.sent_ready || (BusyHere() ? 1u : SceneHere() ? 2u : 0u) != g_state.sent_busy ||
+        CoopWorldsWalkInRole() != g_state.sent_walk_role ||
         (Player() == 2 && g_state.sent_ready && Here().mode == GAME_MODE_EDIT)) {
         SendPresence();
         g_state.presence_due = now + std::chrono::milliseconds(500);
     }
     SendSceneView(); // coop-cutsceneview
+    QuietWatchTick(now);
+    ApartStallTest();
 
     Zone here = Here();
 
@@ -4407,6 +5216,55 @@ bool CoopWorldsReceive(std::uint32_t magic, const void *data, int size) {
 
     std::memcpy(&message, data, sizeof message);
 
+    // coop-hostquit: another copy's leaving (acknowledged, whatever this copy makes of it), its keepalive's word, a probe of
+    // the check-in (answered) or its answer (any player's: its number is the message's).
+    if (message.kind >= kQuit && message.kind <= kLeftAck) {
+        if (message.player == 0 || message.player > (std::uint32_t) coop::kMaxPlayers || message.player == (std::uint32_t) Player() || Player() == 0) {
+            return true;
+        }
+        if (message.kind == kLeftAck) {
+            return true; // (CoopWorldsSayLeft reads its own; one late here is spent)
+        }
+        if (message.kind == kQuit && !Mutated("left_unacked")) {
+            SendWord(kLeftAck, message.seq);
+            if (static std::uint32_t said = 0; said != message.seq) { // (once per kind of leaving: its resends are acknowledged too)
+                said = message.seq;
+                std::fprintf(stderr, "worlds: player %u's leaving (%s) heard and acknowledged\n", message.player, message.seq == 2 ? "its game closed" : "its Quit Game");
+                std::fflush(stderr);
+            }
+        }
+        if (message.kind == kProbe) {
+            SendWord(kProbeAck, message.seq);
+        }
+        const char *why = message.seq == 2 ? "closed their game" : "quit their game";
+
+        if (!g_state.apart) {
+            if (message.kind == kQuit && NetplayLinkUp()) {
+                NetplayPeerLeftWord((int) message.player, message.ready != 0); // linked: as its Leave says
+            } else if (message.kind == kQuit && g_state.quit_held_player == 0) {
+                g_state.quit_held_player = (int) message.player;
+                g_state.quit_held_ended = message.ready != 0;
+                g_state.quit_held_why = why;
+                g_state.quit_held_ticks = 0;
+                std::fprintf(stderr, "worlds: player %u's leaving heard before this copy's split: held till it is apart\n", message.player);
+                std::fflush(stderr);
+            }
+            return true;
+        }
+        if (g_state.dropped && !g_state.peer_heard) { // (gone already: the leaving's resends, or a word after its drop was said)
+            return true;
+        }
+        if (message.kind == kAlive && g_state.alive_words++ == 0) {
+            std::fprintf(stderr, "worlds: player %u's keepalive heard apart (its game not ticking): still here\n", message.player);
+            std::fflush(stderr);
+        }
+        CheckInHeard(message.kind == kQuit ? "its leaving" : message.kind == kAlive ? "its keepalive" : message.kind == kProbe ? "its own probe" : "a probe's answer");
+        if (message.kind == kQuit) {
+            NetplayPeerQuitApart((int) message.player, message.ready != 0, why);
+        }
+        return true;
+    }
+
     // Test hook (DC_WORLDS_TEST_DEAF_READY=N): this copy does not hear the other's first N presences that say it is ready
     // to merge, as a copy whose word of it came late or not at all does: the other has started the merge's link by then and
     // says no more (w-world-split -Case next-floor -DeafReady 3; twin DC_WORLDS_MUTATE=no_peer_linking on this copy).
@@ -4420,21 +5278,52 @@ bool CoopWorldsReceive(std::uint32_t magic, const void *data, int size) {
         return true;
     }
 
+    // Test hook (DC_WORLDS_TEST_DEAF_FIRST=N, coop-owed1112: x-item-scene-apartnow*): this copy does not hear the other's first N
+    // presences after a split, as a copy whose first word came late (a slow link): the moment after a split, the other not yet heard.
+    static const int deaf_first = TestEnvInt("DC_WORLDS_TEST_DEAF_FIRST", 0);
+    static int       deaf_first_n = 0;
+
+    if (message.kind == kPresence && g_state.apart && deaf_first_n < deaf_first) {
+        deaf_first_n++;
+        std::fprintf(stderr, "worlds: test: not hearing player %u's presence %d of %d after the split\n", message.player, deaf_first_n, deaf_first);
+        std::fflush(stderr);
+        return true;
+    }
+
     if (message.kind == kPresence && (g_state.apart || g_state.merge_pending) && message.seq > g_state.peer_seq) {
         g_state.peer_seq = message.seq;
         // coop-houseenter: the other copy changed zone: it arrives, this copy (where it is now) was there first.
-        if (const Zone heard{message.mode, message.map, message.floor}; g_state.apart && !(heard == g_state.peer) && !g_state.first_here) {
+        if (const Zone heard{message.mode, message.map, message.floor, message.half}; g_state.apart && !(heard == g_state.peer) && !g_state.first_here) {
             g_state.first_here = true;
             g_state.first_here_zone = Here();
             Log("there first: yes (the other copy changed zone)");
         }
-        g_state.peer = Zone{message.mode, message.map, message.floor};
+        g_state.peer = Zone{message.mode, message.map, message.floor, message.half};
+        if (message.player >= 1 && message.player <= (std::uint32_t) coop::kMaxPlayers) { // coop-whereis
+            Heard &heard = g_heard[message.player - 1];
+
+            static const bool gaps = TestEnv("DC_COOP_TEST_WHEREIS") != nullptr; // coop-lastseen: each gap over a second (the test's)
+
+            if (gaps && heard.set) {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - heard.at).count();
+
+                if (ms > 1000) {
+                    std::fprintf(stderr, "coop-whereis: test: presence from p%u after %lld ms (seq %u, activity %d)\n", message.player, (long long) ms,
+                                 message.seq, (int) message.activity);
+                    std::fflush(stderr);
+                }
+            }
+            heard.set = true;
+            heard.zone = g_state.peer;
+            heard.activity = message.activity;
+            heard.at = std::chrono::steady_clock::now();
+        }
         // (coop-gatevote: the pick hook's latch; a presence read in the same tick as the next one is otherwise never seen)
         if (message.mode == GAME_MODE_DUNGEON && (message.floor == -2 || message.floor == -1)) {
             g_test_peer_entrance.map = message.map;
             (message.floor == -2 ? g_test_peer_entrance.splash : g_test_peer_entrance.menu) = true;
         }
-        g_state.peer_sees = Zone{message.heard_mode, message.heard_map, message.heard_floor};
+        g_state.peer_sees = Zone{message.heard_mode, message.heard_map, message.heard_floor, message.heard_half};
         g_state.peer_sees_set = message.heard != 0;
         g_state.peer_heard = true;
         // coop-areacard: the other turned ready while this copy is: a Hello at once, so a host ready first links on it now
@@ -4444,6 +5333,12 @@ bool CoopWorldsReceive(std::uint32_t magic, const void *data, int size) {
         }
         g_state.peer_ready = message.ready != 0;
         g_state.peer_at = std::chrono::steady_clock::now();
+        CheckInHeard("a presence"); // coop-hostquit
+        if (g_state.alive_words > 0) {
+            std::fprintf(stderr, "worlds: player %u's presence again after %d keepalive words\n", message.player, g_state.alive_words);
+            std::fflush(stderr);
+            g_state.alive_words = 0;
+        }
         g_state.peer_stand.set = message.has_pos == 1;
         g_state.peer_floor_stand.set = message.has_pos == 2; // coop-dungeonjoin
         g_state.peer_floor_stand.zone = g_state.peer;
@@ -4452,6 +5347,20 @@ bool CoopWorldsReceive(std::uint32_t magic, const void *data, int size) {
         g_state.peer_floor_stand.pos[2] = message.pos[2];
         g_state.peer_floor_stand.yaw = message.yaw;
         g_state.peer_floor_stand.chara = message.chara;
+        // coop-0115 (x-clown-apart-done-p1 OUT OF SYNC at the merge's tick 960, memberstage4 x clownchest): the heard member only
+        // apart. Linked, the members are the lockstep's (the state set and the resync carry them, the checksum reads them), and a
+        // presence lands on one copy at its own tick: player 1 with none kept sends the body he is drawn as (0) while his copy
+        // records -1, so her copy alone wrote 0 after the merge. DC_WORLDS_MUTATE=heard_member_linked (twin): written linked too.
+        // coop-bothleave (DCO-122): and only unlinked. A merge's link comes up while both copies still count as apart (until
+        // its lockstep): from then on the merge's state set is the members' word on both copies. A presence heard there (the host's
+        // still go out twice a second through its catch-up) landed on her copy alone, after the state set had put his record (-1)
+        // in: the presence's 0 (the body he is drawn as) went over it and the lockstep began with members that differ (OUT OF SYNC
+        // a minute's ticks in; one landing run in six pairs, every flat-out run apart, whose replay is 1,100 ticks long).
+        // Presences repeat, so a copy apart that drops one while linked learns the member from the next one, unlinked.
+        // DC_WORLDS_MUTATE=heard_member_merging (twin): written through the merge's link too, as before.
+        if ((g_state.apart && (!NetplayLinkUp() || CoopWorldsMutated("heard_member_merging"))) || CoopWorldsMutated("heard_member_linked")) {
+            coop::MembersHeard((int) message.player, message.member); // coop-memberstage4: the other's member, its copy's word
+        }
         g_state.peer_stand.map = message.floor > 0 ? (message.map | coop::kIndoorStand) : message.map;
         g_state.peer_stand.pos[0] = message.pos[0];
         g_state.peer_stand.pos[1] = message.pos[1];
@@ -4461,7 +5370,19 @@ bool CoopWorldsReceive(std::uint32_t magic, const void *data, int size) {
         g_state.peer_floor_rand = message.floor_rand;
         g_state.peer_floor_rand_map = message.floor_rand_map;
         g_state.peer_floor_rand_floor = message.floor_rand_floor;
+        g_state.peer_floor_rand_count = message.floor_rand_count; // (0 unless counted under this link's word: FloorBuildCountNow)
+        if (std::uint32_t seed = 0; !NetplayLinkFloorSeed(&seed) || message.floor_rand_word != seed) {
+            g_state.peer_floor_rand_count = 0;
+        }
+        if (message.floor_rand_set != 0) {
+            FloorCountHeard(message.floor_rand_map, message.floor_rand_floor, message.floor_rand_count, message.floor_rand_word);
+        }
         g_state.peer_floor_hold = message.floor_hold != 0;
+        g_state.peer_walk_key = message.walk_key; // coop-entrwin
+        g_state.peer_walk_role = (int) message.walk_role;
+        g_state.peer_walk_begun_ms = message.walk_begun_ms;
+        g_state.peer_clock_delta = std::min(g_state.peer_clock_delta, ClockMs() - (long long) message.sent_ms);
+        g_state.peer_player = (int) message.player;
         if ((message.busy == 1 || message.busy == 4) && !g_state.peer_busy && !g_state.peer_talk) {
             NetplayTestInputMark("peer-busy"); // coop-p2toan: a held --input script goes on (DC_TEST_INPUT_HOLD; l-local-play -HisBusy talk)
         }
@@ -4717,8 +5638,59 @@ static void LeaveFloorAsMember(); // coop-escapeface (below CoopWorldsStayOnFloo
 
 bool CoopWorldsStorySceneLeaves();
 static bool g_script_exit = false; // coop-pt1109f
+// coop-warplight: the town menu's way out (editloop's TownMapJump: its "go to the dungeon" or a world map's place) is under way: the
+// town's system event 2 follows on the leaving copy (retail's escape.chr light, put at its main character).
+static bool g_menu_warp = false;
 
+void CoopWorldsMenuWarp(bool on) {
+    g_menu_warp = on;
+}
+
+// coop-warplight (Jep's 11-16 playtest: "when P2 uses go to dungeon, the light particle effect plays behind the player instead of
+// around them"): together, her menu's way out took her copy out with the game's player still Toan where player 1 stood, so the
+// system event's _GET_NPC_POS(-1) put the light there (t-warplight-p2: 1328.7 from her on the town-door fixture). The copy that
+// leaves makes its player hers where she stood first, as a town event into a dungeon does (CoopWorldsStartDungeonEvent's
+// TownPlacePlayerAtPartner) and her Escape on a floor (LeaveFloorAsMember); the copy that stays shows the light around her
+// (coop::TownWarpLightStart). DC_WORLDS_MUTATE=warplight_toan (twin): Toan's place, as before.
+// coop-warplight test hook: the test warps of Toan (DC_WORLDS_TEST_GATE_WARP) and her (DC_WORLDS_TEST_PARTNER_WARP) done, each one
+// the copy runs with (both need the copies together: the warp-light tests' pick waits for them).
+static bool g_test_warped[2] = {};
+
+bool CoopWorldsTestWarpsDone() {
+    return (TestEnv("DC_WORLDS_TEST_GATE_WARP") == nullptr || g_test_warped[0]) && (TestEnv("DC_WORLDS_TEST_PARTNER_WARP") == nullptr || g_test_warped[1]);
+}
+
+static void LeaveTownAsMember(int leaver) {
+    if (leaver != 2 || Player() != 2) {
+        return;
+    }
+    if (Mutated("warplight_toan")) {
+        std::fprintf(stderr, "worlds: test: warplight_toan: player 2's copy leaves town as Toan where he stood, as before\n");
+        std::fflush(stderr);
+        return;
+    }
+    float at[3] = {};
+    const bool placed = coop::TownPlacePlayerAtPartner(at);
+
+    std::fprintf(stderr, "worlds: leaving: player 2's copy leaves town as her member at (%.0f %.0f %.0f)%s\n", at[0], at[1], at[2],
+                 placed ? " (where she stood: the way out's light is hers)" : "; she was not in town, Toan stays put");
+    std::fflush(stderr);
+}
+
+static bool CoopWorldsTakeExitDecide(int next_map);
+
+// coop-daycrash: this copy leaves the town (a building, a map or a script's way out): the time of day's event in its world slot ends
+// here first (CoopDayTransTownLeft), as a zone load ends it.
 bool CoopWorldsTakeExit(int next_map) {
+    const bool goes = CoopWorldsTakeExitDecide(next_map);
+
+    if (goes) {
+        CoopDayTransTownLeft("CoopWorldsTakeExit");
+    }
+    return goes;
+}
+
+static bool CoopWorldsTakeExitDecide(int next_map) {
     if (!On() || !g_state.up || NetplayLocalPlayer() == 0 || g_state.apart) {
         return true;
     }
@@ -4759,6 +5731,13 @@ bool CoopWorldsTakeExit(int next_map) {
     if (!stays) {
         LeaveFloorAsMember();
     }
+    if (g_menu_warp && mode == GAME_MODE_EDIT) { // coop-warplight
+        if (!stays) {
+            LeaveTownAsMember(leaver);
+        } else {
+            coop::TownWarpLightStart(leaver);
+        }
+    }
     return !stays;
 }
 
@@ -4773,8 +5752,8 @@ void CoopWorldsInteriorStarted() {
 // players"), and the other player's screen gets a call to come. Both at the door (the other player's character beside the
 // one who opened it), both go in linked and the arrival's scene plays on both in lockstep (coop-scenejoin's together path).
 // Either player may ask, together or apart. Norune's cave door counts too while B1's opening scene is unseen (its event 130,
-// Cross or Square: CaveRefused). Events that start by themselves are never gated. game.coop_story_gather false (the host's):
-// the doors as before. DC_WORLDS_MUTATE=door_gate_off (twin): no gate.
+// Cross or Square: CaveRefused). Events that start by themselves are never gated. (coop-gatherpicker, Jep 11-17: always so, game.coop_story_gather
+// retired.) DC_WORLDS_MUTATE=door_gate_off (twin): no gate.
 namespace {
 namespace doorgate {
 
@@ -4791,8 +5770,50 @@ struct Room {
 std::vector<Room> g_rooms;
 bool              g_scanned = false;
 
+// coop-windmill (the developer's rc4 playtest: P1 walked up to Norune's finished windmill, its scene played for him with nobody asked, and once
+// it took Toan indoors P2's screen went black and she was pulled in). A finished Georama part's scene (town event 200 + the part: the
+// camera on the finished building, then most go indoors, _GOTO_INTERIOR, for its owner's thanks) is started by retail's walk step
+// itself: Toan standing on a complete building part whose scene is unseen (editloop's FadeOutToEvent(plot + 200)), no event point,
+// door or talk. So the story guard (HoldStory: events walked or talked into), the door gate (doors) and the arrival gather (a town's
+// load) never saw it: it ran on every copy, her screen on her own camera (OwnTownView keeps hers through his events), and its jump
+// indoors split the pair (CoopWorldsTakeInterior: the opener in) with the scene still running on her copy, whose next step jumped
+// again, apart now, ungated: her copy went in too, under the scene's fade to black. Now it is a story start like a story door's: its
+// starter stands in the ready box, every other player gets the story scene's question, and nothing starts before every yes or START
+// NOW; together the players along watch it from its camera and its jump indoors takes them all (no split); START NOW leaves the others
+// where they are (the split as it starts: their copies never run it). Apart the door's call (the Georama scene's row, as its Event
+// pick). DC_WORLDS_MUTATE=part_scene_gather_off (twin): it starts as before.
+// coop-storygaps (coop-windmill's audit): the same gather is every other story start together that had none: the Georama menu's
+// Event pick and its close's own scenes (the town complete, Matataki's request), a story event a player walks or talks into
+// (HoldStory guards those apart only), and any player's own body on a finished part (retail reads Toan's alone). One gather at a
+// time; a start asked meanwhile waits (pending, one per player) and is asked once the open one closes: requests never expire.
+namespace partscene {
+struct State {
+    int          asking = -1;  // the scene (town event) whose ready check is open, -1 none
+    int          starter = 0;  // its starter (the player whose walk, body, menu or talk started it)
+    int          level = 0;    // its fade's level (FadeOutToEvent's), when it goes by a fade
+    bool         fade = true;  // it goes on by a fade (a part's scene, a Georama pick), else by its event at once (a point, a talk)
+    const char  *how = "";     // what started it (logs)
+    int          release = -1; // gathered: it goes on at the town's next free walk step (CoopWorldsStoryGatherDue)
+    int          release_level = 0;
+    bool         release_fade = true;
+    bool         alone = false; // START NOW with nobody along: the starter's copy alone (the split as it starts)
+    bool         along[coop::kMaxPlayers + 1] = {};
+    int          running = -1;  // released: the scene running on this copy (its jump indoors takes those along)
+    int          pending[coop::kMaxPlayers] = {};   // by player - 1: a menu's start asked while another gather was open (its event, 0 none)
+    int          pending_level[coop::kMaxPlayers] = {};
+    const char  *pending_how[coop::kMaxPlayers] = {};
+};
+State g;
+} // namespace partscene
+
 // The other player's character this near the one who opens a gated door (units): both are at the door.
 constexpr float kBeside = 100.0f;
+
+// coop-storywarp (rule 2): how a story scene starts with other players linked (Jep's choice: one line). kStartAsk: every other player
+// is asked first, wherever they stand, and nothing starts before every yes (11-11's item-scene rule). kStartBesideGoes: a player beside
+// the door goes in with the opener unasked (as built before 11-13).
+enum StoryStart { kStartAsk, kStartBesideGoes };
+constexpr StoryStart kStoryStart = kStartAsk;
 
 const char *const kTowns[5] = {"Norune", "Matataki", "Queens", "Muska Racka", "Yellow Drops"};
 
@@ -4998,11 +6019,11 @@ const char *CallText(int player, int row, bool cave) {
     static char text[160];
 
     if (GeoramaRow(row)) {
-        std::snprintf(text, sizeof text, "Player %d wants to watch a story scene in %s: come to %s", player, GeoramaTown(row), GeoramaTown(row));
+        std::snprintf(text, sizeof text, "%s wants to watch a story scene in %s: come to %s", NetplayShownName((int) player).c_str(), GeoramaTown(row), GeoramaTown(row));
     } else if (cave) {
-        std::snprintf(text, sizeof text, "Player %d wants to enter the Divine Beast Cave: come to the cave door in Norune", player);
+        std::snprintf(text, sizeof text, "%s wants to enter the Divine Beast Cave: come to the cave door in Norune", NetplayShownName((int) player).c_str());
     } else {
-        std::snprintf(text, sizeof text, "Player %d wants to enter %s: come to %s", player, row >= 0 ? RoomName(row) : "a house", TownName(row));
+        std::snprintf(text, sizeof text, "%s wants to enter %s: come to %s", NetplayShownName((int) player).c_str(), row >= 0 ? RoomName(row) : "a house", TownName(row));
     }
     return text;
 }
@@ -5024,8 +6045,8 @@ bool InGrace(int age) {
     return age < kAnswerGrace && !Mutated("answer_grace_off");
 }
 
-// coop-gatepopup: apart, the asker of a call waits for its answer (held as in a pause, CoopWorldsQuestionHolds) until it comes,
-// at most kAskTicks' time and a little: the other copy answers within that (its own question times out).
+// coop-gatepopup: apart, the asker of a call waits for its answer (held as in a pause, CoopWorldsQuestionHolds) until it comes
+// (coop-askwait: or its Circle withdraws it; no clock: the time point is only kept for the ask_lapse twin's old give-up).
 std::chrono::steady_clock::time_point g_wait_answer{};
 
 // The call this copy sent apart and waits on (what and a to d as sent), its Circle's pad and age (WaitCircle).
@@ -5059,6 +6080,16 @@ void WaitCircle(std::uint16_t now) {
         return;
     }
 
+    // coop-forcefloor test hook (DC_WORLDS_TEST_WAIT_CIRCLE=N): the waiting asker's Circle on its Nth waiting step (1: the first
+    // past the grace), once. (coop-askwait: N 600, ten seconds of a wait on a busy player.)
+    static const int test_circle = TestEnvInt("DC_WORLDS_TEST_WAIT_CIRCLE", 0);
+    static bool      test_circled = false;
+
+    if (test_circle > 0 && !test_circled && !InGrace(g_sent.age) && g_sent.age >= test_circle) {
+        test_circled = true;
+        now |= kInputCircle;
+        std::fprintf(stderr, "worlds: question: test: the waiting asker's Circle (player %d, waiting step %d)\n", Player(), g_sent.age);
+    }
     const std::uint16_t pressed = InGrace(g_sent.age++) ? 0 : now & ~g_sent.held;
 
     g_sent.held = now;
@@ -5090,6 +6121,8 @@ bool g_release_cross = false; // the asker's Cross not yet let go since the last
 
 struct Question {
     bool          open = false;
+    bool          pending = false; // coop-askwait: asked apart while its player is busy: not open (not drawn, nobody held) till free
+    int           waited = 0;      // (the steps it waited so)
     bool          apart = false; // asked on this copy alone (the call came as progress)
     int           asked = 0;     // 1 or 2: whose screen and pad
     int           asker = 0;
@@ -5126,11 +6159,33 @@ bool HerFreeTogether() {
     return CoopTownHerPadFree() && !CoopTownHerRoomEventOn();
 }
 
+// coop-askwait: apart, door calls from other players while one is up or waiting on this copy queue here in the order they came
+// (one per asker: its newest door) and are asked in turn as each closes (CoopWorldsDoorQuestionPad); a withdrawn or merged call
+// leaves it. (With no clock on a question, a call dropped here would leave its asker waiting till its own Circle.)
+struct QueuedAsk {
+    int  asker = 0;
+    int  row = 0;
+    bool cave = false;
+};
+std::vector<QueuedAsk> g_ask_queue;
+
 void Ask(int asked, int asker, int row, bool cave, bool apart) {
     Question  &q = g_question;
     const int  door = cave ? -1 : row;
 
-    if (q.open || (q.answered_for == door && (Mutated("door_ask_cooldown") ? q.steps - q.answered_at < 300 : g_release_cross))) {
+    if (apart && (q.open || q.pending) && q.asker != asker) {
+        auto it = std::find_if(g_ask_queue.begin(), g_ask_queue.end(), [&](const QueuedAsk &a) { return a.asker == asker; });
+
+        if (it == g_ask_queue.end()) {
+            g_ask_queue.push_back(QueuedAsk{asker, row, cave});
+        } else {
+            *it = QueuedAsk{asker, row, cave};
+        }
+        std::fprintf(stderr, "worlds: askwait: player %d's door call queues behind player %d's on this copy (%d queued)\n", asker, q.asker, (int) g_ask_queue.size());
+        std::fflush(stderr);
+        return;
+    }
+    if (q.open || q.pending || (q.answered_for == door && (Mutated("door_ask_cooldown") ? q.steps - q.answered_at < 300 : g_release_cross))) {
         return;
     }
     if (q.answered_for == door) {
@@ -5152,7 +6207,23 @@ void Ask(int asked, int asker, int row, bool cave, bool apart) {
     q.row = row;
     q.cave = cave;
     q.apart = apart;
-    if (!free && !Mutated("door_busy_asked")) {
+    // coop-askwait: apart, a busy player's question waits (pending: not drawn, nobody held) and opens once this player is free
+    // (CoopWorldsDoorQuestionPad); the asker waits in its box, its Circle withdraws. DC_WORLDS_MUTATE=call_busy_rejects (twin):
+    // "busy" at once, as before. Together (both copies alike, the ready check's flow) a busy player still answers busy.
+    if (!free && apart && !Mutated("door_busy_asked") && !Mutated("call_busy_rejects")) {
+        q.pending = true;
+        q.waited = 0;
+        q.age = 0;
+        std::fprintf(stderr, "worlds: askwait: player %d's door call waits for this copy's player (player %d) to be free (mode %d)\n", asker, asked, (int) ::GameMode);
+        std::fflush(stderr);
+        return;
+    }
+    // coop-askwait: together a busy player is asked too: the ready check's question waits for the player (hidden, its row "Not
+    // answered yet") and comes up once free (ReadyQuestionsStep). DC_WORLDS_MUTATE=call_busy_rejects (twin): "busy" at once, as before.
+    if (!free && !apart && !Mutated("door_busy_asked") && !Mutated("call_busy_rejects")) {
+        std::fprintf(stderr, "worlds: askwait: player %d is busy (mode %d): asked, the question waits for the player to be free\n", asked, (int) ::GameMode);
+        std::fflush(stderr);
+    } else if (!free && !Mutated("door_busy_asked")) {
         std::fprintf(stderr, "worlds: doorgate: player %d is busy (mode %d): not asked\n", asked, (int) ::GameMode);
         std::fflush(stderr);
         Close(2);
@@ -5183,7 +6254,7 @@ void Refuse(int asker, int row, bool cave, int flag) {
     const int                                    other = 3 - asker;
     char                                         line[200];
 
-    std::snprintf(line, sizeof line, "Needs both players. Player %d has been called", other);
+    std::snprintf(line, sizeof line, "Needs both players. %s has been called", NetplayShownName((int) other).c_str());
     SetNote(asker, line);
     std::snprintf(line, sizeof line, "doorgate: player %d's door into %s does not open (game flag %d unset: its story needs both players), %s; player %d walks on",
                   asker, cave ? "the cave" : GeoramaRow(row) ? "a Georama scene" : g_rooms[row].name, flag, g_state.apart ? "apart" : "together, the other not beside it", asker);
@@ -5196,6 +6267,20 @@ void Refuse(int asker, int row, bool cave, int flag) {
             SetNote(other, CallText(asker, row, cave)); // DC_WORLDS_MUTATE=door_question_hud (twin): the call as a link-line note, as first built
         } else if (!Mutated("door_no_call")) {
             Ask(other, asker, row, cave, false);
+            // coop-readyscreen (Jep 11-13: one "who's coming" flow): the question asked, every other linked player is in the ready
+            // check at once (the link carries two today: the list grows with it), the opener in its box (START NOW / CANCEL).
+            if (g_question.open && !g_question.apart && !coop::ready::IsOpen()) {
+                bool linked[coop::kMaxPlayers + 1] = {};
+
+                for (int player = 1; player <= 2; player++) {
+                    linked[player] = player != asker;
+                }
+                if (coop::ready::Open(coop::ready::kStoryDoor, asker, linked)) {
+                    ReadyKeysReset();
+                    ReadyHoldBusy(); // (coop-askwait: a busy player's question waits from the start, never drawn)
+                    g_question.open = coop::ready::FirstAsked() != 0;
+                }
+            }
         }
     } else if (called_for != door || now - called > std::chrono::seconds(10) || (!Waiting() && !g_release_cross && !Mutated("door_ask_cooldown"))) { // (coop-gatevote: answered, it calls again)
         called_for = door;
@@ -5206,6 +6291,99 @@ void Refuse(int asker, int row, bool cave, int flag) {
     }
 }
 
+// coop-windmill: a finished part's scene, together: the ready check of a story start, the starter in its box, every other player in
+// this town asked (by number: any count). The question row is the Georama scene's of this town (-2 - the town), as its Event pick's.
+// True: open (or opening: the starter waits in reach). Both copies alike (the walk step is lockstep state).
+// coop-storygaps: any story start together (fade: it goes on by FadeOutToEvent(event_no, level), else by its event at once); how: what
+// started it, as the log says it ("walk stands on a finished part", "Georama's Event pick", ...).
+bool PartSceneAsk(int event_no, int starter, int level, bool fade, const char *how) {
+    partscene::State &s = partscene::g;
+    bool              linked[coop::kMaxPlayers + 1] = {};
+    int               first = 0;
+    char              line[200];
+
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        linked[player] = player != starter && CoopTownPlayerPresent(player - 1);
+        first = first == 0 && linked[player] ? player : first;
+    }
+    if (first == 0) {
+        return false; // (nobody else here: the starter's own, as retail)
+    }
+    if (coop::ready::IsOpen()) {
+        return true; // (another start's check: this scene waits for its end, the starter on the part)
+    }
+    Ask(first, starter, -2 - (int) MapNo, false, false);
+    if (!g_question.open) {
+        return true; // (the last answer's Cross still down: asked once it is let go)
+    }
+    if (!coop::ready::Open(coop::ready::kStoryDoor, starter, linked)) {
+        g_question.open = false;
+        return true;
+    }
+    ReadyKeysReset();
+    ReadyHoldBusy();
+    g_question.open = coop::ready::FirstAsked() != 0;
+    s.asking = event_no;
+    s.starter = starter;
+    s.level = level;
+    s.fade = fade;
+    s.how = how;
+    std::snprintf(line, sizeof line, "partscene: player %d's %s in %s: its scene (town event %d) is a story start: held, every other player asked", starter, how,
+                  kTowns[MapNo < 5 ? MapNo : 0], event_no);
+    Log(line);
+    return true;
+}
+
+// coop-windmill: its ready check came to a start (ReadyStart): who goes along. Nobody along: the starter's alone (START NOW), the
+// others told and left where they are.
+void PartSceneStart(bool all) {
+    partscene::State &s = partscene::g;
+    char              line[200];
+    char              with[96] = "";
+    int               along = 0;
+    int               behind = 0;
+
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        const bool goes = player == s.starter || coop::ready::Accepted(player);
+
+        s.along[player] = goes;
+        if (goes) {
+            along += player == s.starter ? 0 : 1;
+            std::snprintf(with + std::strlen(with), sizeof with - std::strlen(with), "%splayer %d", with[0] != 0 ? ", " : "", player);
+        } else if (coop::ready::Get().status[player] != coop::ready::kNotAsked) {
+            behind++;
+            std::snprintf(line, sizeof line, "Player %d started the story scene without you", s.starter);
+            SetNote(player, line, true);
+        }
+    }
+    s.release = s.asking;
+    s.release_level = s.level;
+    s.release_fade = s.fade;
+    s.alone = along == 0;
+    std::snprintf(line, sizeof line, "partscene: %s: town event %d starts with %s (%d left behind)", all ? "every other player accepted" : "START NOW", s.asking, with,
+                  behind);
+    Log(line);
+    s.asking = -1;
+    // (two players linked today: along is everyone or nobody. Some of three or more: the group watches, the rest stay apart once the
+    // link carries a third.)
+}
+
+// coop-windmill: its ready check closed with nothing started (the starter's CANCEL, or the pair parted): asked again only once the
+// starter steps off the part and on again.
+void PartSceneClosed(const char *why) {
+    partscene::State &s = partscene::g;
+
+    if (s.asking < 0) {
+        return;
+    }
+    char line[160];
+
+    std::snprintf(line, sizeof line, "partscene: town event %d not started (%s): asked again once its player steps off the part", s.asking, why);
+    Log(line);
+    PartSceneLatch(s.starter, s.asking, s.fade); // (coop-storygaps: its starter's, by its source)
+    s.asking = -1;
+}
+
 // A door GotoInterior was told to take (CoopWorldsTakeInterior) that the gate keeps shut: GotoInterior returns before it
 // changes anything, and the town's CoopWorldsStayInTown after it does nothing (the asker walks on where they stand).
 bool g_refused = false;
@@ -5213,8 +6391,12 @@ bool g_refused = false;
 // The mod's own ways in (a catch-up's door to the host's building): never gated.
 bool g_mod_door = false;
 
+// coop-readyscreen: the opener's START NOW way in (CoopWorldsReenterBuilding): once, the story gate passed, so the door's own split
+// takes the opener in and leaves the others outside.
+bool g_ready_alone = false;
+
 bool Gated() {
-    return CoopWorldsStoryGather() && !Mutated("door_gate_off") && OtherLinked() && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && !g_reentering &&
+    return !Mutated("door_gate_off") && OtherLinked() && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && !g_reentering &&
            !g_mod_door && !NetplayCatchUnderWay();
 }
 
@@ -5228,6 +6410,10 @@ int Asker() {
 enum { kOpen = 0, kShut = 1, kBoth = 2 };
 
 int DoorFor(const char *name, int asker) {
+    if (g_ready_alone) {
+        g_ready_alone = false;
+        return kOpen;
+    }
     if (!Gated()) {
         return kOpen;
     }
@@ -5239,7 +6425,14 @@ int DoorFor(const char *name, int asker) {
         return kOpen;
     }
 
-    if (BothAtDoor()) {
+    // coop-storywarp (rule 2, Jep's rc1 playtest 11-13: P2 a few steps from Toan's door was taken into the Xiao scene with no question on
+    // either screen): how a story door starts with others linked is Jep's (A/B/C, asked 11-13). kStoryStart says it in one line:
+    // kStartAsk (A, the default): every other player is asked, beside the door or not, and it opens only on the yes (the yes's own way
+    // in, g_reentering, is that yes). kStartBesideGoes: the other beside the door goes in at once, as before. DC_WORLDS_MUTATE=
+    // story_beside_goes (twin): as kStartBesideGoes.
+    const bool beside_goes = kStoryStart == kStartBesideGoes || Mutated("story_beside_goes");
+
+    if (g_reentering || (beside_goes && BothAtDoor())) {
         char line[200];
 
         std::snprintf(line, sizeof line, "doorgate: both players at the door into %s (game flag %d unset): both go in together, player %d opened it",
@@ -5254,6 +6447,11 @@ int DoorFor(const char *name, int asker) {
 
 } // namespace doorgate
 } // namespace
+
+// coop-xiaogap: a short note on one player's screen (the door gate's note line: its player's copy, 4 s).
+void CoopWorldsPlayerNote(int player, const char *text) {
+    doorgate::SetNote(player, text);
+}
 
 bool CoopWorldsDoorRefused(const char *name, int asker) {
     return doorgate::DoorFor(name, asker) == doorgate::kShut;
@@ -5287,7 +6485,354 @@ bool CoopWorldsGeoramaEventRefused(int event_no) {
     return true;
 }
 
+// coop-windmill: the finished part's scene released on this copy, kept while it is still to come (its fade) or running; over once
+// it ran and the town is back to anything else.
+static doorgate::partscene::State &PartSceneLive() {
+    static bool seen = false;
+    auto       &s = doorgate::partscene::g;
+
+    if (s.running > 0) {
+        const bool runs = mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && GameMode == ED_MODE_EVENT && EdEventInfo.event_no == s.running;
+
+        if (runs) {
+            seen = true;
+        } else if (seen || mode != GAME_MODE_EDIT || EdInteriorFlag != 0) {
+            std::fprintf(stderr, "worlds: partscene: town event %d over on this copy\n", s.running);
+            std::fflush(stderr);
+            s.running = -1;
+            seen = false;
+        }
+    }
+    return s;
+}
+
+// The scene runs here now, with this copy's player along (its screen on the scene's camera).
+static bool PartSceneRunsHere() {
+    const auto &s = PartSceneLive();
+
+    return s.running > 0 && GameMode == ED_MODE_EVENT && EdEventInfo.event_no == s.running && NetplayLocalPlayer() >= 1 &&
+           NetplayLocalPlayer() <= coop::kMaxPlayers && s.along[NetplayLocalPlayer()];
+}
+
+bool CoopWorldsPartSceneShown() {
+    return On() && g_state.up && !g_state.apart && PartSceneRunsHere() && !Mutated("part_scene_gather_off");
+}
+
+// Apart, the starter's scene that nobody else came to (START NOW): its own, no merge into it till it is over (as a door's event,
+// DoorEventApart: the other walks on, never pulled in).
+bool CoopWorldsPartSceneAlone() {
+    return g_state.apart && PartSceneRunsHere() && PartSceneLive().alone && !Mutated("part_scene_gather_off");
+}
+
+// coop-storygaps: a player's stand (on a part, in a story event's reach) asked and closed (CANCEL; apart, called) is not asked again
+// till that player steps off: a gap in the steps it is asked on. One for stands on a part (the town loop's steps), one for story
+// events walked or talked into (link ticks). By player - 1.
+struct StandLatch {
+    int event[coop::kMaxPlayers] = {};
+    int last[coop::kMaxPlayers] = {}; // the step it was last asked on, + 1 (0: never)
+
+    bool Held(int player, int event_no, int step) {
+        if (player < 1 || player > coop::kMaxPlayers) {
+            return false;
+        }
+        const int i = player - 1;
+        const int was = last[i];
+
+        last[i] = step + 1;
+        if (event[i] == event_no && was > 0 && step != was) {
+            event[i] = 0; // (stepped off and on again: asked again)
+        }
+        return event[i] == event_no;
+    }
+    void Set(int player, int event_no) {
+        if (player >= 1 && player <= coop::kMaxPlayers) {
+            event[player - 1] = event_no;
+        }
+    }
+};
+static StandLatch g_part_latch;
+static StandLatch g_point_latch;
+
+// A closed gather's latch for its starter: its source's (PartSceneClosed's).
+static void PartSceneLatch(int player, int event_no, bool fade) {
+    (fade ? g_part_latch : g_point_latch).Set(player, event_no);
+}
+
+bool CoopWorldsPartSceneHeld(int event_no, int step) {
+    auto      &s = doorgate::partscene::g;
+    const bool latched = g_part_latch.Held(1, event_no, step);
+
+    if (!On() || NetplayLocalPlayer() == 0 || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || event_no <= 0 || (!g_state.up && !g_state.apart)) {
+        return false;
+    }
+    if (Mutated("part_scene_gather_off")) {
+        if (static int said = -1; said != event_no) {
+            said = event_no;
+            std::fprintf(stderr, "worlds: partscene: twin: town event %d starts unasked (part_scene_gather_off)\n", event_no);
+            std::fflush(stderr);
+        }
+        return false;
+    }
+    if (s.running == event_no) {
+        return false; // (released: its fade is under way, retail's own call is the same one)
+    }
+    if (s.release == event_no || latched || s.asking == event_no) {
+        return true; // (released: it goes on at the town's next free step, CoopWorldsStoryGatherDue)
+    }
+    if (g_state.apart) {
+        // Apart: the door's call (the Georama scene's row, as its Event pick apart), once a stand on the part; nobody else in the game: as retail.
+        if (!doorgate::Gated()) {
+            return false;
+        }
+        doorgate::Refuse(Player(), -2 - (int) MapNo, false, -1);
+        g_part_latch.Set(1, event_no);
+        return true;
+    }
+    // Together the game's walker (Toan) is player 1's: he is its starter.
+    return doorgate::PartSceneAsk(event_no, 1, 0, true, "walk stands on a finished part");
+}
+
+// coop-storygaps (gap 3: design for six, p2-like-p1): every other player's own body on a finished part starts its scene's gather as
+// Toan's does, that player its starter (retail reads the game's walker alone: her standing on it did nothing). Together; a busy
+// player (a talk, a menu, an own event) starts nothing till free. DC_WORLDS_MUTATE=body_part_scene_off (twin): nothing, as before.
+bool CoopWorldsPartSceneBodyAt(int player, float *at) {
+    if (!On() || !g_state.up || g_state.apart || NetplayLocalPlayer() == 0 || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || player < 2 ||
+        player > coop::kMaxPlayers || CoopTownPlayerBusy(player - 1) != nullptr) {
+        return false;
+    }
+    return CoopTownPlayerStandsAt(player - 1, at);
+}
+
+void CoopWorldsPartSceneBodyOn(int event_no, int step, int player) {
+    auto &s = doorgate::partscene::g;
+
+    if (Mutated("body_part_scene_off")) {
+        if (static int said = -1; said != event_no) {
+            said = event_no;
+            std::fprintf(stderr, "worlds: partscene: twin: player %d's body on a finished part (town event %d) starts nothing (body_part_scene_off)\n", player,
+                         event_no);
+            std::fflush(stderr);
+        }
+        return;
+    }
+    const bool latched = g_part_latch.Held(player, event_no, step);
+
+    if (Mutated("part_scene_gather_off") || latched || s.asking == event_no || s.release == event_no || s.running == event_no || event_no <= 0) {
+        return;
+    }
+    doorgate::PartSceneAsk(event_no, player, 0, true, "body stands on a finished part");
+}
+
+int CoopWorldsPlayerSlots() {
+    return coop::kMaxPlayers;
+}
+
+// coop-storygaps (gap 1): the Georama's own scenes together (its menu's Event pick: a finished part's scene again; its close's town
+// complete and Matataki's request) are story starts: the starter's box, everyone asked, as a finished part's. One asked while another
+// gather is open waits as its starter's (pending) and is asked once that one closes (requests never expire).
+// DC_WORLDS_MUTATE=georama_pick_gather_off (twin): it fades at once, every copy, as before.
+bool CoopWorldsStoryFadeHeld(int event_no, int level, int starter, const char *how) {
+    auto &s = doorgate::partscene::g;
+
+    if (!On() || !g_state.up || g_state.apart || NetplayLocalPlayer() == 0 || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || event_no <= 0 || starter < 1 ||
+        starter > coop::kMaxPlayers || Mutated("part_scene_gather_off")) {
+        return false;
+    }
+    if (Mutated("georama_pick_gather_off")) {
+        std::fprintf(stderr, "worlds: partscene: twin: town event %d (player %d's %s) starts unasked (georama_pick_gather_off)\n", event_no, starter, how);
+        std::fflush(stderr);
+        return false;
+    }
+    char line[220];
+
+    if (s.asking > 0 && s.starter == starter && s.fade && level > s.level) {
+        std::snprintf(line, sizeof line, "partscene: player %d's %s: town event %d takes the open gather's place (town event %d, a lower level), as its fade would", starter,
+                      how, event_no, s.asking);
+        Log(line);
+        s.asking = event_no;
+        s.level = level;
+        s.how = how;
+        return true;
+    }
+    if (s.asking > 0 || coop::ready::IsOpen() || s.release > 0) {
+        const int i = starter - 1;
+
+        if (s.pending[i] == 0 || level > s.pending_level[i]) {
+            s.pending[i] = event_no;
+            s.pending_level[i] = level;
+            s.pending_how[i] = how;
+            std::snprintf(line, sizeof line, "partscene: player %d's %s (town event %d) waits for the open gather: asked once it closes", starter, how, event_no);
+            Log(line);
+        }
+        return true;
+    }
+    if (doorgate::PartSceneAsk(event_no, starter, level, true, how)) {
+        if (s.asking != event_no) {
+            // (asked, not open yet: the last answer's Cross still down) asked once it is let go
+            s.pending[starter - 1] = event_no;
+            s.pending_level[starter - 1] = level;
+            s.pending_how[starter - 1] = how;
+        }
+        return true;
+    }
+    return false; // (nobody else here: as retail)
+}
+
+// coop-storygaps (gap 2): together, a town event a player walked or talked into (editloop's start: the walker's, player 1; a talk's,
+// its talker; her Cross's own) that is a story scene unseen here: a story start, its ready check first, as a story door's; it goes on
+// by its event once gathered (CoopWorldsStoryGatherDue). What is one: its script sets a constant game flag not set yet (_SSET_GAME_FLAG,
+// 700) or adds a party member (_SSET_PARTY_NUM, 710); one whose story is a finished part's (_SSET_CMP_EVENT, 260: Queens' 12) only
+// while that part is complete and its scene unseen (the script's own check). Not a pickup nor a way into a dungeon (its own split).
+// A script that waits for the Cross itself (its "!", _DRAW_EXCLAMATION_MARK, 10, run each step in reach) only on that Cross.
+// Apart: HoldStory's (not here). DC_WORLDS_MUTATE=story_point_gather_off (twin): it starts on every copy unasked, as before.
+bool CoopWorldsStoryStartHeld(const void *program, int event_no, int starter) {
+    auto &s = doorgate::partscene::g;
+
+    if (!On() || !g_state.up || g_state.apart || NetplayLocalPlayer() == 0 || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || program == nullptr ||
+        event_no <= 0 || starter < 1 || starter > coop::kMaxPlayers || SaveData == nullptr) {
+        return false;
+    }
+    if (s.running == event_no) {
+        return false; // (its own released start)
+    }
+
+    const auto *prog = static_cast<const RS_PROG_HEADER *>(program);
+    int         flags[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    int         parts[4] = {-1, -1, -1, -1};
+    const int   sets = std::min(ScriptExtCalls(prog, event_no, 700, flags, 8), 8);
+    const int   gated = std::min(ScriptExtCalls(prog, event_no, 260, parts, 4), 4);
+    int         unset = -1;
+    bool        part_due = false;
+    int         pickup = -1;
+
+    for (int i = 0; i < sets && unset < 0; i++) {
+        unset = flags[i] >= 0 && SaveData->GetGameFlag(flags[i]) == 0 ? flags[i] : -1;
+    }
+    for (int i = 0; i < gated; i++) {
+        part_due = part_due || (parts[i] >= 0 && EditPartsInfo.CheckComplete(parts[i]) != 0 && EditPartsInfo.GetCompEvent(parts[i]) == 0);
+    }
+    const bool member = ScriptExtCalls(prog, event_no, 710, nullptr, 0) != 0;
+    const bool story = gated > 0 ? part_due : (unset >= 0 || member);
+
+    if (!story || PickupOnly(program, event_no, &pickup) || IntoDungeonOnly(program, event_no)) {
+        return false;
+    }
+    if (ScriptExtCalls(prog, event_no, 10, nullptr, 0) != 0 && EdPadDown(0x40, 1) == 0) {
+        return false; // (its "!" in reach: the script reads the Cross itself)
+    }
+    if (Mutated("story_point_gather_off")) {
+        if (static int said = -1; said != event_no) {
+            said = event_no;
+            std::fprintf(stderr, "worlds: partscene: twin: story event %d (player %d's) starts unasked (story_point_gather_off)\n", event_no, starter);
+            std::fflush(stderr);
+        }
+        return false;
+    }
+    const bool latched = g_point_latch.Held(starter, event_no, (int) g_state.tick);
+
+    if (latched || s.asking == event_no || s.release == event_no) {
+        return true;
+    }
+    static char how[96]; // (the gather's how outlives this call)
+
+    std::snprintf(how, sizeof how, "story event (game flag %d%s) walked or talked into", unset, member ? ", a party member" : "");
+    return doorgate::PartSceneAsk(event_no, starter, 0, false, how); // (false: nobody else here, as retail)
+}
+
+// coop-storygaps: the gathered start goes on (editloop's free walk step, every copy alike): its fade or its event, on every copy along.
+// START NOW with nobody along: the pair splits as it starts, the others' copies stay and walk on (0 there). A pending start (asked
+// while another gather was open) is asked here once nothing is open.
+int CoopWorldsStoryGatherDue(int *level, bool *fade) {
+    auto &s = doorgate::partscene::g;
+    char  line[200];
+
+    if (!On() || NetplayLocalPlayer() == 0 || mode != GAME_MODE_EDIT || EdInteriorFlag != 0) {
+        return 0;
+    }
+    if (s.release <= 0) {
+        if (!g_state.up || g_state.apart || s.asking > 0 || coop::ready::IsOpen()) {
+            return 0;
+        }
+        for (int player = 1; player <= coop::kMaxPlayers; player++) {
+            const int i = player - 1;
+
+            if (s.pending[i] <= 0 || CoopTownPlayerBusy(i) != nullptr) {
+                continue;
+            }
+            const int  event_no = s.pending[i];
+            const bool asked = doorgate::PartSceneAsk(event_no, player, s.pending_level[i], true, s.pending_how[i]);
+
+            if (s.asking == event_no || !asked) {
+                s.pending[i] = 0;
+            }
+            if (!asked) {
+                *level = s.pending_level[i];
+                *fade = true;
+                return event_no; // (nobody else here any more: its own, as retail)
+            }
+            break;
+        }
+        return 0;
+    }
+
+    const int event_no = s.release;
+    const int starter = s.starter;
+
+    s.release = -1;
+    s.running = event_no;
+    *level = s.release_level;
+    *fade = s.release_fade;
+    PartSceneLive(); // (its fade first: still to come)
+    if (!g_state.apart && s.alone) {
+        const bool stays = Player() != starter;
+
+        std::snprintf(line, sizeof line, "partscene: town event %d is player %d's alone: the pair splits as it starts, this copy (player %d) %s", event_no, starter,
+                      Player(), stays ? "stays and walks on" : "plays it");
+        Log(line);
+        g_town_starter = starter;
+        SplitTo(Here(), -1, stays, starter);
+        if (stays) {
+            s.running = -1;
+            CoopWorldsStayInTown();
+            return 0;
+        }
+        if (Player() != 1) {
+            float at[3] = {};
+
+            coop::TownPlacePlayerAtPartner(at); // (its starter's copy: the game's walker is theirs from the split, where they stood)
+        }
+    }
+    std::snprintf(line, sizeof line, "partscene: town event %d starts on this copy (player %d)", event_no, Player());
+    Log(line);
+    return event_no;
+}
+
+static bool CoopWorldsTakeInteriorDecide(const char *name);
+
+// coop-daycrash: this copy leaves the town (a building, a map or a script's way out): the time of day's event in its world slot ends
+// here first (CoopDayTransTownLeft), as a zone load ends it.
 bool CoopWorldsTakeInterior(const char *name) {
+    const bool goes = CoopWorldsTakeInteriorDecide(name);
+
+    if (goes) {
+        CoopDayTransTownLeft("CoopWorldsTakeInterior");
+    }
+    return goes;
+}
+
+static bool CoopWorldsTakeInteriorDecide(const char *name) {
+    // coop-windmill: a finished part's scene that every player along watches together: its jump indoors takes them all, no split
+    // (and no door gate: its story is the one they gathered for). DC_WORLDS_MUTATE=part_scene_gather_off (twin): as any door.
+    if (On() && g_state.up && !g_state.apart && name != nullptr && PartSceneRunsHere() && !Mutated("part_scene_gather_off")) {
+        char line[160];
+
+        std::snprintf(line, sizeof line, "partscene: town event %d goes into %s: everyone along goes in together, no split", PartSceneLive().running, name);
+        Log(line);
+        PartSceneLive().running = -1;
+        g_town_starter = 1;
+        return true;
+    }
+
     // coop-doorgate (above): a room whose story needs both players.
     if (const int door = doorgate::DoorFor(name, doorgate::Asker()); door == doorgate::kShut) {
         doorgate::g_refused = true;
@@ -5488,6 +7033,15 @@ bool CoopWorldsPartnerMayStart(const void *program, int event_no) {
     if (!On() || !g_state.up || g_state.apart || NetplayLocalPlayer() == 0) {
         return false;
     }
+    // coop-askhold (Jep on DCO-151: "she should not be able to move while waiting for his answer"): a question that holds her (her
+    // swap question's waiting box, a gate's or a door's question, a ready check: CoopWorldsQuestionHolds, which already stands
+    // her stick) holds her Cross too. Every start of hers reads her own pad here (her room door, talks, pickups, town exits), so
+    // with her stick held she still went out of the mayor's room with her swap question up, and the split came under it (soak
+    // seed 51117193). She waits in her box till the answer or her own Circle (the asker's cancel, read by the question itself).
+    // DC_WORLDS_MUTATE=question_cross_starts (twin): her Cross starts things while held, as before.
+    if (CoopWorldsQuestionHolds(1) && !Mutated("question_cross_starts")) {
+        return false;
+    }
 
     // No program: only whether she may (linked and together), for her doors. coop-doorprompt: not with her picker at the
     // cave door open or closing this tick (its Cross is the picker's: as her door's it took both copies into the cave).
@@ -5511,6 +7065,10 @@ bool CoopWorldsLinkedTogether() {
 
 bool CoopWorldsMutatedDoor() {
     return Mutated("no_partner_door");
+}
+
+bool CoopWorldsMutatedQuestionCross() {
+    return Mutated("question_cross_starts"); // coop-askhold (CoopWorldsPartnerMayStart)
 }
 
 void CoopWorldsExitBy(int player) {
@@ -5674,7 +7232,8 @@ bool CoopWorldsP2Drives() {
 // 2026-10-20: his copy stayed Toan). DC_WORLDS_MUTATE=standin_unarmed (twin): she is unarmed here, as before co-op
 // gave a stand-in her weapon at the partner load (GrantStandInWeapon), and gets none. Apart now, so this copy alone
 // changes. Whether the change runs.
-static bool BecomeMember(int chara, const char *why) {
+// coop-memberowner: member_why is the change's word for the members' writer (a test hook's: kTest, never refused).
+static bool BecomeMember(int chara, const char *why, coop::MemberWhy member_why = coop::MemberWhy::kChange) {
     if (Mutated("standin_unarmed")) {
         UserStatus->equipped_weapon_slot[chara] = -1;
     }
@@ -5685,16 +7244,41 @@ static bool BecomeMember(int chara, const char *why) {
         std::fprintf(stderr, "worlds: %s: stand-in %d gets her starting weapon %d\n", why, chara, (int) UserStatus->chara_weapons[chara][0].item_no);
     }
 
-    const bool became = coop::PromptChangePlayer(chara);
+    const bool became = coop::PromptChangePlayer(chara, member_why);
 
     std::fprintf(stderr, "worlds: %s: the player became %d (%d)\n", why, (int) UserStatus->cur_chara, (int) became);
     std::fflush(stderr);
     return became;
 }
 
-void CoopWorldsStayOnFloor() {
-    char line[200];
+// coop-016 (option A, Jep 11-16: her menu stays open across a split she stays behind in; the stayer's role change waits for her
+// own close, so neither rule breaks: never close her menu, nobody waits). Her copy staying while her own local menu is open
+// (an item scene's START NOW or a gate's LEAVE NOW taken while she was in it): the menu goes on (its engine, its view of her
+// member and bag, its pad); her copy's world holds under it (she is its only player, as a menu holds the game alone); the stay
+// (her member as the game's player, placed where she stood, her camera, her bag into the game's pack) runs at her own close,
+// with what the split saw. A link coming up first (a merge) drops it: linked again, she is the partner as before.
+// DC_WORLDS_MUTATE=stay_menu_ends (twin): the menu ends at the split and the stay runs there, as before.
+// (g_stay: above FollowApart)
 
+bool CoopWorldsStayDeferred() {
+    // (only while no link is up: a merge's first lockstep ticks, before FollowApart drops the wait, step on every copy as linked;
+    // held here they parted the copies: OUT OF SYNC at tick 60 of x-item-scene-menustartnow-p1's merge, random and stages)
+    return g_stay.on && !NetplayLinkUp() && !NetplayCatchUnderWay();
+}
+
+// coop-menutpose (the developer's rc4 playtest): while her stay waits under her menu (the world held, she its only player), the game's player on
+// her copy is still the one who left (his Toan, at the gate he took) and her body is the partner's, which apart is neither stepped
+// nor drawn. So behind her menu her copy hides the game's player (CoopWorldsHideDungeonPlayer) and draws her own body where she
+// stood, unstepped (the world held: its pose as it was at the split), till her close's stay makes it the player.
+// DC_WORLDS_MUTATE=become_under_stay (twin, with the change below): her member made the game's player at his place, as before.
+bool CoopWorldsStayKeepsBody() {
+    return g_stay.on && Player() == 2 && mode == GAME_MODE_DUNGEON && !NetplayLinkUp() && coop::g_partner.chara != nullptr &&
+           coop::g_partner.loaded_chara == g_stay.chara && !Mutated("become_under_stay");
+}
+
+static void StayOnFloorNow(int chara, const float *at, bool placed);
+
+void CoopWorldsStayOnFloor() {
     // coop-dungeonp2: player 1's copy staying (player 2 escaped): Toan stays where he is, her partner gone from it.
     if (Player() == 1) {
         Log("stays on the floor as Toan where he stood (player 2 took the way out)");
@@ -5707,11 +7291,79 @@ void CoopWorldsStayOnFloor() {
 
     // (coop-menulocal: a local menu too, which FullMenuOwner, the lockstep menu's, never names; q-p2-quickslot reads the line)
     const int menu = coop::FullMenuOwner() != 0 ? coop::FullMenuOwner() : coop::FullMenuOpenFor(1) ? 1 : coop::FullMenuOpenFor(2) ? 2 : 0;
+    const bool keep = coop::FullMenuRunsLocalFor(Player()) && !Mutated("stay_menu_ends");
 
-    coop::FullMenuEndForSplit(); // the leaver's menu, still open here, ends; the pad leaves its stick mode
+    coop::FullMenuEndForSplit(keep); // the leaver's menu, still open here, ends (her own stays: option A); the pad leaves its stick mode
     std::fprintf(stderr, "worlds: staying: partner chara %d loaded %d, player chara %d, menu open %d\n", chara,
                  (int) (coop::g_partner.chara != nullptr), (int) UserStatus->cur_chara, menu);
     std::fflush(stderr);
+    if (keep) {
+        g_stay = StayDeferred{true, chara, placed, {pos[0], pos[1], pos[2], 1.0f}, (long long) g_state.tick};
+        std::fprintf(stderr, "worlds: staying: player %d's menu is open: it stays open, the stay (member %d as the player) waits for her own close (link tick %lld)\n",
+                     Player(), chara, (long long) g_state.tick);
+        std::fflush(stderr);
+        return;
+    }
+    StayOnFloorNow(chara, pos, placed);
+}
+
+// coop-016 (option A): her own menu's close on her copy (its close command applied): the stay the split left waiting runs now.
+void CoopWorldsStayMenuClosed(int player) {
+    if (!g_stay.on || player != Player()) {
+        return;
+    }
+    g_stay.on = false;
+    std::fprintf(stderr, "worlds: staying: player %d's menu closed at link tick %lld (%d of her menu's steps after the split): the stay runs now\n", player,
+                 (long long) g_state.tick, g_stay.steps);
+    std::fflush(stderr);
+    StayOnFloorNow(g_stay.chara, g_stay.pos, g_stay.placed);
+    FollowApart(); // (her bag into the game's pack, now that she is its player)
+}
+
+// Her menu's pad while her stay waits (apart: this copy's own pad, port 0). Test hook DC_WORLDS_TEST_STAY_CLOSE=N (x-item-scene,
+// x-dungeon-suite -AskerKey ...: her close apart): from N of her menu's steps after the split, a Circle 4 steps in every 30.
+InputPadState CoopWorldsStayPad() {
+    static const int close_at = TestEnvInt("DC_WORLDS_TEST_STAY_CLOSE", -1);
+    static int       steps = 0;
+    InputPadState    pad = coop::MenuOwnPad();
+
+    g_stay.steps++;
+
+    // coop-menutpose: the body her menu keeps behind it, every 60 of its steps while her stay waits (the game's player on her
+    // copy: its member, where it stands, its motion; and where she stood at the split): her screen's numbers (x-descent's row).
+    if (g_stay.on && g_stay.steps % 60 == 1 && UserStatus != nullptr) {
+        sceVu0FVECTOR body = {}, ref = {};
+
+        if (coop::g_partner.chara != nullptr) {
+            coop::g_partner.chara->GetPosition(body);
+        }
+        CoopViewDrawnRef(ref);
+        std::fprintf(stderr, "worlds: staying: under player %d's menu her copy's player is chara %d at (%.0f %.0f %.0f) motion %d; she stood at (%.0f %.0f %.0f) as %d; her partner body %s at (%.0f %.0f %.0f), its model at (%.0f %.0f %.0f) motion %d%s; her screen's view looks at (%.0f %.0f %.0f) (its camera: drawn from hers %d)\n",
+                     Player(), (int) UserStatus->cur_chara, CharaMain.pos[0], CharaMain.pos[1], CharaMain.pos[2], (int) CharaMain.motion_no, g_stay.pos[0],
+                     g_stay.pos[1], g_stay.pos[2], g_stay.chara, coop::g_partner.visible || CoopWorldsStayKeepsBody() ? "drawn" : "hidden", coop::g_partner.pos[0], coop::g_partner.pos[1],
+                     coop::g_partner.pos[2], body[0], body[1], body[2], coop::g_partner.chara != nullptr ? (int) coop::g_partner.chara->motion_no : -1,
+                     CoopWorldsStayKeepsBody() ? " (kept)" : "", ref[0], ref[1], ref[2], (int) (CoopViewChosenWhy() == 7));
+        std::fflush(stderr);
+    }
+
+    if (close_at >= 0 && g_stay.on) {
+        const int after = steps++ - close_at;
+
+        if (after >= 0 && after % 30 < 4) {
+            pad.buttons |= kInputCircle;
+            if (after % 30 == 0) {
+                std::fprintf(stderr, "worlds: test: player %d's Circle in her menu %d steps after the split\n", Player(), steps - 1);
+                std::fflush(stderr);
+            }
+        }
+    }
+    return pad;
+}
+
+static void StayOnFloorNow(int chara, const float *at, bool placed) {
+    char  line[200];
+    float pos[4] = {at[0], at[1], at[2], 1.0f};
+
 
     if (placed && chara != UserStatus->cur_chara && !Mutated("no_become")) {
         placed = BecomeMember(chara, "staying");
@@ -5849,7 +7501,7 @@ static bool TestExitDue(std::int64_t exit_at) {
     if (std::strcmp(on, "key") != 0) {
         return true;
     }
-    if (NowDngMap == nullptr || gameTask != GAME_TASK_PLAY) {
+    if (NowDngMap == nullptr || !CoopPlainPlay()) {
         return false;
     }
 
@@ -5947,7 +7599,7 @@ namespace {
 // coop-floorgate (Jep, 2026-10-28, "gather first"): a floor whose story is
 // still to come is gone into by both players or not at all. Its gate asks the other "Join?" (the door vote, with no leave
 // anyway: a no keeps both where they are, the asker told so and still playing); apart, the gate refuses and the other copy is
-// called. game.coop_story_gather false (the host's, as every setting the link shares): the gates as before.
+// called. (coop-gatherpicker: always so, game.coop_story_gather retired.)
 enum Gather {
     kGatherNone = 0,
     kGatherScene = 1, // its opening scene is still unseen (the game flag it sets, NetplayFloorSceneFlag)
@@ -5981,8 +7633,15 @@ bool BossBeaten(int map) {
 
 // Whether floor `to` (0 up) of dungeon `map` is one both players go into, and why (a Gather).
 int GatherFor(int map, int to) {
-    if (!CoopWorldsStoryGather() || Mutated("floor_gate_off") || map < 0 || map >= 7 || to < 0 || SaveData == nullptr) {
+    if (Mutated("floor_gate_off") || map < 0 || map >= 7 || to < 0 || SaveData == nullptr) {
         return kGatherNone;
+    }
+
+    // Test hook (cand1112c, x-entrance): DC_WORLDS_TEST_GATHER=1 makes every floor one both players go into (as an unseen opening
+    // scene would), so a row reaches the together walk-in (coop-entrance's rows; coop-choosing sends a plain floor's players to
+    // their own floor menus).
+    if (static const bool gather_all = TestEnv("DC_WORLDS_TEST_GATHER") != nullptr; gather_all) {
+        return kGatherScene;
     }
 
     const int flag = NetplayFloorStoryFlag(map, to); // coop-b4story: a mid-floor story too (the cave's floor 4)
@@ -5997,6 +7656,64 @@ int GatherFor(int map, int to) {
     }
 
     return kGatherNone;
+}
+
+// coop-forcefloor (Jep 11-14): the floors retail fences to one member. Each such floor's start (dun/script/d0N/event.stb,
+// program 100) calls F(z) = _SET_MAIN_CHR2(z) (selectChrUnit: the player becomes z) and then _SET_LIMMIT_ZONE(z), behind its
+// floor test ("floor - 1 == N", the cave's "floor == 10"); read from the disc's seven scripts (14 floors, 0 up). The floor start's
+// own force is checked against this at every floor (coop_zonechara's ZoneForceMetByOther: its "forcefloor: table" line).
+// DC_WORLDS_TEST_ZONE_FLOOR=map:floor:z (the test's): floor (0 up) of dungeon map is fenced to z as well.
+int ZoneFloorChara(int map, int to) {
+    struct ZoneFloor {
+        signed char map, floor, chara;
+    };
+    static constexpr ZoneFloor kZoneFloors[] = {{0, 10, 1}, {1, 3, 1},  {1, 11, 2}, {2, 4, 1},  {2, 11, 3}, {3, 4, 2},  {3, 12, 4},
+                                                {4, 3, 3},  {4, 10, 5}, {5, 18, 1}, {5, 19, 2}, {5, 20, 3}, {5, 21, 4}, {5, 22, 5}};
+    static int  test_map = -1, test_floor = -1, test_chara = -1;
+    static bool test_read = false;
+
+    if (!test_read) {
+        test_read = true;
+        if (const char *const test = TestEnv("DC_WORLDS_TEST_ZONE_FLOOR"); test != nullptr) {
+            std::sscanf(test, "%d:%d:%d", &test_map, &test_floor, &test_chara);
+        }
+    }
+    if (map == test_map && to == test_floor) {
+        return test_chara;
+    }
+    for (const ZoneFloor &zone : kZoneFloors) {
+        if (zone.map == map && zone.floor == to) {
+            return zone.chara;
+        }
+    }
+    return -1;
+}
+
+const char *const kMemberNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
+
+const char *MemberName(int chara) {
+    return chara >= 0 && chara < 6 ? kMemberNames[chara] : "nobody";
+}
+
+// coop-forcefloor: whether this copy's player, apart, going onto floor `to` of dungeon `map` meets a fenced floor whose member
+// another player plays elsewhere: that player's number (1 up), else 0; *chara the floor's member (-1 none). Apart is two copies
+// (each a world of its own), so the other is the other copy's player, by the trade across zones' word for its member
+// (PromptApartOtherMember). Not when this player plays it, not while that copy is unheard (a player gone from the link holds
+// nobody back, as at the story gate), and not when that copy is on the floor already (the merge brings both, and the floor's
+// force counts them together there). DC_WORLDS_MUTATE=forcefloor_off (twin): never, as before (the floor's force switches this
+// player, two players on one member).
+int ForceHolder(int map, int to, int *chara) {
+    *chara = ZoneFloorChara(map, to);
+    if (*chara < 0 || !On() || !g_state.apart || !g_state.peer_heard || UserStatus == nullptr || Mutated("forcefloor_off")) {
+        return 0;
+    }
+    if (coop::PromptApartOwnMember() == *chara) {
+        return 0;
+    }
+    if (g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == map && g_state.peer.floor == to) {
+        return 0;
+    }
+    return coop::PromptApartOtherMember() == *chara ? 3 - Player() : 0;
 }
 
 // "Divine Beast Cave floor 2"
@@ -6045,12 +7762,68 @@ struct CallAsk {
     int  shown = 0;    // frames shown
     std::uint16_t held = 0;
     bool waited = false; // (coop-playfix: its wait for this copy's floor menu logged)
+    int  waiting = 0;    // coop-askwait: ticks this copy's player was busy since the call came (its question waits meanwhile)
+    int  force = -1;     // coop-forcefloor: the member the floor is fenced to, which this copy's player plays (-1: a story call)
+    int  theirs = -1;    // (and the caller's member, its offer for a swap)
 };
 
 CallAsk g_call_ask;
 
+// coop-forcefloor: the caller's own record of the call it sent for a fenced floor, and, after the holder's "go" (a story floor's
+// call or a fenced floor's), the player on its way to this copy's floor till the merge (coop-golapse: or till the go lapses,
+// ComingLapsed).
+struct ForceSent {
+    int map = -1;
+    int to = -1;
+    int chara = -1; // the floor's member (the holder's)
+    int mine = -1;  // the caller's member then
+};
+ForceSent g_force_sent;
+struct ForceComing {
+    int                                   map = -1;
+    int                                   to = -1;
+    int                                   chara = -1;
+    std::chrono::steady_clock::time_point since{};
+};
+ForceComing g_force_coming;
+
+// coop-golapse (Jep 11-14: "a go that lapses is treated like a cancel", story floors and fenced floors alike): the holder said go
+// but gave up on its way (its 60 s follow, told by answer 5) or never came before this copy's own wait ran out (75 s). Before,
+// neither side told this one: the holder's give-up stayed on its copy, and the record ran out silently. Now this player is told
+// plainly; nothing switches it (the floor's rule counts the holder's member as played elsewhere: coop_zonechara's ZoneHolders).
+// DC_WORLDS_MUTATE=go_lapse_silent (twin): the record dropped untold, as before.
+void ComingLapsed(const char *why) {
+    const ForceComing c = g_force_coming;
+    char              line[160];
+
+    if (c.map < 0) {
+        std::fprintf(stderr, "worlds: golapse: player %d %s, no go of its pending on this copy\n", 3 - Player(), why);
+        std::fflush(stderr);
+        return;
+    }
+    g_force_coming = ForceComing{};
+    std::fprintf(stderr, "worlds: golapse: player %d said go to %s but %s: this copy's player (player %d) is told and keeps %s\n", 3 - Player(),
+                 FloorName(c.map, c.to), why, Player(), MemberName(coop::PromptApartOwnMember()));
+    std::fflush(stderr);
+    if (Mutated("go_lapse_silent")) {
+        return;
+    }
+    std::snprintf(line, sizeof line, "%s didn't make it to %s", NetplayShownName((int) (3 - Player())).c_str(), FloorName(c.map, c.to));
+    SetGatherNote(Player(), line, true);
+}
+
 // coop-gateflow: a call's floor (to) that is the go-along question of a gate taken to the floor menu (AskAlong, below).
 constexpr int kAlongTo = -3;
+// coop-firstvisit: a call's floor (to) that is a town's story arrival (the call's map the town, its floor the arrival event).
+constexpr int kTownStoryTo = -5;
+// coop-choosing (ura): the go-along question of a floor's back half (another player went in): yes runs that door here, its
+// question answered (coop::UraEnterAgain).
+constexpr int kAlongBack = -4;
+struct AlongBack {
+    int script = -1;
+    int slot = -1;
+};
+AlongBack g_along_back;
 void          ReachNextFloor();
 
 // The caller's copy: the gate whose call was answered "coming", to take now (CallTick), and let through once (CoopWorldsHoldFloorChange).
@@ -6075,8 +7848,41 @@ struct CallFollow {
 
 CallFollow g_call_follow;
 
-void CallReceived(int from, int map, int to, int floor) {
+// coop-askwait: apart, floor calls from other players while one is up or waiting on this copy queue here in the order they came
+// (one per caller: its newest) and are asked in turn as each closes (CallTick); a withdrawn call leaves it, a merge empties it.
+// (With no clock on a question, a call written over here would leave its caller waiting till its own Circle.)
+std::vector<CallAsk> g_call_queue;
+
+void CallReceived(int from, int map, int to, int floor, int force_mine) {
+    if (g_call_ask.from != 0 && g_call_ask.from != from && g_call_ask.to != kAlongTo && g_call_ask.to != kAlongBack) {
+        CallAsk next{from, map, to, floor};
+
+        if (force_mine >= 0) {
+            next.force = ZoneFloorChara(map, to);
+            next.theirs = force_mine;
+        }
+        auto it = std::find_if(g_call_queue.begin(), g_call_queue.end(), [&](const CallAsk &a) { return a.from == from; });
+
+        if (it == g_call_queue.end()) {
+            g_call_queue.push_back(next);
+        } else {
+            *it = next;
+        }
+        std::fprintf(stderr, "worlds: askwait: player %d's call to %s queues behind player %d's on this copy (player %d, %d queued)\n", from, FloorName(map, to),
+                     g_call_ask.from, Player(), (int) g_call_queue.size());
+        std::fflush(stderr);
+        return;
+    }
     g_call_ask = CallAsk{from, map, to, floor};
+    if (force_mine >= 0) {
+        g_call_ask.force = ZoneFloorChara(map, to);
+        g_call_ask.theirs = force_mine;
+        std::fprintf(stderr, "worlds: forcefloor: player %d (%s) calls this copy (player %d, %s) to %s, fenced to %s\n", from, MemberName(force_mine), Player(),
+                     MemberName(coop::PromptApartOwnMember()), FloorName(map, to), MemberName(g_call_ask.force));
+    }
+    if (to == kTownStoryTo) { // coop-firstvisit (ArriveHeard says it)
+        return;
+    }
     std::fprintf(stderr, "worlds: gather: player %d calls this copy (player %d) to %s, from floor %d\n", from, Player(), FloorName(map, to), floor + 1);
     std::fflush(stderr);
 }
@@ -6085,37 +7891,78 @@ void CallReceived(int from, int map, int to, int floor) {
 void CallWithdrawn(int from) {
     char line[96];
 
+    const auto queued = std::remove_if(g_call_queue.begin(), g_call_queue.end(), [&](const CallAsk &a) { return a.from == from; });
+
+    if (queued != g_call_queue.end()) { // (coop-askwait: a queued call withdrawn leaves the queue, never asked)
+        g_call_queue.erase(queued, g_call_queue.end());
+        std::fprintf(stderr, "worlds: askwait: player %d withdrew its queued call on this copy\n", from);
+        std::fflush(stderr);
+    }
     if (g_call_ask.from != from) {
         return;
     }
     g_call_ask = CallAsk{};
-    std::snprintf(line, sizeof line, "Player %d cancelled the invite", from);
+    std::snprintf(line, sizeof line, "%s cancelled the invite", NetplayShownName((int) from).c_str());
     SetGatherNote(Player(), line, true);
     std::fprintf(stderr, "worlds: gather: player %d withdrew the call: its question closes on this copy\n", from);
     std::fflush(stderr);
 }
 
 void CallAnswered(int map, int to, int answer) {
-    const bool coming = answer == 1;
-    char       line[160];
+    if (answer == 5) { // coop-golapse: the holder's go given up on its way
+        ComingLapsed("gave up on its way");
+        return;
+    }
+    // coop-forcefloor: the answer to this copy's call for a fenced floor. 4, a swap: the holder's copy has taken its side (it plays
+    // this player's member); this copy takes its own (this player plays the floor's member) and goes on alone. 1: the holder
+    // follows. Anything else: this player stays, told why. DC_WORLDS_MUTATE=forcefloor_swap_unapplied (twin): this side not taken
+    // (both players on the floor's member).
+    const ForceSent force = g_force_sent.map == map && g_force_sent.to == to ? g_force_sent : ForceSent{};
+    const bool      swap = answer == 4 && force.map >= 0;
+    // DC_WORLDS_MUTATE=forcefloor_cancel_goes (twin): the holder's cancel lets this player on as a "go" would.
+    const bool      coming = answer == 1 || swap || (force.map >= 0 && answer == 0 && Mutated("forcefloor_cancel_goes"));
+    char            line[160];
 
+    g_force_sent = ForceSent{};
     if (doorgate::g_wait_answer != std::chrono::steady_clock::time_point{}) {
         doorgate::WaitForAnswer(false); // coop-gatepopup: the asker's wait ends
     }
+    if (swap && !Mutated("forcefloor_swap_unapplied")) {
+        coop::PromptApartApply(force.chara, force.mine);
+    }
+    if (answer == 1) { // (coop-golapse: a story floor's go too, chara -1)
+        g_force_coming = ForceComing{map, to, force.map >= 0 ? force.chara : -1, std::chrono::steady_clock::now()};
+    }
+    if (force.map >= 0) {
+        std::fprintf(stderr, "worlds: forcefloor: the call to %s (%s's floor) answered %s on this copy (player %d, %s)\n", FloorName(map, to),
+                     MemberName(force.chara), swap ? "swap" : answer == 1 ? "go" : answer == 3 ? "no answer" : answer == 2 ? "busy" : "cancel", Player(),
+                     MemberName(coop::PromptApartOwnMember()));
+        std::fflush(stderr);
+    }
+    if (force.map >= 0 && !coming) {
+        std::snprintf(line, sizeof line, "%s %s. %s is %s's floor", NetplayShownName((int) (3 - Player())).c_str(),
+                      answer == 3 ? "didn't answer" : answer == 2 ? "is busy right now" : "can't come now", FloorName(map, to), MemberName(force.chara));
+        g_pick_pending = -1;
+        SetGatherNote(Player(), line, true);
+        return;
+    }
     if (answer == 3) { // coop-gatepopup: its question timed out on the other copy
-        std::snprintf(line, sizeof line, "Player %d didn't answer. %s needs both players", 3 - Player(), FloorName(map, to));
+        std::snprintf(line, sizeof line, "%s didn't answer. %s needs both players", NetplayShownName((int) (3 - Player())).c_str(), FloorName(map, to));
     } else if (answer == 2) {
-        std::snprintf(line, sizeof line, "Player %d is busy right now. %s needs both players", 3 - Player(), FloorName(map, to));
+        std::snprintf(line, sizeof line, "%s is busy right now. %s needs both players", NetplayShownName((int) (3 - Player())).c_str(), FloorName(map, to));
     } else if (coming && !Mutated("call_yes_ignored") && g_pick_pending == to) {
         g_pick_go = to; // coop-gatepopup2: the floor menu's pick goes through (CoopWorldsEntrancePad)
-        std::snprintf(line, sizeof line, "Player %d is coming. On to %s", 3 - Player(), FloorName(map, to));
+        std::snprintf(line, sizeof line, "%s is coming. On to %s", NetplayShownName((int) (3 - Player())).c_str(), FloorName(map, to));
     } else if (coming && !Mutated("call_yes_ignored")) {
         g_call_go = CallGo{map, to - 1, g_call_script};
-        std::snprintf(line, sizeof line, "Player %d is coming. On to %s", 3 - Player(), FloorName(map, to));
+        std::snprintf(line, sizeof line, "%s is coming. On to %s", NetplayShownName((int) (3 - Player())).c_str(), FloorName(map, to));
     } else {
-        std::snprintf(line, sizeof line, "Player %d can't come now. %s needs both players", 3 - Player(), FloorName(map, to));
+        std::snprintf(line, sizeof line, "%s can't come now. %s needs both players", NetplayShownName((int) (3 - Player())).c_str(), FloorName(map, to));
     }
 
+    if (swap) {
+        std::snprintf(line, sizeof line, "Swapped with player %d. On to %s as %s", 3 - Player(), FloorName(map, to), MemberName(force.chara));
+    }
     g_pick_pending = -1;
     SetGatherNote(Player(), line, true);
     std::fprintf(stderr, "worlds: gather: the call to %s answered: %s (gate script %d kept %d)\n", FloorName(map, to),
@@ -6133,7 +7980,7 @@ bool CallFree() {
         return DEnterMenu.state == DUN_ENTER_SELECT && !coop::FullMenuOpenFor(Player());
     }
     if (mode == GAME_MODE_DUNGEON) {
-        return gameTask == GAME_TASK_PLAY && BtGameModeFlag == BT_GAME_MODE_PLAY && BtEventMode == 0 && !coop::FullMenuOpenFor(Player());
+        return CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY && BtEventMode == 0 && !coop::FullMenuOpenFor(Player());
     }
 
     // coop-gatepopup2 (Jep's 2026-10-28 playtest: the cave's call was drawn over P2's talk with the mayor, his name tag over its
@@ -6150,14 +7997,60 @@ bool CallFree() {
         return mode == GAME_MODE_EDIT && !coop::FullMenuOpenFor(Player()) && CoopTownIndoorWalks();
     }
 
-    return mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK && !coop::FullMenuOpenFor(Player()) &&
+    // coop-arrivalwait: outdoors, retail's walk (GameMode ED_MODE_WALK) is free play; a town event (ED_MODE_EVENT, 14: an arrival's
+    // own few frames, or a story scene such as a first visit's, whose talk waits on the player's Cross) is not.
+    // DC_WORLDS_MUTATE=call_town_walk_busy (twin of t-memberowner-arriveask): the walk read busy, an idle player never asked.
+    return mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK && !Mutated("call_town_walk_busy") && !coop::FullMenuOpenFor(Player()) &&
            (EdInteriorFlag == 0 || CoopTownIndoorWalks());
 }
 
 // Apart, each frame: the call's question, once this player is free; its keys from this copy's own pad. DC_WORLDS_TEST_CALL=yes|no
 // (the test's): answered so a second after it shows.
+void ArriveAnswer(const CallAsk &asked, bool yes); // coop-firstvisit (below)
+
 void CallTick() {
     CallAsk &c = g_call_ask;
+
+    // coop-golapse: this copy's record of a holder on its way after its go: merged, it is here; 75 s apart (the holder's own wait
+    // for this copy is 60), it never came. Test hook DC_WORLDS_TEST_COMING_LAPSE=1: the 75 s counted out once this copy is on the
+    // called floor (its opening scene too).
+    if (g_force_coming.map >= 0) {
+        static const bool lapse_test = TestEnvOn("DC_WORLDS_TEST_COMING_LAPSE");
+        const ForceComing &coming = g_force_coming;
+        const bool         on_floor = mode == GAME_MODE_DUNGEON && UserStatus != nullptr && selectMapNo == coming.map && UserStatus->cur_floor == coming.to;
+
+        if (!g_state.apart) {
+            std::fprintf(stderr, "worlds: golapse: player %d, coming onto %s, is here (merged)\n", 3 - Player(), FloorName(coming.map, coming.to));
+            std::fflush(stderr);
+            g_force_coming = ForceComing{};
+        } else if ((lapse_test && on_floor) || std::chrono::steady_clock::now() - coming.since > std::chrono::seconds(75)) {
+            ComingLapsed(lapse_test ? "never came (test, its wait counted out)" : "never came in 75 s");
+        }
+    }
+
+    // coop-askwait: the asker's wait has no clock now, so together again (a merge: the asked copy's question closed with it) it
+    // ends here, never left over for the next split's box.
+    if (!g_state.apart && doorgate::Waiting()) {
+        std::fprintf(stderr, "worlds: askwait: together again: this copy's (player %d) wait for its call's answer ends\n", Player());
+        std::fflush(stderr);
+        doorgate::g_sent = doorgate::SentCall{};
+        doorgate::WaitForAnswer(false);
+    }
+    // coop-askwait: the next queued call (another caller's) comes up once this copy's question has closed, in the order they came;
+    // together again the queue closes with the rest.
+    if (!g_call_queue.empty()) {
+        if (!g_state.apart) {
+            g_call_queue.clear();
+            std::fprintf(stderr, "worlds: askwait: together again: the queued calls on this copy close\n");
+            std::fflush(stderr);
+        } else if (c.from == 0) {
+            c = g_call_queue.front();
+            g_call_queue.erase(g_call_queue.begin());
+            std::fprintf(stderr, "worlds: askwait: player %d's queued call to %s comes next on this copy (player %d, %d still queued)\n", c.from, FloorName(c.map, c.to),
+                         Player(), (int) g_call_queue.size());
+            std::fflush(stderr);
+        }
+    }
 
     // coop-gatepopup: on a floor, this copy waiting for its call's answer: its own Circle withdraws it (the town's is stepped
     // with the door's question, CoopWorldsDoorQuestionPad).
@@ -6167,7 +8060,7 @@ void CallTick() {
 
     // The caller's copy, its call answered "coming": its gate's script now, on the floor it called from, its escape window
     // answered "the next floor" (CoopWorldsHoldFloorChange lets this one through).
-    if (g_call_go.map >= 0 && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && gameTask == GAME_TASK_PLAY &&
+    if (g_call_go.map >= 0 && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && CoopPlainPlay() &&
         BtGameModeFlag == BT_GAME_MODE_PLAY) {
         const CallGo go = g_call_go;
         CDungeonEventData *gate = go.map == selectMapNo && go.floor == UserStatus->cur_floor ? GateEvent(go.script) : nullptr;
@@ -6215,7 +8108,11 @@ void CallTick() {
         const bool opening = g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == f.map && g_state.peer.floor == -2 &&
                              g_state.peer_floor_rand_set && g_state.peer_floor_rand_map == f.map && g_state.peer_floor_rand_floor == f.to &&
                              !Mutated("call_scene_wait");
-        const bool       there = g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == f.map &&
+        // coop-golapse test hooks (the called copy): DC_WORLDS_TEST_FOLLOW_HOLD=1, the caller never counts as there (her copy
+        // stays black, never comes); DC_WORLDS_TEST_FOLLOW_GIVEUP=1, the 60 s counted out at the first tick of the follow.
+        static const bool follow_hold = TestEnvOn("DC_WORLDS_TEST_FOLLOW_HOLD");
+        static const bool follow_giveup = TestEnvOn("DC_WORLDS_TEST_FOLLOW_GIVEUP");
+        const bool       there = !follow_hold && !follow_giveup && g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == f.map &&
                            (g_state.peer.floor == f.to || opening);
 
         if (there || !g_state.apart) {
@@ -6227,12 +8124,17 @@ void CallTick() {
                 std::fflush(stderr);
                 NetplayGoToFloor(f.map, f.to);
             }
-        } else if (std::chrono::steady_clock::now() - f.since > std::chrono::seconds(60)) {
+        } else if (follow_giveup || std::chrono::steady_clock::now() - f.since > std::chrono::seconds(60)) {
             g_call_follow = CallFollow{};
             EdFadeIn(30, 0.0f, 0.0f, 0.0f);
             SetGatherNote(Player(), "The other player did not go on. You stay here", true);
-            std::fprintf(stderr, "worlds: gather: player %d never reached %s in 60 s: this copy stays\n", 3 - Player(), FloorName(f.map, f.to));
+            std::fprintf(stderr, "worlds: gather: player %d never reached %s in %s: this copy stays\n", 3 - Player(), FloorName(f.map, f.to),
+                         follow_giveup ? "its wait (test: counted out)" : "60 s");
             std::fflush(stderr);
+            // coop-golapse: the caller is told its go lapsed (answer 5). DC_WORLDS_MUTATE=go_giveup_unsent (twin): not told, as before.
+            if (!Mutated("go_giveup_unsent")) {
+                QueueProgress(kWhatCallAnswer, f.to, 5, f.map, 0);
+            }
         }
     }
 
@@ -6245,22 +8147,27 @@ void CallTick() {
         return;
     }
 
-    // (Jep, 2026-10-28: "guards in place to prevent that popup from disrupting something like a cutscene or minigame ... it should
-    // just autoreject in the case with the message that the other player is busy"): a player not free (a scene, an event, a
-    // talk, a minigame, a menu) is not asked; the caller is told this player is busy. Once asked, a question that loses its
-    // player to something else (a monster's hit starts no event; a scene would) is answered busy too. DC_WORLDS_TEST_CALL_BUSY=1
-    // (the test's): this copy counts as busy. DC_WORLDS_MUTATE=call_busy_waits (twin): it waits for the player, as first built.
-    static const bool test_busy = TestEnvInt("DC_WORLDS_TEST_CALL_BUSY", 0) != 0;
+    // coop-askwait (Jep 11-15: "if the requester has a cancel button, there's no need to have it automatically expire. The requester
+    // can just choose when they want to back out"; he saw a call to a player in a scene simply auto-reject): a player not free (a
+    // scene, an event, a talk, a minigame, a menu) is not asked yet: the question waits, never drawn over the game's own UI, and
+    // comes up once this player is free, however long that takes; a question that loses its player to something else goes back to
+    // waiting the same way. The caller waits in its box meanwhile (its Circle withdraws: CallWithdrawn); nothing answers "busy".
+    // (It auto-rejected since 2026-10-28.) DC_WORLDS_TEST_CALL_BUSY=N (the test's): this copy counts as busy for the call's first N
+    // ticks here. DC_WORLDS_MUTATE=call_busy_rejects (twin): busy answers "busy" at once, as before.
+    static const int test_busy_ticks = TestEnvInt("DC_WORLDS_TEST_CALL_BUSY", 0);
+    const bool       test_busy = test_busy_ticks > 0 && c.waiting < test_busy_ticks;
 
     // coop-gateflow: the go-along question is this copy's own: it waits while its player is busy (the split's own change of
     // player runs first) and goes once this copy has left that floor.
-    if (c.to == kAlongTo && (mode != GAME_MODE_DUNGEON || UserStatus == nullptr || selectMapNo != c.map || UserStatus->cur_floor != c.floor)) {
+    if ((c.to == kAlongTo || c.to == kAlongBack) && (mode != GAME_MODE_DUNGEON || UserStatus == nullptr || selectMapNo != c.map || UserStatus->cur_floor != c.floor)) {
         c = CallAsk{};
         std::fprintf(stderr, "worlds: gateflow: this copy (player %d) left the floor: the go-along question closes\n", Player());
         std::fflush(stderr);
         return;
     }
-    if (c.to == kAlongTo && !CallFree() && !test_busy) {
+    // (coop-goalong: so a player in her own menu as he leaves gets the question once she closes it. DC_WORLDS_MUTATE=along_busy_closes
+    // (twin): a busy player's go-along question closes at once, unseen.)
+    if ((c.to == kAlongTo || c.to == kAlongBack) && !CallFree() && !test_busy && !Mutated("along_busy_closes")) {
         c.shown = 0;
         return;
     }
@@ -6270,8 +8177,10 @@ void CallTick() {
         // waits for the menu (CallFree) and is asked there.
         const bool way_in = mode == GAME_MODE_DUNGEON && BtGameModeFlag == BT_GAME_MODE_ENTRANCE_MENU && !Mutated("call_entrance_busy");
 
-        if (Mutated("call_busy_waits") || (way_in && !test_busy)) {
-            if (way_in && !c.waited) {
+        const bool along = c.to == kAlongTo || c.to == kAlongBack;
+
+        if (way_in && !test_busy) {
+            if (!c.waited) {
                 c.waited = true;
                 std::fprintf(stderr, "worlds: gather: player %d's call waits for this copy's floor menu (player %d coming into the entrance)\n", c.from, Player());
                 std::fflush(stderr);
@@ -6279,19 +8188,32 @@ void CallTick() {
             c.shown = 0;
             return;
         }
+        if (along || Mutated("call_busy_rejects")) {
+            const CallAsk asked = c;
 
-        const CallAsk asked = c;
-
-        c = CallAsk{};
-        if (asked.to == kAlongTo) { // coop-gateflow: this copy's own question: no answer goes back
-            std::fprintf(stderr, "worlds: gateflow: this copy (player %d) is busy: the go-along question closes\n", Player());
+            c = CallAsk{};
+            if (along) { // coop-gateflow: this copy's own question (the test's busy, or the along_busy_closes twin): no answer goes back
+                std::fprintf(stderr, "worlds: gateflow: this copy (player %d) is busy: the go-along question closes\n", Player());
+                std::fflush(stderr);
+                return;
+            }
+            QueueProgress(kWhatCallAnswer, asked.to, 2, asked.map, 0);
+            std::fprintf(stderr, "worlds: gather: this copy (player %d) is busy (mode %d task %d game mode %d event %d): player %d's call is not asked\n",
+                         Player(), (int) mode, (int) gameTask, (int) BtGameModeFlag, (int) BtEventMode, asked.from);
             std::fflush(stderr);
             return;
         }
-        QueueProgress(kWhatCallAnswer, asked.to, 2, asked.map, 0);
-        std::fprintf(stderr, "worlds: gather: this copy (player %d) is busy (mode %d task %d game mode %d event %d): player %d's call is not asked\n",
-                     Player(), (int) mode, (int) gameTask, (int) BtGameModeFlag, (int) BtEventMode, asked.from);
-        std::fflush(stderr);
+
+        // coop-askwait: the question waits (hidden: shown 0, so its grace runs again when it comes up) for this player to be free.
+        if (c.waiting++ % 600 == 0) {
+            char why[320];
+
+            CoopWorldsCallFreeWhy(why, sizeof why);
+            std::fprintf(stderr, "worlds: askwait: player %d's call waits for this copy's player (player %d) to be free (%d ticks so far%s; %s)\n", c.from, Player(),
+                         c.waiting - 1, c.shown > 0 ? ", taken from its question" : "", test_busy ? "the test's busy" : why);
+            std::fflush(stderr);
+        }
+        c.shown = 0;
         return;
     }
 
@@ -6303,16 +8225,21 @@ void CallTick() {
     c.held = buttons;
 
     if (c.shown++ == 0) {
-        std::fprintf(stderr, "worlds: gather: the call is asked on this copy (player %d)\n", Player());
+        std::fprintf(stderr, "worlds: gather: the call is asked on this copy (player %d), after %d ticks waiting for its player\n", Player(), c.waiting);
         std::fflush(stderr);
     }
 
-    // coop-gatepopup: unanswered for kAskTicks frames, the caller is told so (3), as the door's call (its asker waits meanwhile).
-    if (c.shown > doorgate::kAskTicks && test == nullptr) {
+    // coop-askwait: an asked question stays up till its player answers or the caller withdraws it (the go-along question, this
+    // copy's own with nobody waiting on it, still closes unanswered after kAskTicks). DC_WORLDS_MUTATE=ask_lapse (twin): any
+    // question unanswered for kAskTicks frames tells the caller "didn't answer" (3), as before (coop-gatepopup).
+    static const char *test_at = test != nullptr ? std::strchr(test, '@') : nullptr; // (DC_WORLDS_TEST_CALL=answer@N: at its Nth tick up)
+    const int          answer_at = test_at != nullptr ? std::atoi(test_at + 1) : 60;
+
+    if (c.shown > doorgate::kAskTicks && (test == nullptr || test_at != nullptr) && (c.to == kAlongTo || c.to == kAlongBack || Mutated("ask_lapse"))) {
         const CallAsk asked = c;
 
         c = CallAsk{};
-        if (asked.to == kAlongTo) { // coop-gateflow
+        if (asked.to == kAlongTo || asked.to == kAlongBack) { // coop-gateflow
             std::fprintf(stderr, "worlds: gateflow: the go-along question on this copy (player %d) unanswered: it stays\n", Player());
             std::fflush(stderr);
             return;
@@ -6323,36 +8250,55 @@ void CallTick() {
         return;
     }
 
-    bool yes = false, no = false;
+    bool yes = false, no = false, swap = false;
+    // coop-forcefloor: a fenced floor's call has three rows: GO TO FLOOR (0), SWAP (1), CANCEL (2). DC_WORLDS_TEST_CALL=swap (the
+    // test's): the second.
+    const int rows = c.force >= 0 ? 3 : 2;
 
     if (test != nullptr) {
-        yes = c.shown == 60 && std::strncmp(test, "yes", 3) == 0;
-        no = c.shown == 60 && std::strncmp(test, "no", 2) == 0;
+        yes = c.shown == answer_at && std::strncmp(test, "yes", 3) == 0;
+        no = c.shown == answer_at && std::strncmp(test, "no", 2) == 0;
+        swap = c.shown == answer_at && c.force >= 0 && std::strncmp(test, "swap", 4) == 0;
     } else {
         coop::SoundOwner sound(Player());
 
         if ((pressed & (kInputUp | kInputDown)) != 0) {
-            c.cursor = 1 - c.cursor;
+            c.cursor = (c.cursor + ((pressed & kInputUp) != 0 ? rows - 1 : 1)) % rows;
             SndSePlay(MENU_SOUND_CURSOR, -1, 0);
         }
 
         yes = (pressed & kInputCross) != 0 && c.cursor == 0;
-        no = (pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && c.cursor == 1);
+        swap = (pressed & kInputCross) != 0 && rows == 3 && c.cursor == 1;
+        no = (pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && c.cursor == rows - 1);
 
-        if (yes || no) {
-            SndSePlay(yes ? MENU_SOUND_CONFIRM : MENU_SOUND_REFUSE, -1, 0);
+        if (yes || no || swap) {
+            SndSePlay(no ? MENU_SOUND_REFUSE : MENU_SOUND_CONFIRM, -1, 0);
         }
     }
 
-    if (!yes && !no) {
+    if (!yes && !no && !swap) {
         return;
     }
+    std::fprintf(stderr, "worlds: askwait: player %d's call answered on this copy after %d ticks up (%d waiting for its player)\n", c.from, c.shown, c.waiting);
 
     const CallAsk asked = c;
 
     c = CallAsk{};
 
     // coop-gateflow: the go-along question: its yes takes this copy to its own floor menu; nothing goes back.
+    if (asked.to == kAlongBack) {
+        std::fprintf(stderr, "worlds: back half: this copy (player %d) %s player %d into the back half\n", Player(), yes ? "goes along with" : "stays: not going with",
+                     asked.from);
+        std::fflush(stderr);
+        if (yes) {
+            coop::UraEnterAgain(g_along_back.script, g_along_back.slot);
+        }
+        return;
+    }
+    if (asked.to == kTownStoryTo) { // coop-firstvisit: a town's story arrival: its answer goes to the starter (kWhatArrive)
+        ArriveAnswer(asked, yes);
+        return;
+    }
     if (asked.to == kAlongTo) {
         std::fprintf(stderr, "worlds: gateflow: this copy (player %d) %s player %d to the floor menu\n", Player(), yes ? "goes along with" : "stays: not going with",
                      asked.from);
@@ -6366,8 +8312,27 @@ void CallTick() {
         return;
     }
 
+    // coop-forcefloor: SWAP, the holder's side: this copy's player takes the caller's member, the caller the floor's (the caller's
+    // copy takes its side on the answer, CallAnswered), and stays where it is. Only while this player still plays the floor's
+    // member and the caller's offer is another (else "busy": nothing changes on either copy).
+    if (swap) {
+        const int  mine = coop::PromptApartOwnMember();
+        const bool can = mine == asked.force && asked.theirs >= 0 && asked.theirs < 6 && asked.theirs != mine;
+
+        QueueProgress(kWhatCallAnswer, asked.to, can ? 4 : 2, asked.map, 0);
+        std::fprintf(stderr, "worlds: forcefloor: this copy (player %d, %s) answers player %d's call: %s\n", Player(), MemberName(mine), asked.from,
+                     can ? "swap" : "swap cannot be made (busy)");
+        std::fflush(stderr);
+        if (can) {
+            coop::PromptApartApply(asked.theirs, asked.force);
+        }
+        return;
+    }
     QueueProgress(kWhatCallAnswer, asked.to, yes ? 1 : 0, asked.map, 0);
     std::fprintf(stderr, "worlds: gather: this copy (player %d) answers player %d's call: %s\n", Player(), asked.from, yes ? "coming" : "not now");
+    if (asked.force >= 0) {
+        std::fprintf(stderr, "worlds: forcefloor: this copy (player %d) answers player %d's call: %s\n", Player(), asked.from, yes ? "go" : "cancel");
+    }
     std::fflush(stderr);
 
     // DC_WORLDS_MUTATE=call_stays (twin): says yes but stays.
@@ -6396,7 +8361,7 @@ void CallTick() {
 void PickRefuseApart(int to) {
     char line[200];
 
-    std::snprintf(line, sizeof line, "%s needs both players. Player %d has been asked to come", FloorName(selectMapNo, to), 3 - Player());
+    std::snprintf(line, sizeof line, "%s needs both players. %s has been asked to come", FloorName(selectMapNo, to), NetplayShownName((int) (3 - Player())).c_str());
     SetGatherNote(Player(), line);
     std::snprintf(line, sizeof line, "apart: the floor menu's pick of %s does not take (it needs both players); player %d stays at the menu",
                   FloorName(selectMapNo, to), Player());
@@ -6418,7 +8383,7 @@ void GatherRefuseApart() {
     char                                         line[200];
 
     gameTask = GAME_TASK_PLAY;
-    std::snprintf(line, sizeof line, "%s needs both players. Player %d has been asked to come", FloorName(selectMapNo, to), 3 - Player());
+    std::snprintf(line, sizeof line, "%s needs both players. %s has been asked to come", FloorName(selectMapNo, to), NetplayShownName((int) (3 - Player())).c_str());
     SetGatherNote(Player(), line);
     std::snprintf(line, sizeof line, "apart: the gate to %s does not open (it needs both players); player %d stays on floor %d", FloorName(selectMapNo, to),
                   Player(), to);
@@ -6434,15 +8399,480 @@ void GatherRefuseApart() {
     }
 }
 
+// coop-forcefloor (Jep 11-14): apart, this copy's gate (or floor menu pick) onto a floor fenced to a member another player plays
+// elsewhere: it does not take (as a story floor's), the player is told, and that player is called with the three-row question
+// (go to the floor, swap, cancel); the waiting box's Circle withdraws the call. A gate taken again calls again only after 10 s.
+void ForceRefuseApart(int to, int chara, int holder, bool from_menu) {
+    static std::chrono::steady_clock::time_point called{};
+    static int                                   called_for = -1;
+    const auto                                   now = std::chrono::steady_clock::now();
+    const int                                    mine = coop::PromptApartOwnMember();
+    char                                         line[200];
+
+    if (!from_menu) {
+        gameTask = GAME_TASK_PLAY;
+    }
+    std::snprintf(line, sizeof line, "%s is %s's floor. %s plays %s and has been asked", FloorName(selectMapNo, to), MemberName(chara), NetplayShownName((int) holder).c_str(),
+                  MemberName(chara));
+    SetGatherNote(Player(), line);
+    std::fprintf(stderr, "worlds: forcefloor: apart, the %s to %s does not take: it is fenced to %s, which player %d plays elsewhere; player %d (%s) stays\n",
+                 from_menu ? "floor menu's pick" : "gate", FloorName(selectMapNo, to), MemberName(chara), holder, Player(), MemberName(mine));
+    std::fflush(stderr);
+    if (!from_menu && called_for == selectMapNo * 256 + to && now - called <= std::chrono::seconds(10)) {
+        return;
+    }
+    called_for = selectMapNo * 256 + to;
+    called = now;
+    g_force_sent = ForceSent{selectMapNo, to, chara, mine};
+    if (from_menu) {
+        g_pick_pending = to;
+        g_call_script = -1;
+    } else {
+        g_call_script = BtEventInfo.script_no;
+    }
+    const int floor = from_menu ? -1 : to - 1;
+
+    QueueProgress(kWhatCall, to, kForceCallBase + mine, selectMapNo, floor);
+    doorgate::WaitForAnswer(true);
+    doorgate::g_sent = doorgate::SentCall{kWhatCall, to, kForceCallBase + mine, selectMapNo, floor};
+}
+
+// coop-firstvisit (rc3misc's find, Jep 11-18): a town's story arrival, apart, is a story gather. A town's own arrival event
+// (EditInit's RunEvent: StartEventNo, or 128) starts by itself as the town loads, and nothing guarded it: the story guard sees
+// events walked or talked into, the door gate rooms. Matataki's 128 (gedit/e02/event.stb) plays the village's first visit while
+// game flag 9 is clear; Norune's (e01) its first return from the cave with an Atla (flag 40). A real save reaches Matataki out of
+// Wise Owl Forest (its Atla rebuilds the village): player 2 back alone played the scene on her copy, its flag reached his and he
+// never saw it; both arriving within a load of each other, each copy played it and her catch-up waited out hers, then the rest
+// of his. Jep's design (11-18): the player whose arrival starts it waits on the black of the transition in the ready check's box
+// (a row and a mark per other player, START NOW: no CANCEL, the arrival cannot be undone); every other player gets the story
+// scene's one question wherever they are (the floor call's: askwait, no clock); all ready, it starts; a yes from elsewhere goes
+// to the town as it starts and comes in as a scene-arriver (the merge into a town scene). Whoever arrives first starts it; two
+// arriving within a load of each other (each held before it heard the other) give it to the lower player number, the other's
+// copy held as a joiner, asked the same question. DC_WORLDS_MUTATE=arrival_gather_off (twin): the arrival runs as it is.
+// (one switch, Jep's Q2: START NOW for any starter, or only once player 1 started it or accepted)
+constexpr bool kStartNowAnyStarter = true;
+
+namespace arrive {
+
+// A town's story arrival, from the disc's town scripts (event 128, read by hand): the map, the game flag that marks it seen (the
+// script reads it and sets it as the scene starts), and what else its script asks: the map it came from (_GET_OLD_MAPNO, -1 any)
+// and a Georama's obtained parts (_SGET_ATRA_PARTS_NUM's georama, -1 none asked).
+struct Story {
+    int map, flag, from, georama;
+};
+constexpr Story kStories[] = {
+    {0, 40, 200, 0},  // Norune: back from the cave (old map 200: the script reads _GET_OLD_MAPNO - 1) with one of Norune's Atla
+    {1, 9, -1, -1},   // Matataki: its first visit
+    {2, 6, -1, -1},   // Queens: its first visit
+    {13, 19, -1, -1}, // the field maps s03, s04 and s09: each its first visit
+    {14, 8, -1, -1},
+    {19, 7, -1, -1},
+};
+
+enum Role { kNone = 0, kStarter = 1, kJoinerHeld = 2, kComing = 3 };
+enum Step { kCall = 0, kYes = 1, kNo = 2, kStarted = 3 };
+
+struct ArriveState {
+    int  role = kNone;
+    int  town = -1;
+    int  event = -1; // the arrival event (this copy's held one, or the starter's)
+    int  flag = -1;  // its seen mark
+    int  starter = 0;
+    bool held = false;      // this copy's own arrival is held (starter or joiner): its RunEvent waits
+    int  release = -1;      // the held arrival to run now (CoopWorldsArrivalRelease)
+    bool started = false;   // (the starter: its scene released; "started" goes once its seen mark is set)
+    bool start_sent = false;
+};
+ArriveState g;
+
+// The gathers other players hold open, by player (1 up): the town and event, open till started.
+struct HeldOpen {
+    int town = -1, event = -1;
+};
+HeldOpen g_open[coop::kMaxPlayers + 1];
+
+bool Off() {
+    return Mutated("arrival_gather_off");
+}
+
+const char *TownName(int map) {
+    static char name[32];
+
+    if (map >= 0 && map < 5) {
+        return doorgate::kTowns[map];
+    }
+    std::snprintf(name, sizeof name, "map %d", map);
+    return name;
+}
+
+// The seen mark of this town's story arrival when it would play now on this copy, else -1.
+int StoryFlag(int map) {
+    if (SaveData == nullptr) {
+        return -1;
+    }
+    for (const Story &s : kStories) {
+        if (s.map != map || SaveData->GetGameFlag(s.flag) != 0) {
+            continue;
+        }
+        if (s.from >= 0 && OldMapNo != s.from) {
+            std::fprintf(stderr, "worlds: arrive: map %d's story (game flag %d) is not this arrival's: it came from map %d (its story's from %d)\n", map, s.flag,
+                         (int) OldMapNo, s.from);
+            return -1;
+        }
+        if (s.georama >= 0) {
+            int obtained = 0;
+
+            for (int i = 0; i < 24; i++) {
+                SV_EDIT_PARTS_INFO *part = SaveData->GetEditPartsInfo(s.georama, i);
+
+                obtained += part != nullptr && part->obtained != 0 ? 1 : 0;
+            }
+            if (obtained == 0) {
+                return -1;
+            }
+        }
+        return s.flag;
+    }
+    return -1;
+}
+
+bool OthersHere() {
+    return On() && g_state.apart && g_state.peer_heard && !g_state.dropped && Player() >= 1;
+}
+
+void Say(const char *line) {
+    std::fprintf(stderr, "worlds: arrive: %s\n", line);
+    std::fflush(stderr);
+}
+
+void Send(int step) {
+    QueueProgress(kWhatArrive, g.town, g.event, step, step == kStarted ? g.flag : g.starter); // (started: its seen flag)
+}
+
+bool BoxOpen() {
+    return coop::ready::IsOpen() && coop::ready::Get().kind == coop::ready::kStoryArrival;
+}
+
+// START NOW's offer (Jep's Q2, one switch): any starter, or only once player 1 is the starter or has accepted.
+// DC_WORLDS_TEST_START_NOW_P1=1 (the test's): as the switch's other setting.
+bool StartNowOffered() {
+    static const bool p1_only = TestEnvOn("DC_WORLDS_TEST_START_NOW_P1");
+
+    if (kStartNowAnyStarter && !p1_only) {
+        return true;
+    }
+    return g.starter == 1 || coop::ready::Get().status[1] == coop::ready::kAccepted;
+}
+
+void Start(bool all) {
+    char line[200];
+
+    g.held = false;
+    g.release = g.event;
+    g.started = true;
+    g.start_sent = false;
+    g_state.first_here = true; // (the starter's scene: a merge goes into it)
+    g_state.first_here_zone = Here();
+    std::snprintf(line, sizeof line, "player %d's story arrival in %s starts (%s): event %d plays on this copy", Player(), TownName(g.town),
+                  all ? "every other player ready" : "START NOW", g.event);
+    Say(line);
+}
+
+} // namespace arrive
+
+// This copy, held as a joiner: the starter's question is asked here too (its yes is ready at once: it is in the town already).
+void ArriveHoldAsJoiner(int starter, int event) {
+    using namespace arrive;
+    char line[200];
+
+    g.role = kJoinerHeld;
+    g.starter = starter;
+    g.event = event;
+    g_state.first_here = false; // (an arriver: a merge goes by the starter's state)
+    std::snprintf(line, sizeof line, "this copy (player %d) holds its arrival in %s: player %d starts its story; asked to join, in the town already",
+                  Player(), TownName(g.town), starter);
+    Say(line);
+    CallReceived(starter, g.town, kTownStoryTo, event, -1);
+}
+
+// The asked player's answer to a story arrival's question (CallTick).
+void ArriveAnswer(const CallAsk &asked, bool yes) {
+    using namespace arrive;
+    char line[200];
+
+    QueueProgress(kWhatArrive, asked.map, asked.floor, yes ? kYes : kNo, asked.from);
+    if (g.role == kJoinerHeld && g.town == asked.map) {
+        std::snprintf(line, sizeof line, "this copy (player %d) answers player %d's story arrival in %s: %s (held in the town till it starts)", Player(),
+                      asked.from, TownName(asked.map), yes ? "ready" : "not joining");
+        Say(line);
+        return;
+    }
+    if (yes) {
+        g = ArriveState{};
+        g.role = kComing;
+        g.town = asked.map;
+        g.event = asked.floor;
+        g.starter = asked.from;
+    }
+    std::snprintf(line, sizeof line, "this copy (player %d) answers player %d's story arrival in %s: %s", Player(), asked.from, TownName(asked.map),
+                  yes ? "coming: it goes to the town as the scene starts" : "not now");
+    Say(line);
+}
+
+
+
+
+
+
+
+
+
+
 } // namespace
+
+// The other copy's word of a story arrival (kWhatArrive: a the town, b its event, c the step, d the starter; started: its seen flag).
+void ArriveHeard(int from, int town, int event, int step, int d) {
+    using namespace arrive;
+    char line[220];
+
+    if (from < 1 || from > coop::kMaxPlayers || Off()) {
+        return;
+    }
+    if (step == kCall) {
+        g_open[from] = HeldOpen{town, event};
+        // Both held in the same town within a load of each other: the lower player number starts it.
+        if (g.role == kStarter && g.town == town && g.held) {
+            if (Player() < from) {
+                std::snprintf(line, sizeof line, "player %d holds its arrival in %s too: this copy (player %d, the lower number) starts it", from,
+                              TownName(town), Player());
+                Say(line);
+                return;
+            }
+            std::snprintf(line, sizeof line, "player %d holds its arrival in %s too: it starts it (the lower number); this copy's box closes", from,
+                          TownName(town));
+            Say(line);
+            coop::ready::Close("a lower player number holds the same story arrival");
+            ArriveHoldAsJoiner(from, event);
+            return;
+        }
+        std::snprintf(line, sizeof line, "player %d holds its story arrival in %s (event %d): this player is asked to join", from, TownName(town), event);
+        Say(line);
+        CallReceived(from, town, kTownStoryTo, event, -1);
+        return;
+    }
+    if (step == kYes || step == kNo) {
+        if (g.role == kStarter && g.town == town && BoxOpen()) {
+            coop::ready::Answer(from, step == kYes);
+        }
+        return;
+    }
+    // kStarted: the starter's scene runs. Its seen flag (d) is set here before anything goes on (its own progress may come after this
+    // word): a copy going there, or held there, then takes the arrival's seen branch, never a story of its own.
+    g_open[from] = HeldOpen{};
+    if (d >= 0 && SaveData != nullptr && SaveData->GetGameFlag(d) == 0) {
+        g_state.flag_from_peer = true; // (not told back)
+        SaveData->SetGameFlag(d, 1);
+        g_state.flag_from_peer = false;
+        std::snprintf(line, sizeof line, "player %d's story arrival in %s started: its game flag %d set here with the word", from, TownName(town), d);
+        Say(line);
+    }
+    if (g_call_ask.from == from && g_call_ask.to == kTownStoryTo) {
+        g_call_ask = CallAsk{};
+        std::snprintf(line, sizeof line, "%s started the story scene in %s", NetplayShownName((int) from).c_str(), TownName(town));
+        SetGatherNote(Player(), line, true);
+    }
+    g_call_queue.erase(std::remove_if(g_call_queue.begin(), g_call_queue.end(), [&](const CallAsk &a) { return a.from == from && a.to == kTownStoryTo; }),
+                       g_call_queue.end());
+    if (g.role == kComing && g.town == town) {
+        std::snprintf(line, sizeof line, "player %d's story arrival in %s started: this copy (player %d) goes there", from, TownName(town), Player());
+        Say(line);
+        g = ArriveState{};
+        NetplayGoToTown(town);
+    } else if (g.role == kJoinerHeld && g.town == town) {
+        std::snprintf(line, sizeof line, "player %d's story arrival in %s started: this copy's held arrival runs now (game flag %d = %d here)", from,
+                      TownName(town), g.flag, SaveData != nullptr && g.flag >= 0 ? (int) SaveData->GetGameFlag(g.flag) : -1);
+        Say(line);
+        g.held = false;
+        g.release = g.event;
+        g.role = kNone;
+    }
+}
+
+// Every tick: the starter's box decides; its "started" goes once its seen mark is set; nobody else left, a held arrival runs.
+void ArriveTick() {
+    using namespace arrive;
+    char line[200];
+
+    if (!g_state.apart) {
+        if ((g.role != kNone && g.role != kComing) || g.held) {
+            Say("together again: the story arrival's gather ends on this copy");
+        }
+        if (BoxOpen()) {
+            coop::ready::Close("together again");
+        }
+        if (!g.started) {
+            g = ArriveState{};
+        }
+        for (HeldOpen &o : g_open) {
+            o = HeldOpen{};
+        }
+    }
+    if (g.started && !g.start_sent && SaveData != nullptr && g.flag >= 0 && SaveData->GetGameFlag(g.flag) != 0) {
+        g.start_sent = true;
+        if (g_state.apart) {
+            Send(kStarted);
+        }
+        std::snprintf(line, sizeof line, "player %d's story arrival in %s runs (game flag %d set): the others are told", Player(), TownName(g.town), g.flag);
+        Say(line);
+        g = ArriveState{};
+        return;
+    }
+    if (!g.held) {
+        return;
+    }
+    if (!(mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && MapNo == g.town)) {
+        Say("this copy left the town with its arrival held: the gather ends");
+        if (BoxOpen()) {
+            coop::ready::Close("its starter left");
+        }
+        g = ArriveState{};
+        return;
+    }
+    if (!OthersHere()) {
+        std::snprintf(line, sizeof line, "nobody else in the game any more: this copy's held arrival in %s runs", TownName(g.town));
+        Say(line);
+        if (BoxOpen()) {
+            coop::ready::Close("nobody else left");
+        }
+        g.held = false;
+        g.release = g.event;
+        g.role = kNone;
+        return;
+    }
+    if (g.role == kStarter && BoxOpen()) {
+        coop::ready::Buttons(false, StartNowOffered());
+        const coop::ready::Outcome outcome = coop::ready::Decide(coop::ready::kPickNone);
+
+        if (outcome == coop::ready::kStartAll || outcome == coop::ready::kStartNow) {
+            Start(outcome == coop::ready::kStartAll);
+        }
+    }
+}
+
+// The starter's pad in its box (CoopWorldsDoorQuestionPad: the town's, this copy's own): Cross takes START NOW (past the grace).
+void ArrivePad(int *buttons) {
+    using namespace arrive;
+    static std::uint16_t held = 0xFFFF;
+    static int           age = 0;
+
+    if (!g.held) {
+        held = 0xFFFF;
+        age = 0;
+        return;
+    }
+    const std::uint16_t now = (std::uint16_t) *buttons;
+    const std::uint16_t pressed = doorgate::InGrace(age++) ? 0 : now & ~held;
+
+    held = now;
+    if (g.role != kStarter || !BoxOpen()) {
+        return;
+    }
+    *buttons = 0; // (held on black in its box: the walk takes nothing)
+    if ((pressed & kInputCross) == 0) {
+        return;
+    }
+    Say("the starter's Cross on its box: START NOW");
+    if (coop::ready::Decide(coop::ready::kPickStartNow) == coop::ready::kStartNow) {
+        Start(false);
+    }
+}
+
+// The starter's box apart (CoopWorldsReadyBox).
+bool ArriveBoxHere() {
+    return arrive::g.role == arrive::kStarter && arrive::g.held && arrive::BoxOpen();
+}
+
+// EditInit (editloop.cpp, recipe 0045), as the town's arrival is about to be run: true holds it (this copy's RunEvent waits).
+bool CoopWorldsTownArrivalHolds(const void *program, int event_no) {
+    using namespace arrive;
+
+    if (!On() || !g_state.apart || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || program == nullptr || event_no <= 0 || Off()) {
+        if (g.role == kComing) {
+            g = ArriveState{};
+        }
+        return false;
+    }
+    const int flag = StoryFlag(MapNo);
+    char      line[220];
+
+    if (g.role == kComing) {
+        g = ArriveState{};
+    }
+    if (flag < 0 || !OthersHere()) {
+        if (flag >= 0) {
+            std::snprintf(line, sizeof line, "the story arrival in %s (game flag %d) plays on this copy alone: nobody else is in the game", TownName(MapNo), flag);
+            Say(line);
+        }
+        return false;
+    }
+
+    g = ArriveState{};
+    g.town = MapNo;
+    g.event = event_no;
+    g.flag = flag;
+    g.held = true;
+    // Another player holds this town's story already: this copy joins it (held, asked).
+    for (int p = 1; p <= coop::kMaxPlayers; p++) {
+        if (p != Player() && g_open[p].town == MapNo) {
+            ArriveHoldAsJoiner(p, g_open[p].event);
+            return true;
+        }
+    }
+
+    bool linked[coop::kMaxPlayers + 1] = {};
+
+    linked[3 - Player()] = true;
+    if (coop::ready::IsOpen()) {
+        coop::ready::Close("a story arrival opens");
+    }
+    if (!coop::ready::Open(coop::ready::kStoryArrival, Player(), linked)) {
+        g = ArriveState{};
+        return false;
+    }
+    g.role = kStarter;
+    g.starter = Player();
+    coop::ready::Buttons(false, StartNowOffered());
+    g_state.first_here = true; // (the starter: the scene's merge goes by its state)
+    g_state.first_here_zone = Here();
+    std::snprintf(line, sizeof line,
+                  "this copy (player %d) holds its story arrival in %s (event %d, game flag %d): black, the ready box up; the others are asked", Player(),
+                  TownName(MapNo), event_no, flag);
+    Say(line);
+    Send(kCall);
+    return true;
+}
+
+// The town's step (editloop.cpp, recipe 0045): a held arrival to run now (its RunEvent), else -1.
+int CoopWorldsArrivalRelease() {
+    using namespace arrive;
+    const int event = g.release;
+
+    g.release = -1;
+    return mode == GAME_MODE_EDIT && EdInteriorFlag == 0 ? event : -1;
+}
+
+bool CoopWorldsArriveHoldsMerge() {
+    return arrive::g.held;
+}
+
+// The held arrival's black: the town's late 2D fills the screen under the box or the question (coop_townmenu).
+bool CoopWorldsArrivalBlack() {
+    return On() && g_state.apart && arrive::g.held && mode == GAME_MODE_EDIT && !arrive::Off();
+}
+
 
 bool CoopWorldsPlayerFree() {
     return CallFree();
-}
-
-bool CoopWorldsStoryGather() {
-    // DC_WORLDS_MUTATE=gather_config_ignored (twin): gathered whatever game.coop_story_gather says.
-    return dc::platform::ConfigGet().coop_story_gather || Mutated("gather_config_ignored");
 }
 
 bool CoopWorldsHoldFloorChange(int script_no) {
@@ -6488,6 +8918,17 @@ bool CoopWorldsHoldFloorChange(int script_no) {
         gather = kGatherNone;
         Log("apart: the called gate opens (the other player said yes and follows)");
         return false;
+    }
+
+    // coop-forcefloor: a next floor fenced to a member another player plays elsewhere (not while that copy waits at this dungeon's
+    // entrance: the merge there brings both).
+    int       force_chara = -1;
+    const int holder = gather == kGatherNone && !waits ? ForceHolder(selectMapNo, UserStatus->cur_floor + 1, &force_chara) : 0;
+
+    if (holder > 0) {
+        ForceRefuseApart(UserStatus->cur_floor + 1, force_chara, holder, false);
+        g_state.floor_hold = false;
+        return true;
     }
 
     if (gather != kGatherNone && (!waits || (g_state.floor_hold && now - g_state.floor_hold_since > std::chrono::milliseconds(kFloorHoldMs)))) {
@@ -6604,9 +9045,22 @@ static void TestApartDoor() {
     static const char *spec = TestEnv("DC_WORLDS_TEST_APART_DOOR");
     static const int   who = TestEnvInt("DC_WORLDS_TEST_APART_DOOR_PLAYER", 2); // (coop-stage4 4e part 2: =1 his copy, she stays in the room)
     static int         walks = 0;
+    // (coop-ports2: DC_WORLDS_TEST_APART_DOOR_AFTER_TALK=1: its 120 walk ticks count only from the tick the other player's talk is heard (its
+    // presence says so), so the order "his talk open, then her Cross at the door" is the ticks', never the wall clock's under load.)
+    static const bool  after_talk = TestEnvOn("DC_WORLDS_TEST_APART_DOOR_AFTER_TALK");
+    static bool        talk_heard = false;
     float              x = 0.0f, z = 0.0f, y = 0.0f, yaw = 0.0f;
 
-    if (spec == nullptr || walks > 120 || Player() != who || !g_state.apart || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || GameMode != ED_MODE_WALK || Chara == nullptr ||
+    if (after_talk && !talk_heard && spec != nullptr && Player() == who && (who == 1 || who == 2) && g_state.apart) {
+        const Heard &other = g_heard[2 - who];
+
+        if (other.set && other.activity == coop::kWhereTalk) {
+            talk_heard = true;
+            std::fprintf(stderr, "worlds: test: the other player's talk is heard: this copy's walk to the door counts from here\n");
+        }
+    }
+
+    if (spec == nullptr || (after_talk && !talk_heard) || walks > 120 || Player() != who || !g_state.apart || mode != GAME_MODE_EDIT || EdInteriorFlag != 0 || GameMode != ED_MODE_WALK || Chara == nullptr ||
         Chara->frame == nullptr || ++walks <= 120 || std::sscanf(spec, "%f:%f:%f:%f", &x, &z, &y, &yaw) < 4) {
         return;
     }
@@ -6946,8 +9400,58 @@ bool CoopWorldsPeerHeard() {
     return g_state.apart && g_state.peer_heard;
 }
 
+// coop-rc3misc (test hook DC_COOP_TEST_APART_ESCAPE): apart, and the other copy is heard in a town at all (its presence says
+// so once its town has loaded: its first visit's mark, if any, went before it).
+bool CoopWorldsPeerHeardInATown() {
+    return g_state.apart && g_state.peer_heard && g_state.peer.mode == GAME_MODE_EDIT;
+}
+
+// coop-forcefloor (test hook): apart, and the other copy is heard in a town and free there (its presence: no busy, scene, build or
+// talk of its player; not still on its way out or in the town's arrival).
+bool CoopWorldsPeerHeardInTown() {
+    return g_state.apart && g_state.peer_heard && g_state.peer.mode == GAME_MODE_EDIT && !g_state.peer_busy && !g_state.peer_scene &&
+           !g_state.peer_builds && !g_state.peer_talk;
+}
+
+// coop-swapcombo: a step of a trade across zones to the other copy (kWhatTrade); the other player's member as this copy last heard
+// it on a floor (its presence), -1 not heard.
+void CoopWorldsTradeSend(int step, int a, int b, int c) {
+    QueueProgress(kWhatTrade, a, b, c, step);
+}
+
+// coop-notices: apart, this copy's player found an item others hear of (coop_message's audience): told on the progress channel with
+// where it was found. A same-floor find off a floor (a town's) has nobody to tell. Not a catch-up's replay of the host's play.
+void CoopWorldsPickupNotice(int item, bool everyone) {
+    if (!On() || !g_state.apart || Player() == 0 || CatchupUnderWay()) {
+        return;
+    }
+    const bool floor = mode == GAME_MODE_DUNGEON && UserStatus != nullptr;
+    const int  dungeon = floor ? selectMapNo : -1;
+    const int  at = floor ? (int) UserStatus->cur_floor : -1;
+
+    if (!everyone && !floor) {
+        return;
+    }
+    std::fprintf(stderr, "worlds: notice: this copy's player %d found item %d apart (dungeon %d floor %d): %s\n", Player(), item, dungeon, at,
+                 everyone ? "every player hears" : "its floor hears");
+    QueueProgress(kWhatNotice, item, everyone ? 1 : 0, dungeon, at);
+}
+
+int CoopWorldsPeerMember() {
+    return g_state.peer_floor_stand.set ? g_state.peer_floor_stand.chara : -1;
+}
+
 bool CoopWorldsApart() {
     return On() && g_state.apart;
+}
+
+// coop-falseleave: ticks since this copy's split by its own clock (60 a second; -1 not apart). The link's tick stops at the split, so a
+// line said apart names this too (B's 'left (closed their game) at tick 163', 1200 ticks on, read as a leave at the split).
+long long CoopWorldsApartTicks() {
+    if (!On() || !g_state.apart) {
+        return -1;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - slotsync::g_sync.since).count() * 60 / 1000;
 }
 
 // coop-dunentry (Jep's 2026-10-30 playtest, item 14): how long ago player 2 left this copy's map (her door, or her walk into a
@@ -7126,6 +9630,8 @@ struct Vote {
     std::uint16_t asker_held = 0xFFFF; // coop-gatepopup: the asker's pad, for its Circle (cancel)
     int           wait_cursor = 1;     // coop-gatevote: the asker's box's hand: 0 LEAVE NOW, 1 CANCEL (where it starts: a Cross still
                                        // held or mashed from the gate's own Cross cancels, never leaves alone)
+    bool          waits = false;   // coop-askwait: the one asked is busy in a menu: its question waits (not drawn, not held)
+    int           waited = 0;      // (its steps waiting so)
 };
 
 Vote g_vote;
@@ -7155,6 +9661,10 @@ BesideGate g_beside_gate;
 // The gate to start again on player 2's copy once its change of member has run (leave anyway by player 2).
 struct GateAgain {
     int           script = -1;
+    int           ura_slot = -1; // coop-choosing: a back-half door's slot: its script again with its question answered (UraEnterAgain)
+    int           item_slot = -1; // coop-readyscreen (A): an item scene's slot, its pick (item, shared) the window's answer (ItemSceneSplit)
+    int           item = -1;
+    bool          item_shared = false;
     int           ext = 0;
     sceVu0FVECTOR position{};
     sceVu0FVECTOR direction{};
@@ -7197,6 +9707,54 @@ void VoteLog(const char *line) {
     std::fflush(stderr);
 }
 
+// coop-askwait (Jep 11-15: a request with a Cancel never expires, a busy player is never auto-rejected): a gathered floor's
+// question to a player busy in a menu waits (not drawn, the player not held) and comes up once the menu is closed, its grace again;
+// the asker waits in its box meanwhile (its CANCEL withdraws). True: still waiting this step. Test hook
+// DC_WORLDS_TEST_VOTE_BUSY=N (every copy): the one asked counts busy for the vote's first N steps.
+bool VoteWaitsStep() {
+    static const int busy_test = TestEnvInt("DC_WORLDS_TEST_VOTE_BUSY", 0);
+
+    if (!g_vote.waits) {
+        return false;
+    }
+
+    const int asked = 2 - g_vote.asker;
+
+    if (coop::FullMenuOpenFor(asked) || g_vote.waited < busy_test) { // (lockstep: the agreed menu state on every copy alike)
+        if (g_vote.waited++ % 600 == 0) {
+            char line[160];
+
+            std::snprintf(line, sizeof line, "askwait: player %d's question waits for player %d to be free (%s, %d steps so far)", g_vote.asker + 1, asked,
+                          g_vote.waited <= busy_test ? "the test's busy" : "a menu", g_vote.waited - 1);
+            VoteLog(line);
+        }
+        return true;
+    }
+
+    char line[160];
+
+    g_vote.waits = false;
+    g_vote.ticks = kVoteTicks; // (its grace again, and the test's answer a second after it comes up)
+    g_vote.held = VotePad(asked - 1).buttons;
+    std::snprintf(line, sizeof line, "askwait: player %d's question comes up for player %d after %d steps waiting", g_vote.asker + 1, asked, g_vote.waited);
+    VoteLog(line);
+    return false;
+}
+
+// coop-016 (Jep: the asker can always back out while a request waits): the vote's wait, unless the asker's LEAVE NOW came (pick 2):
+// that goes on to stage 2's yes (alone, the one asked never having seen it). Before, the pick was taken and said ("leaves now")
+// but the wait returned first and it did nothing. DC_WORLDS_MUTATE=wait_leave_now_dropped (twin): dropped, as before.
+bool VoteWaitsFor(int pick) {
+    if (pick == 2 && g_vote.waits) {
+        if (!Mutated("wait_leave_now_dropped")) {
+            return false;
+        }
+        std::fprintf(stderr, "worlds: test: the asker's LEAVE NOW dropped while the question waits (wait_leave_now_dropped)\n");
+        std::fflush(stderr);
+    }
+    return VoteWaitsStep();
+}
+
 // coop-floorgate: the gathered gate's no: both stay where they are, the asker told so (never held: the task is play again).
 void GatherDeclined(bool timed_out) {
     char line[200];
@@ -7204,7 +9762,7 @@ void GatherDeclined(bool timed_out) {
     std::snprintf(line, sizeof line, "%s: %s needs both players; both stay", timed_out ? "no answer" : "the other player says no",
                   FloorName(selectMapNo, g_vote.to));
     VoteLog(line);
-    std::snprintf(line, sizeof line, "Player %d isn't coming yet. %s needs both players", 2 - g_vote.asker, FloorName(selectMapNo, g_vote.to));
+    std::snprintf(line, sizeof line, "%s isn't coming yet. %s needs both players", NetplayShownName((int) (2 - g_vote.asker)).c_str(), FloorName(selectMapNo, g_vote.to));
     SetGatherNote(g_vote.asker + 1, line, true);
 }
 
@@ -7217,7 +9775,16 @@ void GatherDeclined(bool timed_out) {
 // both players). A test's scripted vote (DC_WORLDS_TEST_VOTE) keeps the Circle alone. Withdrawn: both stay, the other told.
 int AskerPick() {
     const std::uint16_t mine = VotePad(g_vote.asker).buttons;
-    const std::uint16_t pressed = doorgate::InGrace(kVoteTicks - g_vote.ticks) ? 0 : mine & ~g_vote.asker_held;
+    // coop-016 (Jep: the asker can always back out while a request waits): the box's grace counts its own steps, the question's
+    // waiting ones too; the question's clock stands still while it waits (VoteWaitsStep), so a grace read from it alone never ended
+    // and the box's CANCEL and LEAVE NOW were dropped for the whole wait. DC_WORLDS_MUTATE=asker_grace_from_question (twin): as before.
+    const int           age = kVoteTicks - g_vote.ticks + (Mutated("asker_grace_from_question") ? 0 : g_vote.waited);
+    const std::uint16_t pressed = doorgate::InGrace(age) ? 0 : mine & ~g_vote.asker_held;
+
+    if (g_vote.waited > 0 && doorgate::InGrace(age) && !doorgate::InGrace(age + g_vote.waited) && (mine & ~g_vote.asker_held & (kInputCircle | kInputCross)) != 0) {
+        std::fprintf(stderr, "worlds: test: the asker's key dropped in its question's grace while it waits (asker_grace_from_question)\n");
+        std::fflush(stderr);
+    }
     const bool          scripted = TestEnv("DC_WORLDS_TEST_VOTE") != nullptr;
     const bool          can_leave = g_vote.gather == kGatherNone;
     const bool          own = NetplayLocalPlayer() == g_vote.asker + 1;
@@ -7256,7 +9823,7 @@ int AskerPick() {
     }
     std::snprintf(line, sizeof line, "player %d withdraws the question (Circle): both stay", g_vote.asker + 1);
     VoteLog(line);
-    std::snprintf(line, sizeof line, "Player %d cancelled the invite", g_vote.asker + 1);
+    std::snprintf(line, sizeof line, "%s cancelled the invite", NetplayShownName((int) (g_vote.asker + 1)).c_str());
     SetGatherNote(2 - g_vote.asker, line, true);
     return 1;
 }
@@ -7308,9 +9875,140 @@ void AskAlong(int leaver); // coop-gateflow (below)
 // floor. 1: this copy goes through now; 0: it stays; 2: it goes once player 2's change of member has run.
 // coop-gateflow: to_picker, the gate's player leaves for the dungeon's floor menu instead (its copy: 3, the task play; the
 // restart takes it there on the next frame), and the one staying is asked to go along (AskAlong).
-int FloorSplit(int asker, bool to_picker = false) {
+// coop-choosing (Jep 11-12: "leaving together never gives one player control of the floor selector over another"): all, with
+// to_picker: every player leaves the floor at once, each copy to its own floor menu (no stayer, no go-along question); the copies
+// are apart from here, each player picks alone, and a pick of the same floor meets again there (the floor's merge: no merge at
+// the floor menu itself, MergeReady).
+void AskAlongBack(int leaver, int script, int slot);
+
+// coop-choosing (Jep 11-12, ura): a back-half door's question answered yes by its user (coop_interact's door run, beside the game,
+// on every linked copy on one tick, nothing of its scene run yet): the user goes into the floor's back half alone, a place of its
+// own (Zone::half); every other player plays on where it is and is asked to come along (AskAlongBack), as at a floor's exit.
+// Alone (unlinked or apart) this copy just goes in. DC_COOP_MUTATE=ura_task (twin, coop_interact): no back-half run at all.
+void SplitIntoBack(int user, int script, int slot) {
+    const bool goes = NetplayLocalPlayer() == user;
+    char       line[200];
+
+    g_state.apart = true;
+    FollowApart();
+    g_state.stayer = !goes;
+    g_state.split_tick = g_state.tick;
+    g_state.split_at = std::chrono::steady_clock::now();
+    g_state.dropped = false;
+    MergeHeld();
+    // (the door leads to the floor's other half: in from the front, or out of the back half again)
+    const int to_half = BtUraDongeon != 0 ? 0 : 1;
+
+    g_state.peer = goes ? Here() : Zone{GAME_MODE_DUNGEON, selectMapNo, UserStatus->cur_floor, to_half};
+    g_state.peer_heard = false;
+    g_state.peer_busy = false;
+    g_state.peer_talk = false;
+    g_state.peer_builds = false;
+    g_state.peer_sees_set = false;
+    g_state.presence_due = std::chrono::steady_clock::now();
+    g_state.floors_set = false;
+    if (UserStatus != nullptr) {
+        std::memcpy(g_state.floors_told, UserStatus->floor_reached, sizeof g_state.floors_told);
+        g_state.floors_set = true;
+    }
+    std::snprintf(line, sizeof line, "back half: split at tick %lld: player %d goes %s floor %d's back half; this copy (player %d) %s",
+                  (long long) g_state.tick, user, to_half != 0 ? "into" : "out of", (int) UserStatus->cur_floor + 1, NetplayLocalPlayer(),
+                  goes ? "goes" : to_half != 0 ? "stays in front" : "stays in the back half");
+    Log(line);
+    g_ura_leaving = goes;
+    g_ura_from = BtUraDongeon;
+    NetplayGoApart(goes ? "this copy went into the floor's back half" : "the other player went into the floor's back half", user);
+    slotsync::Begin();
+    slotsync::BagDump("split");
+
+    if (goes && user == 2) {
+        // Player 2 going on: its copy's player becomes her member first (a character change), then her door again (CoopWorldsSimTick).
+        g_gate_again = GateAgain{};
+        g_gate_again.script = script;
+        g_gate_again.ura_slot = slot;
+        CoopWorldsStayOnFloor();
+        return;
+    }
+    if (goes) {
+        coop::UraEnterAgain(script, slot);
+        return;
+    }
+    if (Player() == 2) {
+        CoopWorldsStayOnFloor(); // (her copy staying plays on as her member, as at a floor's split)
+    }
+    AskAlongBack(user, script, slot);
+}
+
+bool g_resync_menu_split = false; // coop-resyncmenu: this copy's menu was split off by a resync's landing (a test hook's: below)
+// coop-readyscreen (A, Jep 11-13: "the decliner keeps playing"): an item scene started with START NOW while another player said no or
+// did not answer, on a floor every player shares, on every linked copy on one tick: the pair splits on this floor (as the back half's
+// door, SplitIntoBack, but into the same place): the user's copy stays and plays the scene; every other copy plays on in its own world
+// on this floor, its player where it stands. They are apart on one floor: the user's copy is not ready to merge until its scene is over
+// (g_item_scene_hold, MergeReady), and the merge then goes by its state (it stayed: the scene's flag and its world), the others
+// placed where they walked. Player 2 as the user: her copy's player becomes her member first (a character change, as at a floor's
+// split), then her pick starts the scene (g_gate_again, CoopWorldsSimTick).
+void ItemSceneSplit(int user, int slot, int item, bool shared) {
+    const bool scene = NetplayLocalPlayer() == user;
+    char       line[200];
+
+    g_state.apart = true;
+    FollowApart();
+    g_state.stayer = scene;
+    g_state.split_tick = g_state.tick;
+    g_state.split_at = std::chrono::steady_clock::now();
+    g_state.dropped = false;
+    MergeHeld();
+    g_state.peer = Here(); // (the same floor: each copy's other player is here, apart)
+    g_state.peer_heard = false;
+    g_state.peer_busy = false;
+    g_state.peer_talk = false;
+    g_state.peer_builds = false;
+    g_state.peer_sees_set = false;
+    g_state.presence_due = std::chrono::steady_clock::now();
+    g_state.floors_set = false;
+    if (UserStatus != nullptr) {
+        std::memcpy(g_state.floors_told, UserStatus->floor_reached, sizeof g_state.floors_told);
+        g_state.floors_set = true;
+    }
+    std::snprintf(line, sizeof line, "item scene: split at tick %lld on floor %d: player %d plays the scene; this copy (player %d) %s", (long long) g_state.tick,
+                  UserStatus != nullptr ? (int) UserStatus->cur_floor + 1 : -1, user, NetplayLocalPlayer(),
+                  scene ? "plays it (it stays: the merge goes by its state once it is over)" : "plays on apart on the same floor");
+    Log(line);
+    g_item_scene_hold = scene ? 1 : 0;
+    g_item_scene_script = slot >= 0 && slot < 96 && NowEventMan != nullptr && NowEventMan->event[slot].event != nullptr ? NowEventMan->event[slot].event->script_no : -1;
+    g_item_left = !scene;
+    NetplayGoApart(scene ? "this copy plays the item scene the other player was left out of" : "the other player plays an item scene this copy was left out of", user);
+    slotsync::Begin();
+    slotsync::BagDump("split");
+
+    if (scene && user == 2) {
+        g_gate_again = GateAgain{};
+        g_gate_again.item_slot = slot;
+        g_gate_again.item = item;
+        g_gate_again.item_shared = shared;
+        CoopWorldsStayOnFloor();
+        return;
+    }
+    if (scene) {
+        std::snprintf(line, sizeof line, "item scene: player %d's scene starts on its copy (slot %d, item %d): %s", user, slot, item,
+                      coop::StartPickedItemScene(1, slot, item, shared) ? "started" : "could not start");
+        Log(line);
+        return;
+    }
+    if (Player() == 2) {
+        CoopWorldsStayOnFloor(); // (her copy playing on as her member, as at a floor's split)
+    }
+}
+
+bool g_menu_from_gate = false; // coop-choosing: this copy's floor menu came of every player's yes at a gate (its Circle: back to town)
+
+// coop-resyncmenu: here, every copy already stands at the dungeon's floor menu (a resync's landing): no restart to it, and no floor
+// being left (g_floor_leaving: the menu's own pick of the same floor meets there).
+int FloorSplit(int asker, bool to_picker = false, bool all = false, bool here = false) {
     int  leaver = asker + 1;
-    bool goes = NetplayLocalPlayer() == leaver;
+    bool goes = all || NetplayLocalPlayer() == leaver;
+
+    g_menu_from_gate = all && to_picker;
     char line[200];
 
     g_state.apart = true;
@@ -7322,10 +10020,8 @@ int FloorSplit(int asker, bool to_picker = false) {
     // coop-floorexit (x-floor-exit -Map 0: he left anyway within 15 s of their floor merge): the link going down at this split
     // is no merge that failed to hold, which put back the stayer from before the merge (she, who stays, was "the one that
     // left") and held her copy on black as an arriver for seconds. DC_WORLDS_MUTATE=split_unheld (twin): as before.
-    if (!Mutated("split_unheld")) {
-        MergeHeld(); // coop-pt1111j: his load's pull ends with it too (the hold's own end did that; this split skipped it)
-    }
-    g_state.peer = goes ? Here() : Zone{GAME_MODE_DUNGEON, selectMapNo, to_picker ? -1 : UserStatus->cur_floor + 1};
+    MergeHeld(); // coop-pt1111j: his load's pull ends with it too (the hold's own end did that; this split skipped it) (cand1112c: its switch removed, no row turned it on)
+    g_state.peer = goes && !all ? Here() : Zone{GAME_MODE_DUNGEON, selectMapNo, to_picker ? -1 : UserStatus->cur_floor + 1};
     g_state.peer_heard = false;
     g_state.peer_busy = false; // coop-mayorhouse
     g_state.peer_talk = false;
@@ -7339,21 +10035,39 @@ int FloorSplit(int asker, bool to_picker = false) {
         g_state.floors_set = true;
     }
 
-    std::snprintf(line, sizeof line, "split at tick %lld: player %d leaves floor %d %s; this copy (player %d) %s", (long long) g_state.tick, leaver,
-                  (int) UserStatus->cur_floor + 1, to_picker ? "for the floor menu" : "anyway", NetplayLocalPlayer(), goes ? "leaves" : "stays");
+    if (here) {
+        std::snprintf(line, sizeof line, "split at tick %lld: the resync landed every player at dungeon %d's floor menu: each their own; this copy (player %d)",
+                      (long long) g_state.tick, (int) selectMapNo, NetplayLocalPlayer());
+    } else if (all) {
+        std::snprintf(line, sizeof line, "split at tick %lld: every player leaves floor %d together, each for their own floor menu; this copy (player %d) leaves",
+                      (long long) g_state.tick, (int) UserStatus->cur_floor + 1, NetplayLocalPlayer());
+    } else {
+        std::snprintf(line, sizeof line, "split at tick %lld: player %d leaves floor %d %s; this copy (player %d) %s", (long long) g_state.tick, leaver,
+                      (int) UserStatus->cur_floor + 1, to_picker ? "for the floor menu" : "anyway", NetplayLocalPlayer(), goes ? "leaves" : "stays");
+    }
     Log(line);
+    // coop-dungeonreds: each player who leaves the floor leaves their use prompt (a gate's waiting question) with it, on every copy:
+    // on a leaving copy every player's (the floor is gone here), on a staying one the leaver's alone (the stayer's own stays up).
+    for (int player = 1; player <= 2; player++) { // (the use prompts' players: coop_useprompt's g_prompts)
+        if (goes || player == leaver) {
+            coop::UsePromptEndForLeaver(player);
+        }
+    }
 
-    if (goes && !Mutated("gate_merge_back")) {
+    if (goes && !here && !Mutated("gate_merge_back")) {
         g_floor_leaving = selectMapNo * 256 + UserStatus->cur_floor;
     }
 
-    NetplayGoApart(goes ? "this copy left the floor" : "the other player left the floor", leaver);
+    NetplayGoApart(here ? "the resync landed every player at the floor menu: each their own" : all ? "every player left the floor for their own floor menu" : goes ? "this copy left the floor" : "the other player left the floor", leaver);
     slotsync::Begin(); // coop-worlds: live sync from what both hold now
     slotsync::BagDump("split");
 
     // coop-gateflow: the leaver's copy to the floor menu (its own player there is the game's; on the floor it picks, player 2's
     // copy plays her member again, as any floor she comes onto apart: g_become_due); the stayer's asked to go along.
     if (to_picker && goes) {
+        if (here) {
+            return 3;
+        }
         NetplayGoToFloor(selectMapNo, -1);
         return 3;
     }
@@ -7398,8 +10112,8 @@ int FloorSplit(int asker, bool to_picker = false) {
 // coop-gateflow (Jep's 2026-11-02 playtest of the gate vote: he left the dungeon from the gate's "next floor / back to town"
 // window after she had said yes to the next floor, and she was left on the floor; then "Strongly considering just removing
 // the floor transition cutscene in favor of just going back out to the floor picker and allowing players to back out of that
-// menu if they want to go back to town", and "go that way and we'll see if we like it"): with game.coop_gate_picker (on), a
-// floor's exit gate ("out") no longer runs its script (program 160: the walk into the gate, the fade, the escape window, then
+// menu if they want to go back to town", and "go that way and we'll see if we like it"): (always since coop-gatherpicker
+// retired game.coop_gate_picker) a floor's exit gate ("out") no longer runs its script (program 160: the walk into the gate, the fade, the escape window, then
 // the next floor or the town). Its player leaves for the dungeon's floor menu (the entrance's, as from town: the dungeon's
 // script 100 opens it, the prev floor -1), the next floor marked reached first so the menu lists it. A floor that needs both
 // players is asked there, as any pick of the menu is (PickRefuseApart: the other is called). Circle at the menu goes back to
@@ -7408,7 +10122,7 @@ int FloorSplit(int asker, bool to_picker = false) {
 // floor menu. Apart, this copy alone goes. DC_WORLDS_MUTATE=gate_picker_off (twin): the gate as before, its vote and its
 // script, whatever the setting.
 bool GatePickerOn() {
-    return On() && dc::platform::ConfigGet().coop_gate_picker && !Mutated("gate_picker_off");
+    return On() && !Mutated("gate_picker_off");
 }
 
 // The next floor reached (the gate is open to it), as the gate's own floor change does (SetNowFloor), so the menu lists it.
@@ -7423,12 +10137,36 @@ void ReachNextFloor() {
     std::fflush(stderr);
 }
 
+// coop-askwait: a go-along question takes the call's slot; a call there (another caller's, waiting or up) goes back to the
+// queue's front, asked once the go-along question closes.
+void CallRequeue() {
+    if (g_call_ask.from != 0 && g_call_ask.to != kAlongTo && g_call_ask.to != kAlongBack) {
+        CallAsk back = g_call_ask;
+
+        back.shown = 0;
+        g_call_queue.insert(g_call_queue.begin(), back);
+        std::fprintf(stderr, "worlds: askwait: player %d's call goes back to the queue's front for the go-along question\n", back.from);
+        std::fflush(stderr);
+    }
+}
+
+// coop-choosing: the back half's go-along question on a copy that stays (as AskAlong's).
+void AskAlongBack(int leaver, int script, int slot) {
+    g_along_back = AlongBack{script, slot};
+    CallRequeue();
+    g_call_ask = CallAsk{leaver, selectMapNo, kAlongBack, UserStatus->cur_floor};
+    std::fprintf(stderr, "worlds: back half: player %d went through floor %d's back-half door: this copy (player %d) is asked to go along\n", leaver,
+                 (int) UserStatus->cur_floor + 1, Player());
+    std::fflush(stderr);
+}
+
 // The go-along question on the copy that stays: its own player, beside the game, as a call (g_call_ask, kAlongTo), drawn and
 // stepped by CallTick; the yes is this copy's alone (no answer goes back).
 void AskAlong(int leaver) {
     if (Mutated("along_off")) {
         return;
     }
+    CallRequeue();
     g_call_ask = CallAsk{leaver, selectMapNo, kAlongTo, UserStatus->cur_floor};
     std::fprintf(stderr, "worlds: gateflow: player %d left floor %d for the floor menu: this copy (player %d) is asked to go along\n", leaver,
                  (int) UserStatus->cur_floor + 1, Player());
@@ -7523,7 +10261,15 @@ bool CoopWorldsGatePicker(int player, CDungeonEventData *gate) {
 
 bool CoopWorldsGateVote(int script_no) {
     // coop-skeldoor: his Cross at a message-only slot shows its message beside the game (coop_interact.cpp).
+    // coop-choosing: his Cross at a floor's back-half door: its question beside the game, on his screen only.
+    if (coop::UraDoorStartHis(script_no)) {
+        return true;
+    }
     if (coop::HisCrossBeside(script_no)) {
+        return true;
+    }
+    // coop-xiaogap: his Cross at a character spot: the gap gate, else its program beside the game as hers runs (nobody held).
+    if (coop::CharaSpotHis(script_no)) {
         return true;
     }
 
@@ -7569,12 +10315,15 @@ bool CoopWorldsGateVote(int script_no) {
 
         // coop-floorgate (Jep: never disrupt the other player): a gathered floor's question is not put to a player in a menu; the
         // gate stays shut and the asker is told that player is busy.
-        if (const int gather = GatherFor(selectMapNo, UserStatus->cur_floor + 1);
-            gather != kGatherNone && coop::FullMenuOpenFor(2 - asker) && !Mutated("gather_closes_menu")) {
+        static const int busy_test = TestEnvInt("DC_WORLDS_TEST_VOTE_BUSY", 0);
+        const bool       gather_busy = GatherFor(selectMapNo, UserStatus->cur_floor + 1) != kGatherNone && (coop::FullMenuOpenFor(2 - asker) || busy_test > 0) &&
+                                 !Mutated("gather_closes_menu");
+
+        if (gather_busy && Mutated("call_busy_rejects")) { // (coop-askwait: twin: not asked, "busy", as before)
             std::snprintf(line, sizeof line, "player %d starts the exit gate at link tick %lld; %s needs both players, player %d is busy in a menu: not asked",
                           asker + 1, (long long) g_state.tick, FloorName(selectMapNo, UserStatus->cur_floor + 1), 2 - asker);
             VoteLog(line);
-            std::snprintf(line, sizeof line, "Player %d is busy right now. %s needs both players", 2 - asker, FloorName(selectMapNo, UserStatus->cur_floor + 1));
+            std::snprintf(line, sizeof line, "%s is busy right now. %s needs both players", NetplayShownName((int) (2 - asker)).c_str(), FloorName(selectMapNo, UserStatus->cur_floor + 1));
             SetGatherNote(asker + 1, line, true);
             gameTask = GAME_TASK_PLAY;
             return true;
@@ -7583,15 +10332,28 @@ bool CoopWorldsGateVote(int script_no) {
         // coop-dungeonsuite (x-dungeon-suite gate -Other menu): the one asked with their menu open never heard the question (the
         // menu kept their pad) and the gate's script stood both games for the vote's 10 s and then the asker's. Their menu closes
         // as the question comes, as it does at a split. DC_WORLDS_MUTATE=vote_menu leaves it open (the twin).
-        if (coop::FullMenuRunsFor(2 - asker) && !Mutated("vote_menu")) {
-            coop::FullMenuEndForSplit();
-            std::snprintf(line, sizeof line, "player %d's menu closes for the question", 2 - asker);
-            VoteLog(line);
+        // coop-askwait (Jep 11-15: never close the other player's menu to ask them): a player in a menu is asked too, on any floor:
+        // the question waits (not drawn, the player not held, the menu left open) and comes up once they close it themselves
+        // (VoteWaitsStep). DC_WORLDS_MUTATE=vote_menu_closes (twin): a plain floor's menu closes for the question, as before.
+        bool waits = gather_busy || coop::FullMenuOpenFor(2 - asker) || busy_test > 0; // (the agreed menu state, never a copy's own engine: FullMenuRunsFor is local)
+
+        if (!gather_busy && Mutated("vote_menu_closes")) { // (the twin: every copy alike, its engine's copy closes it)
+            if (coop::FullMenuRunsFor(2 - asker)) {
+                coop::FullMenuEndForSplit();
+                std::snprintf(line, sizeof line, "player %d's menu closes for the question", 2 - asker);
+                VoteLog(line);
+            }
+            waits = false;
         }
 
         g_vote = Vote{true, asker, 1, script_no, kVoteTicks, VotePad(1 - asker).buttons, -1};
         g_vote.to = UserStatus->cur_floor + 1;
         g_vote.gather = GatherFor(selectMapNo, g_vote.to); // coop-floorgate
+        g_vote.waits = waits; // coop-askwait: the one asked busy in a menu: its question waits for it (VoteWaitsStep)
+        if (waits) {
+            std::snprintf(line, sizeof line, "askwait: player %d asks player %d, busy (a menu): the question waits, the menu left open", asker + 1, 2 - asker);
+            VoteLog(line);
+        }
 
         if (g_vote.gather != kGatherNone) {
             std::snprintf(line, sizeof line, "player %d starts the exit gate at link tick %lld; %s needs both players (%s): asking player %d to join",
@@ -7615,6 +10377,9 @@ bool CoopWorldsGateVote(int script_no) {
         g_vote = Vote{};
         gameTask = GAME_TASK_PLAY;
         return true;
+    }
+    if (VoteWaitsFor(pick)) {
+        return true; // coop-askwait: the one asked is busy: its question waits (the asker's box stays, its CANCEL withdraws)
     }
 
     int           asked = g_vote.stage == 1 ? 1 - g_vote.asker : g_vote.asker;
@@ -7646,6 +10411,21 @@ bool CoopWorldsGateVote(int script_no) {
         no = false;
     }
 
+    // coop-choosing (Jep 11-12): his gate too: every yes takes every player to their own floor menu (the picker's way), never the
+    // gate's script with its window and floor menu on the asker's pad for both; Circle at that menu goes back to town, as the
+    // window's other choice did (g_menu_from_gate). A floor that gathers every player still goes on together by the script.
+    // DC_WORLDS_MUTATE=vote_one_menu (twin): the gate's script for both, as before.
+    if (g_vote.stage == 1 && yes && g_vote.gather == kGatherNone && !Mutated("vote_one_menu")) {
+        const int asker = g_vote.asker;
+
+        VoteLog("the other player says yes: every player leaves for their own floor menu");
+        ReachNextFloor();
+        g_vote = Vote{};
+        gameTask = GAME_TASK_PLAY;
+        FloorSplit(asker, true, true);
+        return true;
+    }
+
     if (g_vote.stage == 1 && yes) {
         VoteLog("the other player says yes: both leave");
         g_vote.active = false;
@@ -7653,7 +10433,9 @@ bool CoopWorldsGateVote(int script_no) {
         return false;
     }
 
-    if (g_vote.stage == 1 && (no || --g_vote.ticks <= 0)) {
+    // coop-askwait: no clock: the question stays till answered or the asker's CANCEL / LEAVE NOW (DC_WORLDS_MUTATE=ask_lapse, twin: no
+    // answer in 10 s asks the asker, then 10 s more both stay, as before)
+    if (g_vote.stage == 1 && (no || (--g_vote.ticks <= 0 && Mutated("ask_lapse")))) {
         // coop-floorgate: a gathered floor has no leave anyway: both stay, the asker told so, playing on (never held).
         // DC_WORLDS_MUTATE=gather_leave_anyway (twin): the asker is asked to leave anyway, as before.
         if (g_vote.gather != kGatherNone && !Mutated("gather_leave_anyway")) {
@@ -7698,7 +10480,7 @@ bool CoopWorldsGateVote(int script_no) {
         return true; // 2: player 2's change of member runs first, then the gate (CoopWorldsSimTick)
     }
 
-    if (g_vote.stage == 2 && (no || --g_vote.ticks <= 0)) {
+    if (g_vote.stage == 2 && (no || (--g_vote.ticks <= 0 && Mutated("ask_lapse")))) {
         VoteLog("not leaving: both stay");
         g_vote = Vote{};
         gameTask = GAME_TASK_PLAY;
@@ -7726,24 +10508,38 @@ bool CoopWorldsGateAskBeside(int asker, CDungeonEventData *gate, int answer) {
     char line[160];
 
     // coop-floorgate: as CoopWorldsGateVote, a gathered floor's question is not put to a player in a menu.
-    if (answer == 1 && GatherFor(selectMapNo, UserStatus->cur_floor + 1) != kGatherNone && coop::FullMenuOpenFor(2 - asker) &&
-        !Mutated("gather_closes_menu")) {
-        std::snprintf(line, sizeof line, "Player %d is busy right now. %s needs both players", 2 - asker, FloorName(selectMapNo, UserStatus->cur_floor + 1));
+    static const int busy_test = TestEnvInt("DC_WORLDS_TEST_VOTE_BUSY", 0);
+    const bool       gather_busy = answer == 1 && GatherFor(selectMapNo, UserStatus->cur_floor + 1) != kGatherNone &&
+                             (coop::FullMenuOpenFor(2 - asker) || busy_test > 0) && !Mutated("gather_closes_menu");
+
+    if (gather_busy && Mutated("call_busy_rejects")) { // (coop-askwait: twin: not asked, "busy", as before)
+        std::snprintf(line, sizeof line, "%s is busy right now. %s needs both players", NetplayShownName((int) (2 - asker)).c_str(), FloorName(selectMapNo, UserStatus->cur_floor + 1));
         SetGatherNote(asker + 1, line, true);
         VoteLog("the gathered question beside the game is not asked: the other player is busy in a menu");
         return false;
     }
 
-    if (coop::FullMenuRunsFor(2 - asker)) {
-        coop::FullMenuEndForSplit();
-        std::snprintf(line, sizeof line, "player %d's menu closes for the question", 2 - asker);
-        VoteLog(line);
+    // coop-askwait (as CoopWorldsGateVote): a player in a menu is asked; the question waits for them to close it.
+    bool waits = gather_busy || coop::FullMenuOpenFor(2 - asker) || busy_test > 0; // (the agreed menu state, never a copy's own engine: FullMenuRunsFor is local)
+
+    if (!gather_busy && Mutated("vote_menu_closes")) { // (the twin: every copy alike)
+        if (coop::FullMenuRunsFor(2 - asker)) {
+            coop::FullMenuEndForSplit();
+            std::snprintf(line, sizeof line, "player %d's menu closes for the question", 2 - asker);
+            VoteLog(line);
+        }
+        waits = false;
     }
 
     g_vote = Vote{true, asker, 1, gate->event->script_no, kVoteTicks, VotePad(1 - asker).buttons, -1};
     g_vote.beside = true;
     g_vote.to = UserStatus->cur_floor + 1;
     g_vote.gather = answer == 1 ? GatherFor(selectMapNo, g_vote.to) : kGatherNone; // coop-floorgate: the next floor (back to town is never gathered)
+    g_vote.waits = waits; // coop-askwait (VoteWaitsStep)
+    if (waits) {
+        std::snprintf(line, sizeof line, "askwait: player %d asks player %d, busy (a menu): the question waits, the menu left open", asker + 1, 2 - asker);
+        VoteLog(line);
+    }
     g_beside_gate.ext = gate->event->ext_mem;
     g_beside_gate.answer = answer;
     sceVu0CopyVector(g_beside_gate.position, gate->pos);
@@ -7760,7 +10556,10 @@ bool CoopWorldsGateAsking() {
 }
 
 bool CoopWorldsVoteAsks(int player) {
-    return g_vote.active && g_vote.beside && (g_vote.stage == 1 ? 1 - g_vote.asker : g_vote.asker) == player - 1;
+    if (g_vote.active && g_vote.gather == kGatherItem) {
+        return coop::ready::Asking(player); // coop-readyscreen: each asked player while its question is up
+    }
+    return g_vote.active && g_vote.beside && !(g_vote.waits && g_vote.stage == 1) && (g_vote.stage == 1 ? 1 - g_vote.asker : g_vote.asker) == player - 1;
 }
 
 namespace {
@@ -7782,15 +10581,225 @@ bool ItemSceneLinked(int player) {
     return player >= 1 && player <= 2 && g_state.up && !g_state.apart;
 }
 
-// The other players still to say yes to the item scene: every linked player but its user who has not (the link carries
-// one other player today; a third would be asked in turn).
-int ItemSceneNextAsked() {
-    for (int player = 1; player <= coop::kMaxPlayers; player++) {
-        if (player != g_item_pick.user && ItemSceneLinked(player) && !g_item_pick.yes[player]) {
-            return player;
+// coop-readyscreen: the keys of the one ready check (coop_ready), stepped from the agreed pads on every linked copy alike, for a
+// story door's and an item scene's: each asked player's question (its hand: 0 yes, 1 no) and the initiator's box (its hand on
+// START NOW or CANCEL, kept in the ready session), what each pad held as they opened (it counts once let go), and the steps since.
+struct ReadyKeys {
+    std::uint16_t held[coop::kMaxPlayers + 1] = {};
+    int           hand[coop::kMaxPlayers + 1] = {};
+    std::uint16_t box_held = 0xFFFF;
+    int           age = 0;
+    int           up[coop::kMaxPlayers + 1] = {}; // coop-askwait: each asked player's steps with its question up (its grace, the test answer)
+    int           waited[coop::kMaxPlayers + 1] = {}; // (and its steps waiting for the player to be free)
+    bool          by_circle = false; // the initiator's CANCEL came by Circle (its withdraw line, as the call's)
+};
+
+ReadyKeys g_ready_keys;
+
+void ReadyKeysReset() {
+    g_ready_keys = ReadyKeys{};
+    for (std::uint16_t &held : g_ready_keys.held) {
+        held = 0xFFFF;
+    }
+}
+
+// One asked player's keys on its question (the game's popup with the hand): Up and Down move the hand, Cross takes the row it is on,
+// Circle is a no; nothing in the question's first half second (coop-gatepopup's grace). Its sounds on that player's own copy.
+// A test's answer stands in (DC_WORLDS_TEST_READY_ANSWER, else `scripted`: "yes", "no" or "none", 60 steps after the question
+// opened, for every asked player). +1 yes, -1 no, 0 none yet.
+int ReadyQuestionKeys(int player, std::uint16_t now, const char *scripted) {
+    static const char *const answer = TestEnv("DC_WORLDS_TEST_READY_ANSWER");
+    std::uint16_t           &held = g_ready_keys.held[player];
+    int                     &hand = g_ready_keys.hand[player];
+    const int                age = g_ready_keys.up[player]; // (coop-askwait: its own steps up)
+
+    if (const char *test = answer != nullptr ? answer : scripted; test != nullptr) {
+        held = now;
+        // (coop-askwait: "answer@N" answers at its Nth step up, else the 60th)
+        if (age != (std::strchr(test, '@') != nullptr ? std::atoi(std::strchr(test, '@') + 1) : 60)) {
+            return 0;
+        }
+        return std::strncmp(test, "none", 4) == 0 ? 0 : std::strncmp(test, "yes", 3) == 0 ? 1 : std::strncmp(test, "no", 2) == 0 ? -1 : 0;
+    }
+
+    const std::uint16_t pressed = doorgate::InGrace(age) ? 0 : now & ~held;
+    const bool          here = NetplayLocalPlayer() == player;
+
+    held = now;
+    if ((pressed & (kInputUp | kInputDown)) != 0) {
+        hand = 1 - hand;
+        if (here) {
+            coop::SoundOwner sound(player);
+
+            SndSePlay(MENU_SOUND_CURSOR, -1, 0);
         }
     }
-    return 0;
+
+    const bool yes = (pressed & kInputCross) != 0 && hand == 0;
+    const bool no = (pressed & kInputCircle) != 0 || ((pressed & kInputCross) != 0 && hand == 1);
+
+    if ((yes || no) && here) {
+        coop::SoundOwner sound(player);
+
+        SndSePlay(yes ? MENU_SOUND_CONFIRM : MENU_SOUND_REFUSE, -1, 0);
+    }
+    return yes ? 1 : no ? -1 : 0;
+}
+
+// The initiator's box (coop_useprompt's DrawReadyBox): Up and Down move its hand between START NOW and CANCEL, Cross takes it, Circle
+// is CANCEL. Test hook DC_WORLDS_TEST_READY_PICK=startnow:N|cancel:N (every copy): that pick N steps after the box opened.
+coop::ready::Pick ReadyBoxKeys(std::uint16_t now) {
+    namespace ready = coop::ready;
+    static const char *const test = TestEnv("DC_WORLDS_TEST_READY_PICK");
+    const int                initiator = ready::Get().initiator;
+    const int                age = g_ready_keys.age;
+
+    if (test != nullptr) {
+        const char *colon = std::strchr(test, ':');
+
+        g_ready_keys.box_held = now;
+        if (colon == nullptr || age != std::atoi(colon + 1)) {
+            return ready::kPickNone;
+        }
+
+        const bool start = std::strncmp(test, "startnow", 8) == 0;
+
+        std::fprintf(stderr, "worlds: test: player %d's %s %d steps after the box opened\n", initiator, start ? "START NOW" : "CANCEL", age);
+        std::fflush(stderr);
+        return start ? ready::kPickStartNow : ready::kPickCancel;
+    }
+
+    const std::uint16_t pressed = doorgate::InGrace(age) ? 0 : now & ~g_ready_keys.box_held;
+    const bool          own = NetplayLocalPlayer() == initiator;
+    ready::Pick         pick = ready::kPickNone;
+
+    g_ready_keys.box_held = now;
+    if ((pressed & (kInputUp | kInputDown)) != 0) {
+        ready::MoveCursor();
+        if (own) {
+            coop::SoundOwner sound(initiator);
+
+            SndSePlay(MENU_SOUND_CURSOR, -1, 0);
+        }
+    }
+    if ((pressed & kInputCircle) != 0) {
+        pick = ready::kPickCancel;
+        g_ready_keys.by_circle = true;
+    } else if ((pressed & kInputCross) != 0) {
+        pick = ready::Get().cursor == ready::kButtonStartNow ? ready::kPickStartNow : ready::kPickCancel;
+    }
+    if (pick != ready::kPickNone && own) {
+        coop::SoundOwner sound(initiator);
+
+        SndSePlay(pick == ready::kPickStartNow ? MENU_SOUND_CONFIRM : MENU_SOUND_REFUSE, -1, 0);
+    }
+    return pick;
+}
+
+// The asked players' questions, one step: answers into the ready check, a question unanswered after `ticks` closed (its player
+// stays "not answered yet": the initiator decides). `scripted`: the older test answer (the item scene's DC_WORLDS_TEST_VOTE).
+// coop-askwait: an asked player busy together (a menu, a talk, an event: the door's free test, lockstep state, alike on every copy;
+// an item scene's: a full menu). Test hook DC_WORLDS_TEST_READY_BUSY=P:N (every copy): player P counts busy for the session's first
+// N steps (as in a menu).
+bool ReadyPlayerFree(int player, const char **why) {
+    static const char *const busy_test = TestEnv("DC_WORLDS_TEST_READY_BUSY");
+
+    if (busy_test != nullptr && std::atoi(busy_test) == player && std::strchr(busy_test, ':') != nullptr &&
+        g_ready_keys.age < std::atoi(std::strchr(busy_test, ':') + 1)) {
+        *why = "the test's busy";
+        return false;
+    }
+    if (coop::FullMenuOpenFor(player)) {
+        *why = "a menu";
+        return false;
+    }
+    if (coop::ready::Get().kind == coop::ready::kStoryDoor) {
+        const bool free = player == 2 ? doorgate::HerFreeTogether() : ::GameMode == ED_MODE_WALK && EdSystemMesCheck() == 0;
+
+        if (!free) {
+            *why = "a talk, an event or a scene";
+            return false;
+        }
+    }
+    *why = "";
+    return true;
+}
+
+// coop-askwait: as the ready check opens, each busy asked player's question waits from the start (never drawn over its menu).
+void ReadyHoldBusy() {
+    for (int player = 1; player <= coop::kMaxPlayers && !Mutated("call_busy_rejects"); player++) {
+        const char *why = "";
+
+        if (coop::ready::Asking(player) && !ReadyPlayerFree(player, &why)) {
+            coop::ready::QuestionWaits(player, why);
+        }
+    }
+}
+
+// The asked players' questions, one step: a busy player's waits (hidden, its row "Not answered yet") and comes up once free
+// (coop-askwait); answers go into the ready check. No clock closes a question (coop-askwait; DC_WORLDS_MUTATE=ask_lapse, twin: one
+// unanswered after `ticks` closes, its player still "not answered yet", as before). `scripted`: the older test answer (the item
+// scene's DC_WORLDS_TEST_VOTE).
+void ReadyQuestionsStep(int ticks, const char *scripted) {
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        if (!Mutated("call_busy_rejects") && (coop::ready::Asking(player) || coop::ready::Waits(player))) {
+            const char *why = "";
+            const bool  free = ReadyPlayerFree(player, &why);
+
+            if (!free && coop::ready::Asking(player)) {
+                coop::ready::QuestionWaits(player, why);
+            } else if (free && coop::ready::Waits(player)) {
+                char line[160];
+
+                coop::ready::QuestionComesUp(player);
+                g_ready_keys.up[player] = 0; // (its grace again: what was held while it waited counts only once let go)
+                g_ready_keys.held[player] = 0xFFFF;
+                std::snprintf(line, sizeof line, "askwait: player %d's ready question comes up after %d steps waiting for the player", player,
+                              g_ready_keys.waited[player]);
+                Log(line);
+            }
+            if (coop::ready::Waits(player)) {
+                g_ready_keys.waited[player]++;
+                continue;
+            }
+        }
+        if (!coop::ready::Asking(player)) {
+            continue;
+        }
+        std::uint16_t now = VotePad(player - 1).buttons;
+
+        // coop-gatepopup test hook (DC_WORLDS_TEST_EARLY_PRESS=N, every copy): the asked player's Cross N steps after the question
+        // opened, as a press that was on its way (it counts for nothing in the question's grace).
+        if (static const int early = TestEnvInt("DC_WORLDS_TEST_EARLY_PRESS", -1); g_ready_keys.up[player] == early && (g_ready_keys.held[player] & kInputCross) == 0) {
+            now |= kInputCross;
+            std::fprintf(stderr, "worlds: doorgate: test: player %d's Cross %d steps after the question opened (%s)\n", player, early,
+                         doorgate::InGrace(g_ready_keys.up[player]) ? "in its grace: nothing" : "taken");
+            std::fflush(stderr);
+        }
+
+        const int answer = ReadyQuestionKeys(player, now, scripted);
+        const int initiator = coop::ready::Get().initiator;
+        char      line[120];
+
+        // (each answer as the door's call said it before, "answers player N's call": the same answer, read by the rows on both flows)
+        if (answer != 0) {
+            char up[120];
+
+            std::snprintf(up, sizeof up, "askwait: player %d answers after %d steps up (%d waiting for the player)", player, g_ready_keys.up[player],
+                          g_ready_keys.waited[player]);
+            Log(up);
+            coop::ready::Answer(player, answer > 0);
+        } else if (g_ready_keys.up[player] >= ticks && Mutated("ask_lapse")) {
+            coop::ready::QuestionTimedOut(player);
+        }
+        g_ready_keys.up[player]++;
+        if (answer != 0 || !coop::ready::Asking(player)) {
+            std::snprintf(line, sizeof line, "%s: player %d answers player %d's call: %s",
+                          coop::ready::Get().kind == coop::ready::kStoryDoor ? "doorgate" : "item scene", player, initiator,
+                          answer > 0 ? "coming" : answer < 0 ? "not now" : "no answer");
+            Log(line);
+        }
+    }
 }
 
 } // namespace
@@ -7813,12 +10822,12 @@ constexpr ItemScene kItemScenes[] = {{1, 8, 300, 48}, {2, 16, 400, 28}};
 
 bool CoopWorldsItemSceneAsk(int user, int slot, int item, bool shared) {
     if (static const bool trace = TestEnv("DC_COOP_TEST_ITEM_SCENE") != nullptr; trace) { // (x-item-scene: the guards as asked)
-        std::fprintf(stderr, "worlds: test: item scene ask: user %d slot %d item %d, gather %d mode %d status %d save %d on %d has player %d (local %d) apart %d heard %d map %d floor %d\n",
-                     user, slot, item, CoopWorldsStoryGather() ? 1 : 0, (int) mode, UserStatus != nullptr ? 1 : 0, SaveData != nullptr ? 1 : 0, On() ? 1 : 0,
+        std::fprintf(stderr, "worlds: test: item scene ask: user %d slot %d item %d, mode %d status %d save %d on %d has player %d (local %d) apart %d heard %d map %d floor %d\n",
+                     user, slot, item, (int) mode, UserStatus != nullptr ? 1 : 0, SaveData != nullptr ? 1 : 0, On() ? 1 : 0,
                      NetplayHasPlayer() ? 1 : 0, NetplayLocalPlayer(), g_state.apart ? 1 : 0, g_state.peer_heard ? 1 : 0, (int) selectMapNo,
                      UserStatus != nullptr ? (int) UserStatus->cur_floor : -1);
     }
-    if (!CoopWorldsStoryGather() || Mutated("item_scene_off") || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || SaveData == nullptr ||
+    if (Mutated("item_scene_off") || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || SaveData == nullptr ||
         NowEventMan == nullptr || slot < 0 || slot >= 96 || NowEventMan->event[slot].event == nullptr || !On() ||
         // cand1111b: apart the link is down and NetplayLocalPlayer() is 0, yet the session goes on (the apart branch below calls the
         // others); this guard refused it first, so a pick apart started the scene alone (proven: x-item-scene-apart's trace, "has
@@ -7842,10 +10851,16 @@ bool CoopWorldsItemSceneAsk(int user, int slot, int item, bool shared) {
     char line[200];
 
     if (g_state.apart) {
-        if (!g_state.peer_heard) {
+        // coop-owed1112 (the 11-12 handoff: the scene could start alone in the first second apart): a split's other copy is still in
+        // the game before this copy has heard it (its first presence comes a moment after the split, later on a slow link), but an
+        // unheard peer was read as nobody else, so a pick then ran the script for the user alone. Nobody else only once the split's
+        // other copy is gone (CoopWorldsSplitPeerAlive: the link dropped, or nothing heard 10 s after the split); before that the
+        // user is told and the other called, as when heard (the call waits in the progress queue till it is heard).
+        // DC_WORLDS_MUTATE=item_scene_unheard_alone (twin, x-item-scene-apartnow*~unheard): unheard is alone, as before.
+        if (!g_state.peer_heard && (Mutated("item_scene_unheard_alone") || !CoopWorldsSplitPeerAlive())) {
             return false; // nobody else in the game: the user alone is every player
         }
-        std::snprintf(line, sizeof line, "This scene needs every player. Player %d has been called", 3 - Player());
+        std::snprintf(line, sizeof line, "This scene needs every player. %s has been called", NetplayShownName((int) (3 - Player())).c_str());
         SetGatherNote(Player(), line); // (apart: this copy's own player, whatever the picker calls it)
         std::snprintf(line, sizeof line, "item scene: player %d's item %d at script %d (game flag %d unset) apart: not used; player %d is called to %s", Player(),
                       item, script, scene->flag, 3 - Player(), FloorName(selectMapNo, UserStatus->cur_floor));
@@ -7865,36 +10880,53 @@ bool CoopWorldsItemSceneAsk(int user, int slot, int item, bool shared) {
         return true;
     }
 
+    // coop-readyscreen (Jep 11-13: one "who's coming" flow): every other linked player is asked at once, each on their own screen,
+    // the user waiting in its box with a row per player (coop_ready). A player in a menu is asked too: coop-016 (Jep 11-15: never
+    // close the other player's menu to ask them; the item scene still closed a menu still stepping, through FullMenuEndForSplit,
+    // after askwait left the gate's open): the menu stays open and the question waits (ReadyHoldBusy below) until its player
+    // closes it. DC_WORLDS_MUTATE=item_scene_menu_closes (twin x-item-scene-menu-p1~menu_closes): closed for the question, as before.
+    bool linked[coop::kMaxPlayers + 1] = {};
+    char asked_list[64] = "";
+
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        linked[player] = player != user && ItemSceneLinked(player);
+        if (linked[player] && coop::FullMenuOpenFor(player) && Mutated("call_busy_rejects")) { // (coop-askwait: twin, as before)
+            std::snprintf(line, sizeof line, "%s is busy right now. Try again in a moment", NetplayShownName((int) player).c_str());
+            SetGatherNote(user, line, true);
+            VoteLog("item scene: the other player is busy in a menu: not asked, nothing used");
+            return true;
+        }
+    }
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        if (linked[player] && coop::FullMenuRunsFor(player) && Mutated("item_scene_menu_closes")) {
+            coop::FullMenuEndForSplit();
+            std::snprintf(line, sizeof line, "item scene: player %d's menu closes for the question", player);
+            VoteLog(line);
+        }
+        if (linked[player]) {
+            const std::size_t at = std::strlen(asked_list);
+
+            std::snprintf(asked_list + at, sizeof asked_list - at, "%s%d", at != 0 ? ", " : "", player);
+        }
+    }
+
     g_item_pick = ItemPick{user, slot, item, shared};
-
-    const int asked = ItemSceneNextAsked();
-
-    if (asked == 0) {
+    if (!coop::ready::Open(coop::ready::kItemScene, user, linked)) {
         g_item_pick = ItemPick{};
         return false;
     }
+    ReadyKeysReset();
+    ReadyHoldBusy(); // (coop-askwait: a busy player's question waits from the start, never drawn)
 
-    // As the exit gate's beside question: a player in a menu is not asked (told busy); one with a menu still stepping has it closed.
-    if (coop::FullMenuOpenFor(asked)) {
-        std::snprintf(line, sizeof line, "Player %d is busy right now. This scene needs every player", asked);
-        SetGatherNote(user, line, true);
-        VoteLog("item scene: the other player is busy in a menu: not asked, nothing used");
-        g_item_pick = ItemPick{};
-        return true;
-    }
-    if (coop::FullMenuRunsFor(asked)) {
-        coop::FullMenuEndForSplit();
-    }
-
-    g_vote = Vote{true, user - 1, 1, script, kVoteTicks, VotePad(asked - 1).buttons, -1};
+    g_vote = Vote{true, user - 1, 1, script, kVoteTicks, 0, -1};
     g_vote.beside = true;
     g_vote.gather = kGatherItem;
     g_vote.to = UserStatus->cur_floor;
     g_beside_gate.answer = 3; // (the asker's box and the question read it: a story scene here)
     sceVu0CopyVector(g_beside_gate.position, NowEventMan->event[slot].pos);
     sceVu0CopyVector(g_beside_gate.direction, NowEventMan->event[slot].dir);
-    std::snprintf(line, sizeof line, "item scene: player %d's item %d at script %d (game flag %d unset) at link tick %lld: nothing used, asking player %d", user,
-                  item, script, scene->flag, (long long) g_state.tick, asked);
+    std::snprintf(line, sizeof line, "item scene: player %d's item %d at script %d (game flag %d unset) at link tick %lld: nothing used, asking player%s %s", user,
+                  item, script, scene->flag, (long long) g_state.tick, std::strchr(asked_list, ',') != nullptr ? "s" : "", asked_list);
     VoteLog(line);
     return true;
 }
@@ -7916,19 +10948,54 @@ bool CoopWorldsCallQuestion(int *from, int *map, int *to, int *floor, int *curso
     return true;
 }
 
+bool CoopWorldsCallForce(int *chara, int *theirs) {
+    if (g_call_ask.from == 0 || g_call_ask.force < 0) {
+        return false;
+    }
+    *chara = g_call_ask.force;
+    *theirs = g_call_ask.theirs;
+    return true;
+}
+
+int CoopWorldsZoneFloorChara(int map, int to) {
+    return ZoneFloorChara(map, to);
+}
+
+int CoopWorldsForceComing() {
+    ForceComing &c = g_force_coming;
+
+    if (c.map < 0) {
+        return -1;
+    }
+    if (!On() || !g_state.apart) {
+        return -1;
+    }
+    return mode == GAME_MODE_DUNGEON && UserStatus != nullptr && selectMapNo == c.map && UserStatus->cur_floor == c.to ? c.chara : -1;
+}
+
 bool CoopWorldsGatherQuestion(int *asked, int *asker, int *map, int *to, int *gather, int *cursor, int *stage, int *where) {
-    if (!g_vote.active || !VoteDrawnInWindow()) {
+    if (!g_vote.active || !VoteDrawnInWindow() || g_vote.waits) { // (coop-askwait: a waiting question is not drawn)
         return false;
     }
 
     *asked = g_vote.stage == 1 ? 2 - g_vote.asker : g_vote.asker + 1;
+    // coop-readyscreen: an item scene's question is each asked player's own (this copy's player while its question is up, else the
+    // first still asked), with its own hand.
+    if (g_vote.gather == kGatherItem) {
+        const int local = NetplayLocalPlayer();
+
+        *asked = coop::ready::Asking(local) ? local : coop::ready::FirstAsked();
+        if (*asked == 0) {
+            return false;
+        }
+    }
     *stage = g_vote.stage;
     *where = g_vote.beside ? g_beside_gate.answer : 0; // coop-gatevote: her prompt's pick (1 the next floor, 2 back to town)
     *asker = g_vote.asker + 1;
     *map = selectMapNo;
     *to = g_vote.to;
     *gather = g_vote.gather;
-    *cursor = g_vote.cursor;
+    *cursor = g_vote.gather == kGatherItem ? g_ready_keys.hand[*asked] : g_vote.cursor; // (draw only: read, never set)
     return true;
 }
 
@@ -7950,16 +11017,25 @@ void Withdrawn(int asker) {
     Question &q = g_question;
     char      line[96];
 
-    if (!q.open || q.asker != asker) {
+    // (coop-askwait: a queued call withdrawn leaves the queue, never asked)
+    const auto queued = std::remove_if(doorgate::g_ask_queue.begin(), doorgate::g_ask_queue.end(), [&](const doorgate::QueuedAsk &a) { return a.asker == asker; });
+
+    if (queued != doorgate::g_ask_queue.end()) {
+        doorgate::g_ask_queue.erase(queued, doorgate::g_ask_queue.end());
+        std::snprintf(line, sizeof line, "askwait: player %d withdraws its queued door call (Circle)", asker);
+        Log(line);
+    }
+    if ((!q.open && !q.pending) || q.asker != asker) {
         return;
     }
     g_release_cross = true;
     q.open = false;
+    q.pending = false; // (coop-askwait: withdrawn while it waited for its player)
     q.answered_for = q.cave ? -1 : q.row;
     q.answered_at = q.steps;
     std::snprintf(line, sizeof line, "doorgate: player %d withdraws the call (Circle): player %d's question closes", asker, q.asked);
     Log(line);
-    std::snprintf(line, sizeof line, "Player %d cancelled the invite", asker);
+    std::snprintf(line, sizeof line, "%s cancelled the invite", NetplayShownName((int) asker).c_str());
     SetNote(q.asked, line, true);
 }
 
@@ -7976,17 +11052,18 @@ void Answered(int asked, int row, bool cave, int answer) {
     }
 
     if (answer == 4) {
-        std::snprintf(line, sizeof line, "Player %d is coming: in you both go", asked); // (together, a house: DoorYes)
+        std::snprintf(line, sizeof line, "%s is coming: in you both go", NetplayShownName((int) asked).c_str()); // (together, a house: DoorYes)
     } else if (answer == 5) {
-        std::snprintf(line, sizeof line, "Player %d is here: go in together", asked); // (together, the cave door: DoorYes)
+        std::snprintf(line, sizeof line, "%s is here: go in together", NetplayShownName((int) asked).c_str()); // (together, the cave door: DoorYes)
     } else if (answer == 0) {
-        std::snprintf(line, sizeof line, GeoramaRow(row) ? "Player %d is coming to %s" : "Player %d is coming to the door", asked, GeoramaRow(row) ? GeoramaTown(row) : "");
+        std::snprintf(line, sizeof line, GeoramaRow(row) ? "%s is coming to %s" : "%s is coming to the door", NetplayShownName(asked).c_str(),
+                      GeoramaRow(row) ? GeoramaTown(row) : "");
     } else if (answer == 1) {
-        std::snprintf(line, sizeof line, "Player %d can't come now. %s needs both players", asked, where);
+        std::snprintf(line, sizeof line, "%s can't come now. %s needs both players", NetplayShownName((int) asked).c_str(), where);
     } else if (answer == 2) {
-        std::snprintf(line, sizeof line, "Player %d is busy right now. %s needs both players", asked, where); // (floorgate's wording)
+        std::snprintf(line, sizeof line, "%s is busy right now. %s needs both players", NetplayShownName((int) asked).c_str(), where); // (floorgate's wording)
     } else {
-        std::snprintf(line, sizeof line, "Player %d didn't answer. %s needs both players", asked, where);
+        std::snprintf(line, sizeof line, "%s didn't answer. %s needs both players", NetplayShownName((int) asked).c_str(), where);
     }
     if (g_wait_answer != std::chrono::steady_clock::time_point{}) {
         WaitForAnswer(false); // coop-gatepopup: the apart asker's wait ends
@@ -7994,11 +11071,29 @@ void Answered(int asked, int row, bool cave, int answer) {
     SetNote(3 - asked, line, true);
 }
 
+// coop-joinwarp: where one player who said yes to a story door stood at the yes, and the link ticks since (the test line, WatchJoiners).
+struct JoinerWatch {
+    bool  on = false;
+    int   ticks = 0;
+    float at[4] = {};
+};
+
 // coop-gatepopup (Jep's 2026-10-28 playtest: "pressing YES does nothing": his yes did reach the asker, whose link line said
 // "Player 2 is coming to the door" for 4 s, and nobody moved): together, a yes brings the one asked to the asker, both copies
 // alike (the places are lockstep state), and a house's door then takes both in together, as both at the door would (the merge's
 // way back in, CoopWorldsReenterBuilding: g_reentering, no split); at the cave door the asker's next Cross opens it for both. 4 (a
 // house) or 5 (the cave) for Answered. DC_WORLDS_MUTATE=door_yes_note_only (twin): the note alone, as before.
+//
+// coop-joinwarp (the developer's 11-18 playtest: "when P2 joins P1 for a cutscene event, they warp behind P1 and can be seen floating in the
+// air if P2 is standing on stairs. P2 shouldn't move at all before the cutscene starts"): the yes put the one asked beside the asker
+// at once, in plain sight, at the asker's height (his porch at y 43, her spot off it: in the air), a tick before the way in's fade.
+// A house's way in needs no such move: the yes's way in (g_reentering) takes both through the door wherever they stand, and inside
+// the room places her from where the door brought him (coop_town's PlaceInRoom), the story scene then holds and hides her and shows
+// her at its end's spot. So a house's yes moves nobody: each player who said yes stays where they stand, on their own ground, till the
+// fade. (The cave door's yes still puts the one asked beside the asker: its next Cross opens only for both beside it, and that door
+// asks only with DC_WORLDS_MUTATE=cave_gate_at_door, never in play.) DC_WORLDS_MUTATE=door_yes_put_beside (twin): beside, as before.
+JoinerWatch g_join_watch[coop::kMaxPlayers]; // (indexed by player - 1: each player who said yes, watched till the way in)
+
 int DoorYes(const Question &q) {
     float asker[4] = {}, asked[4] = {};
 
@@ -8006,6 +11101,26 @@ int DoorYes(const Question &q) {
         return 0;
     }
     Chara->GetPosition(q.asker == 1 ? asker : asked);
+
+    // (each one asked, watched from where they stood at the yes, whichever way: the test line, WatchJoiners)
+    if (!q.cave && q.asked >= 1 && q.asked <= coop::kMaxPlayers) {
+        JoinerWatch &w = g_join_watch[q.asked - 1];
+
+        w.on = true;
+        w.ticks = 0;
+        std::memcpy(w.at, asked, sizeof w.at);
+    }
+    if (!q.cave && !Mutated("door_yes_put_beside")) {
+        char       line[220];
+        float      ground = 0.0f;
+        const bool on = CoopTownGroundUnder(asked, &ground);
+
+        g_door_yes_building = InteriorId(g_rooms[q.row].name);
+        std::snprintf(line, sizeof line, "doorgate: player %d says come: stays where they stand at (%.1f %.1f %.1f), ground %s%.1f, till the way in; both go in together",
+                      q.asked, asked[0], asked[1], asked[2], on ? "" : "none ", ground);
+        Log(line);
+        return 4;
+    }
 
     // Beside the asker, on the side the one asked came from (open ground, as a rule), kBeside / 2 off.
     float dx = asked[0] - asker[0], dz = asked[2] - asker[2];
@@ -8036,6 +11151,41 @@ int DoorYes(const Question &q) {
     return q.cave ? 5 : 4;
 }
 
+// coop-joinwarp (DC_COOP_DEBUG, tests): each player who said yes to a story door, every link tick from the yes till the way in has
+// taken them inside (the room loaded) or the pair parted: where they stand, how far from their spot at the yes, and the ground under
+// them, on every copy alike. The town draws one other body today, the town partner (player 2's); player 1's is the game's own.
+void WatchJoiners() {
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        JoinerWatch &w = g_join_watch[player - 1];
+
+        if (!w.on) {
+            continue;
+        }
+
+        float at[4] = {};
+        const bool outdoors = On() && g_state.up && !g_state.apart && mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && Chara != nullptr;
+        const bool body = outdoors && (player == 1 ? (Chara->GetPosition(at), true) : player == 2 && coop::TownPartnerShown(at, nullptr));
+        char       line[220];
+
+        if (!body) {
+            w.on = false;
+            std::snprintf(line, sizeof line, "doorgate: player %d's watch from the yes ends after %d link ticks (%s)", player, w.ticks,
+                          EdInteriorFlag != 0 ? "inside" : "no longer outdoors together");
+            Log(line);
+            continue;
+        }
+        w.ticks++;
+        if (CoopDebug()) {
+            float      ground = 0.0f;
+            const bool on = CoopTownGroundUnder(at, &ground);
+            const float dx = at[0] - w.at[0], dy = at[1] - w.at[1], dz = at[2] - w.at[2];
+
+            std::fprintf(stderr, "worlds: doorgate: test: player %d, %d link ticks after the yes: at (%.1f %.1f %.1f), %.2f from the yes's spot, ground %s%.1f\n",
+                         player, w.ticks, at[0], at[1], at[2], std::sqrt(dx * dx + dy * dy + dz * dz), on ? "" : "none ", ground);
+        }
+    }
+}
+
 void Close(int answer) {
     Question &q = g_question;
     char      line[160];
@@ -8043,6 +11193,7 @@ void Close(int answer) {
     g_release_cross = true;
 
     q.open = false;
+    q.pending = false;
     q.answered_for = q.cave ? -1 : q.row;
     q.answered_at = q.steps;
     std::snprintf(line, sizeof line, "doorgate: player %d answers player %d's call: %s", q.asked, q.asker,
@@ -8060,6 +11211,123 @@ void Close(int answer) {
     } else {
         Answered(q.asked, q.row, q.cave, answer);
     }
+}
+
+// coop-readyscreen: the story door's ready check came to a start. Each player who accepted is put beside the opener and they go in
+// together (DoorYes: the call's yes, as before; with every other player along that is everyone). START NOW with nobody along: the door
+// opens for the opener alone (g_door_alone_building: the door's own split), the others stay outside and play on, apart, each told.
+void ReadyStart(bool all) {
+    Question &q = g_question;
+    const int asker = coop::ready::Get().initiator;
+    int       along = 0;
+    int       behind = 0;
+    char      line[160];
+
+    q.open = false;
+    q.answered_for = q.cave ? -1 : q.row;
+    q.answered_at = q.steps;
+    g_release_cross = true;
+    if (partscene::g.asking > 0) { // coop-windmill: a finished part's scene, not a door
+        PartSceneStart(all);
+        return;
+    }
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        if (player == asker || coop::ready::Get().status[player] == coop::ready::kNotAsked) {
+            continue;
+        }
+        if (coop::ready::Accepted(player)) {
+            Question each = q;
+
+            each.asked = player;
+            each.asker = asker;
+            along++;
+            if (const int yes = DoorYes(each); yes != 0) {
+                Answered(player, q.row, q.cave, yes);
+            }
+            continue;
+        }
+        behind++;
+        std::snprintf(line, sizeof line, "%s started the story scene without you", NetplayShownName((int) asker).c_str());
+        SetNote(player, line, true);
+    }
+    std::snprintf(line, sizeof line, "doorgate: %s: %d along, %d left behind", all ? "every other player accepted" : "START NOW", along, behind);
+    Log(line);
+
+    // (two players linked today: along is everyone or nobody. A group of some, with three or more, goes in together and leaves the
+    // rest outside: the merge's way in for the group, the door's split for the rest, when the link carries a third.)
+    if (along == 0 && !q.cave && q.row >= 0 && q.row < (int) g_rooms.size()) {
+        g_door_alone_building = InteriorId(g_rooms[q.row].name);
+        g_door_alone_by = asker;
+    }
+}
+
+// The story door's ready check, together, one step on both copies alike (the asked players' and the opener's agreed pads): each
+// question's answer (unanswered after kAskTicks it closes, "not answered yet"), the opener's box, and what they come to. The
+// question stays drawn while any player is asked (q.open, q.asked: this copy's own, else the first). True: it ran (or closed).
+bool ReadyStep(int *buttons) {
+    namespace ready = coop::ready;
+    Question &q = g_question;
+
+    if (!ready::IsOpen() || ready::Get().kind != ready::kStoryDoor) {
+        return false;
+    }
+
+    const bool together = On() && g_state.up && !g_state.apart;
+
+    if (!together || mode != GAME_MODE_EDIT) {
+        ready::Close("the pair split, merged or left the town");
+        q.open = false;
+        PartSceneClosed("the pair split, merged or left the town"); // coop-windmill
+        return true;
+    }
+
+    const int local = NetplayLocalPlayer();
+
+    // (this copy's game pad holds the question's or the box's keys while its player answers or waits)
+    if (ready::Asking(local) || local == ready::Get().initiator) {
+        *buttons &= ~(kInputCross | kInputCircle | kInputUp | kInputDown) & 0xFFFF;
+    }
+
+    ReadyQuestionsStep(kAskTicks, nullptr);
+    q.asked = ready::FirstAsked() != 0 ? ready::FirstAsked() : q.asked; // (the same on every copy: the draw picks its own)
+    q.open = ready::FirstAsked() != 0;
+    q.cursor = g_ready_keys.hand[q.asked];
+
+    // Test hook (DC_WORLDS_TEST_ASKER_CIRCLE=N, both copies): the opener's Circle N steps after it opened (x-door-gate cancel).
+    static const int    asker_circle = TestEnvInt("DC_WORLDS_TEST_ASKER_CIRCLE", -1);
+    std::uint16_t       mine = VotePad(ready::Get().initiator - 1).buttons;
+
+    if (g_ready_keys.age == asker_circle) {
+        mine |= kInputCircle;
+    }
+
+    const ready::Outcome outcome = ready::Decide(Mutated("call_cancel_off") && (mine & kInputCircle) != 0 ? ready::kPickNone : ReadyBoxKeys(mine));
+
+    g_ready_keys.age++;
+    if (outcome == ready::kStartAll || outcome == ready::kStartNow) {
+        ReadyStart(outcome == ready::kStartAll);
+    } else if (outcome == ready::kCancel) {
+        char line[96];
+
+        q.open = false;
+        q.answered_for = q.cave ? -1 : q.row;
+        q.answered_at = q.steps;
+        g_release_cross = true;
+        std::snprintf(line, sizeof line, "doorgate: player %d cancels (its box): nobody moves", ready::Get().initiator);
+        Log(line);
+        PartSceneClosed("its starter's CANCEL"); // coop-windmill
+        if (g_ready_keys.by_circle) {
+            std::snprintf(line, sizeof line, "doorgate: player %d withdraws the call (Circle): player %d's question closes", ready::Get().initiator, q.asked);
+            Log(line);
+        }
+        for (int player = 1; player <= coop::kMaxPlayers; player++) {
+            if (player != ready::Get().initiator && ready::Get().status[player] != ready::kNotAsked) {
+                std::snprintf(line, sizeof line, "%s cancelled the invite", NetplayShownName((int) (ready::Get().initiator)).c_str());
+                SetNote(player, line, true);
+            }
+        }
+    }
+    return true;
 }
 
 } // namespace doorgate
@@ -8081,12 +11349,49 @@ void CoopWorldsGamePad0(int *buttons) {
     g_game_pad0 = (std::uint16_t) *buttons;
 }
 
+// coop-swapcombo: whether this copy's player is free to be asked a question across zones (the call's rule, CallFree), apart.
+bool CoopWorldsCallFree() {
+    return CallFree();
+}
+
+// (the diagnostic's: what CallFree read)
+void CoopWorldsCallFreeWhy(char *out, int size) {
+    const int n = std::snprintf(out, size, "mode %d game mode %d message %d interior %d menu %d indoor walk %d", (int) mode, (int) GameMode, (int) EdSystemMesCheck(),
+                                (int) EdInteriorFlag, (int) coop::FullMenuOpenFor(Player()), (int) CoopTownIndoorWalks());
+
+    // coop-arrivalwait: a town event (game mode 14, ED_MODE_EVENT) holds the player until retail's script returns (EventMode): which
+    // event, where its interpreter stands and the external calls just before its place (the step it waits on).
+    if (mode == GAME_MODE_EDIT && GameMode == ED_MODE_EVENT && n > 0 && n < size) {
+        const CRunScript &rs = EdEventScript;
+        const int         at = rs.pc != nullptr && rs.code != nullptr ? (int) ((const char *) rs.pc - rs.code) / (int) sizeof(vmcode_t) : -1;
+        char              exts[64] = "";
+        int               len = 0;
+
+        for (int back = 1; at >= 0 && back <= 24 && at - back >= 0 && len < (int) sizeof exts - 8; back++) {
+            const vmcode_t &c = rs.pc[-back];
+
+            // (an ext call pushes its number first, then its arguments: with plain pushes, the number is argc places back)
+            if (c.op == RS_OP_EXT) {
+                const int       id_at = back + c.arg1;
+                const vmcode_t *id = at - id_at >= 0 ? &rs.pc[-id_at] : nullptr;
+
+                len += std::snprintf(exts + len, sizeof exts - len, "%s%d", len ? "," : "",
+                                     id != nullptr && id->op == RS_OP_PUSH_CONST && id->arg1 == 1 ? id->arg2 : -1);
+            }
+        }
+        std::snprintf(out + n, size - n, " event %d function %d at %d (ext before %s) end %d", (int) EdEventInfo.event_no,
+                      rs.func != nullptr && rs.prog != nullptr ? (int) ((const char *) rs.func - (const char *) rs.prog) : -1, at, len ? exts : "none", rs.end);
+    }
+}
+
 std::uint16_t CoopWorldsCallPadButtons() {
     return Mutated("call_keys_raw") ? InputGetPad(0).buttons : g_game_pad0;
 }
 
 // coop-gatepopup2: the floor menu's pick, apart (PickRefuseApart above), on the game's pad of this copy.
 void CoopWorldsEntrancePad(int *buttons) {
+    static long long calls = 0; // (every tick's call, at the menu or not: the pick hook's visits, below)
+    calls++;
     static bool cross_was = false;
     static bool circle_was = false;
     bool        cross = (*buttons & kInputCross) != 0;
@@ -8098,6 +11403,45 @@ void CoopWorldsEntrancePad(int *buttons) {
     circle_was = circle;
     if (!On() || mode != GAME_MODE_DUNGEON || BtGameModeFlag != BT_GAME_MODE_ENTRANCE_MENU || DEnterMenu.state != DUN_ENTER_SELECT) {
         return;
+    }
+
+    // coop-resyncmenu (Jep 11-13, after rc1's B9, where the menu a resync left them at answered player 1's pad alone): a resync landing at
+    // this dungeon's floor menu (NetplayResyncAtMenu: no checkpoint floor to go on to) leaves every copy linked there, the menu on
+    // the host's pad (menu_owner 1) for every player. On its first select tick, both copies alike, every player splits to their
+    // own menu as at a gate everyone said yes to (FloorSplit all, to_picker, here): each copy's menu on its own player's pad, each
+    // picks alone (the same floor meets there; another is apart; Circle goes back to town, g_menu_from_gate). This tick's keys
+    // are the host's: none reach the menu. DC_WORLDS_MUTATE=resync_menu_shared (twin): the host's pad answers, as before.
+    if (NetplayResyncAtMenu() && g_state.up && !g_state.apart && NetplayHasPlayer() && UserStatus != nullptr && !Mutated("resync_menu_shared")) {
+        NetplayResyncAtMenuTaken();
+        *buttons &= ~(kInputCross | kInputCircle) & 0xFFFF;
+        cross_was = circle_was = true; // (a key held over the split presses nothing until let go)
+        FloorSplit(0, true, true, true);
+        g_resync_menu_split = true;
+        return;
+    }
+    // coop-resyncmenu test hook (DC_WORLDS_TEST_RESYNC_PICK=F|town, per copy: x-entrwin -Case resyncmenu): once this copy's menu is
+    // its own after a resync's split, its 20th frame there picks floor F (1 up) with one Cross, or goes back to town with one
+    // Circle, this copy's own player's pick; the menu is the hook's till then (a stray press picks nothing).
+    // coop-latepick: F:N picks on its Nth frame instead (DCO-134: her pick a moment after his).
+    if (static const char *resync_pick = TestEnv("DC_WORLDS_TEST_RESYNC_PICK"); resync_pick != nullptr && g_resync_menu_split) {
+        static int       frames = 0;
+        static const int pick_at = std::strchr(resync_pick, ':') != nullptr ? std::atoi(std::strchr(resync_pick, ':') + 1) : 20;
+
+        *buttons &= ~(kInputCross | kInputCircle) & 0xFFFF;
+        cross = pressed = circle_pressed = false;
+        if (++frames == pick_at) {
+            if (std::strcmp(resync_pick, "town") == 0) {
+                circle_pressed = true;
+                std::fprintf(stderr, "worlds: test: the resync's floor menu takes this copy's (player %d) Circle\n", Player());
+            } else {
+                DEnterMenu.selected_floor = std::atoi(resync_pick) - 1;
+                *buttons |= kInputCross;
+                cross = pressed = true;
+                std::fprintf(stderr, "worlds: test: the floor menu picks floor %d on this copy (player %d, frame %d of its picks)\n", std::atoi(resync_pick), Player(), frames);
+            }
+            std::fflush(stderr);
+            g_resync_menu_split = false;
+        }
     }
 
     // coop-playfix: the other player's call asked over this menu (CallFree): its keys are the question's (CallTick reads the
@@ -8143,8 +11487,8 @@ void CoopWorldsEntrancePad(int *buttons) {
         return;
     }
 
-    // coop-gateflow (Jep, 2026-11-02: "allowing players to back out of that menu if they want to go back to town"): with
-    // game.coop_gate_picker, Circle at the floor menu goes back to the dungeon's town (retail's Circle there only refused), the
+    // coop-gateflow (Jep, 2026-11-02: "allowing players to back out of that menu if they want to go back to town"): Circle
+    // at the floor menu goes back to the dungeon's town (retail's Circle there only refused), the
     // town the dungeon's own way home takes (movechara's exit fade table), by the restart a resync leaves by. Together both
     // copies take it on one tick; apart this copy alone. DC_WORLDS_MUTATE=picker_back_off (twin): Circle refuses, as retail.
     // DC_WORLDS_TEST_PICKER_BACK=N (x-gate-flow -Case back): the Nth frame of this copy's floor menu taking picks, one Circle.
@@ -8158,7 +11502,54 @@ void CoopWorldsEntrancePad(int *buttons) {
         }
     }
 
-    if (circle_pressed && GatePickerOn() && !doorgate::Waiting() && !Mutated("picker_back_off") && DEnterMenu.dungeon >= 0 && DEnterMenu.dungeon < 7) {
+    // coop-choosing test hook (DC_WORLDS_TEST_PICKER_FLOOR=F:N, x-gate-flow -Case picker -Pick): the Nth frame of this copy's
+    // floor menu taking picks, the menu's hand on floor F (1 up) and one Cross, each copy its own (its player's pick alone), once.
+    // F "next" (x-dungeon-descent, every floor's gate): the deepest floor the menu lists, at every visit of the menu.
+    if (static const char *pick_test = TestEnv("DC_WORLDS_TEST_PICKER_FLOOR"); pick_test != nullptr) {
+        static int       frames = 0;
+        static bool      done = false;
+        static long long last_tick = -1;
+        const bool       next = std::strncmp(pick_test, "next:", 5) == 0;
+        // coop-resyncblack: F:N:each picks floor F at every visit of the menu (x-gate-flow -Returns: back to the same floor again)
+        static const bool each = std::strstr(pick_test, ":each") != nullptr;
+        int              floor = 0;
+        int              at = 0;
+
+        if ((next || each) && last_tick >= 0 && calls > last_tick + 1) { // (a new visit of the menu)
+            frames = 0;
+            done = false;
+        }
+        last_tick = calls;
+        if (next && UserStatus != nullptr && selectMapNo >= 0 && selectMapNo < 7) {
+            floor = UserStatus->floor_reached[selectMapNo] + 1;
+            at = std::atoi(pick_test + 5);
+        } else if (!next && std::sscanf(pick_test, "%d:%d", &floor, &at) != 2) {
+            at = 0;
+        }
+        if (!done && at > 0) {
+            *buttons &= ~(kInputCross | kInputCircle) & 0xFFFF; // (the menu is the hook's: a test's stray press picks nothing first)
+            cross = pressed = circle_pressed = false;
+        }
+        // coop-mergeload: F:N:peer / next:N:peer counts the N frames only once the other copy is heard playing on that floor, its
+        // walk-in over (so this copy arrives after it on every machine, a later arriver its state takes in, not one in its window).
+        static const bool after_peer = std::strstr(pick_test, ":peer") != nullptr;
+        const bool        peer_there = !after_peer || (g_state.apart && g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON &&
+                                                     g_state.peer.map == selectMapNo && g_state.peer.floor == floor - 1 && g_state.peer_walk_key == -1000);
+
+        if (!done && at > 0 && peer_there && ++frames >= at) {
+            done = true;
+            DEnterMenu.selected_floor = floor - 1;
+            *buttons |= kInputCross;
+            std::fprintf(stderr, "worlds: test: the floor menu picks floor %d on this copy (player %d, frame %d of its picks)\n", floor, Player(), frames);
+            std::fflush(stderr);
+            // coop-gatherpicker: the hook's Cross goes on as a player's press does, through the checks below (a floor that needs
+            // both or is fenced to a member another player plays elsewhere does not take): it returned here before, so a pick the
+            // game refuses in play went through in a test.
+            cross = pressed = true;
+        }
+    }
+
+    if (circle_pressed && (GatePickerOn() || g_menu_from_gate) && !doorgate::Waiting() && !Mutated("picker_back_off") && DEnterMenu.dungeon >= 0 && DEnterMenu.dungeon < 7) {
         static const int kTownOf[7] = {0, 1, 0x13, 0x2A, 0x17, 0x26, 0x3C}; // (DUNGEON_DIVINE_BEAST_CAVE ... DUNGEON_DEMON_SHAFT)
 
         *buttons &= ~(kInputCircle | kInputCross) & 0xFFFF;
@@ -8168,7 +11559,11 @@ void CoopWorldsEntrancePad(int *buttons) {
                      (int) DEnterMenu.dungeon, Player(), kTownOf[DEnterMenu.dungeon]);
         std::fflush(stderr);
         NetplayGoToTown(kTownOf[DEnterMenu.dungeon]);
+        g_menu_from_gate = false;
         return;
+    }
+    if (pressed) {
+        g_menu_from_gate = false; // (its pick made: a later floor menu is the setting's again)
     }
 
     const int to = DEnterMenu.selected_floor;
@@ -8180,13 +11575,22 @@ void CoopWorldsEntrancePad(int *buttons) {
     const bool both_here = g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == selectMapNo && g_state.peer.floor == -1 &&
                            Mutated("pick_both_here_free");
 
-    if (!cross || !g_state.apart || !doorgate::OtherLinked() || both_here || GatherFor(selectMapNo, to) == kGatherNone || Mutated("pick_gate_off")) {
+    // coop-forcefloor: a floor fenced to a member another player plays elsewhere asks that player, as a story floor asks.
+    const bool gathered = GatherFor(selectMapNo, to) != kGatherNone;
+    int        force_chara = -1;
+    const int  holder = cross && g_state.apart && !gathered && !both_here ? ForceHolder(selectMapNo, to, &force_chara) : 0;
+
+    if (!cross || !g_state.apart || !doorgate::OtherLinked() || both_here || (!gathered && holder == 0) || Mutated("pick_gate_off")) {
         return;
     }
 
     *buttons &= ~kInputCross & 0xFFFF; // (the menu never takes it)
     if (pressed && !doorgate::Waiting()) {
-        PickRefuseApart(to);
+        if (holder > 0) {
+            ForceRefuseApart(to, force_chara, holder, true);
+        } else {
+            PickRefuseApart(to);
+        }
     }
 }
 
@@ -8194,6 +11598,7 @@ void CoopWorldsDoorQuestionPad(int *buttons) {
     doorgate::Question &q = doorgate::g_question;
 
     q.steps++;
+    ArrivePad(buttons); // coop-firstvisit: the starter's box (START NOW), held on black
 
     // coop-gatevote: the asker's Cross let go since the last answer (together its agreed pad, apart this copy's game pad).
     if (doorgate::g_release_cross && !q.open) {
@@ -8209,6 +11614,59 @@ void CoopWorldsDoorQuestionPad(int *buttons) {
     // coop-gatepopup: apart, this copy waiting for its call's answer: its own Circle withdraws the call (doorgate::WaitCircle).
     if (g_state.apart && doorgate::Waiting()) {
         doorgate::WaitCircle((std::uint16_t) *buttons);
+    }
+    if (doorgate::ReadyStep(buttons)) {
+        return; // coop-readyscreen: together, the story door's ready check (its questions and the opener's box)
+    }
+
+    // Test hook (DC_WORLDS_TEST_TALK_AT=N): from step N of the question this copy's player counts as taken (as by a talk).
+    static const int talk_at = TestEnvInt("DC_WORLDS_TEST_TALK_AT", -1);
+
+    // coop-askwait: a question waiting for its busy player (apart) opens once the player is free; together again it closes (the
+    // merge: the asker's wait ends with it, CallTick).
+    // coop-askwait: the next queued door call (another asker's) is asked once this one has closed, in the order they came.
+    if (!q.open && !q.pending && !doorgate::g_ask_queue.empty()) {
+        if (On() && g_state.up && !g_state.apart) {
+            doorgate::g_ask_queue.clear();
+            Log("askwait: together again: the queued door calls close");
+        } else {
+            const doorgate::QueuedAsk next = doorgate::g_ask_queue.front();
+            char                      line[128];
+
+            doorgate::g_ask_queue.erase(doorgate::g_ask_queue.begin());
+            std::snprintf(line, sizeof line, "askwait: player %d's queued door call comes next (%d still queued)", next.asker, (int) doorgate::g_ask_queue.size());
+            Log(line);
+            q.answered_for = -2; // (another asker's door: the last answer's let-go of Cross was its asker's, not this one's)
+            doorgate::Ask(Player(), next.asker, next.row, next.cave, true);
+            return;
+        }
+    }
+    if (q.pending) {
+        if (On() && g_state.up && !g_state.apart) {
+            q.pending = false;
+            Log("askwait: together again: the door call waiting for its player closes");
+            return;
+        }
+        if (!CoopWorldsPlayerFree() || (talk_at >= 0 && q.age >= talk_at)) {
+            if (q.waited++ % 600 == 0) {
+                char line[160];
+
+                std::snprintf(line, sizeof line, "askwait: player %d's door call waits for player %d to be free (%d steps so far)", q.asker, q.asked, q.waited - 1);
+                Log(line);
+            }
+            return;
+        }
+        char line[160];
+
+        q.pending = false;
+        q.open = true;
+        q.cursor = 0;
+        q.ticks = doorgate::kAskTicks;
+        q.held = 0xFFFF;
+        q.asker_held = 0xFFFF;
+        std::snprintf(line, sizeof line, "askwait: player %d asked on this copy alone after %d steps waiting: player %d's door call opens", q.asked, q.waited, q.asker);
+        Log(line);
+        return;
     }
     if (!q.open) {
         return;
@@ -8226,11 +11684,18 @@ void CoopWorldsDoorQuestionPad(int *buttons) {
     // coop-gatepopup2 (Jep's 2026-10-28 playtest: the cave's call drawn over P2's talk with the mayor): apart, a question whose
     // player is taken by something else (a talk, an event, a menu: CallFree) closes as busy at once, as the floor call's does,
     // never drawn over it. DC_WORLDS_MUTATE=talk_not_busy (twin): it stays.
-    // Test hook (DC_WORLDS_TEST_TALK_AT=N): from step N of the question this copy's player counts as taken (as by a talk).
-    static const int talk_at = TestEnvInt("DC_WORLDS_TEST_TALK_AT", -1);
-    const bool       taken = !CoopWorldsPlayerFree() || (talk_at >= 0 && q.age >= talk_at);
+    const bool taken = !CoopWorldsPlayerFree() || (talk_at >= 0 && q.age >= talk_at);
 
+    // coop-askwait: taken, it goes back to waiting (pending) and opens again once its player is free; nothing answers busy.
+    // DC_WORLDS_MUTATE=call_busy_rejects (twin): it closes as busy, as before.
     if (q.apart && taken && !Mutated("talk_not_busy")) {
+        if (!Mutated("call_busy_rejects")) {
+            Log("askwait: the asked player is taken by something else (a talk, an event or a menu): the question waits for the player again");
+            q.open = false;
+            q.pending = true;
+            q.waited = 0;
+            return;
+        }
         Log("doorgate: the asked player is taken by something else (a talk, an event or a menu): the question closes as busy");
         doorgate::Close(2);
         return;
@@ -8305,7 +11770,7 @@ void CoopWorldsDoorQuestionPad(int *buttons) {
             SndSePlay(yes ? MENU_SOUND_CONFIRM : MENU_SOUND_REFUSE, -1, 0);
         }
         doorgate::Close(yes ? 0 : 1);
-    } else if (--q.ticks <= 0) {
+    } else if (--q.ticks <= 0 && (!q.apart || Mutated("ask_lapse"))) { // (coop-askwait: apart no clock; ask_lapse, twin: as before)
         doorgate::Close(3);
     }
 }
@@ -8325,6 +11790,11 @@ bool CoopWorldsDoorQuestion(int *asked, char *text, int size, int *cursor, int *
 
     *asked = q.asked;
     *cursor = q.cursor;
+    // coop-readyscreen: each asked player's own question on its own copy, with its own hand (draw only: read, never set)
+    if (const int local = NetplayLocalPlayer(); coop::ready::IsOpen() && coop::ready::Asking(local)) {
+        *asked = local;
+        *cursor = g_ready_keys.hand[local];
+    }
     *key = ((q.asker * 64 + (q.cave ? 63 : q.row < 0 ? 56 - q.row : q.row)) * 2 + 1) * 4 + 3; // (never a floor question's key: those end in 0-2)
     CoopWorldsDoorQuestionText(q.asker, q.row, q.cave, text, size);
     return true;
@@ -8334,16 +11804,21 @@ bool CoopWorldsDoorQuestion(int *asked, char *text, int size, int *cursor, int *
 // short lines broken by hand, each well inside the modal's 280-wide wrap (coop::DrawYesNoPopup logs every line's width), then
 // the bubble twin's two rows. DC_WORLDS_MUTATE=door_text_old (twin): the house question as Jep saw it wrap.
 void CoopWorldsDoorQuestionText(int asker, int row, bool cave, char *text, int size) {
+    // coop-readyscreen (Jep 11-13): a story start together asks the one question of the ready check.
+    if (coop::ready::IsOpen() && coop::ready::Get().kind == coop::ready::kStoryDoor && !Mutated("door_text_old")) {
+        CoopWorldsReadyQuestionText(asker, text, size);
+        return;
+    }
     if (Mutated("door_text_old") && !cave && !doorgate::GeoramaRow(row)) {
-        std::snprintf(text, size, "Player %d is going into\n%s, and you\ngo in together. Come now?\nCome\nNot now", asker, doorgate::RoomName(row));
+        std::snprintf(text, size, "%s is going into\n%s, and you\ngo in together. Come now?\nCome\nNot now", NetplayShownName((int) asker).c_str(), doorgate::RoomName(row));
     } else if (doorgate::GeoramaRow(row)) {
-        std::snprintf(text, size, "Player %d picked a story\nscene in %s.\nWatch it together?\nCome\nNot now", asker, doorgate::GeoramaTown(row));
+        std::snprintf(text, size, "%s picked a story\nscene in %s.\nWatch it together?\nCome\nNot now", NetplayShownName((int) asker).c_str(), doorgate::GeoramaTown(row));
     } else if (cave) {
-        std::snprintf(text, size, "Player %d is at the\nDivine Beast Cave.\nGo in together now?\nCome\nNot now", asker);
+        std::snprintf(text, size, "%s is at the\nDivine Beast Cave.\nGo in together now?\nCome\nNot now", NetplayShownName((int) asker).c_str());
     } else if (row >= 0 && row < (int) doorgate::g_rooms.size() && std::strcmp(doorgate::g_rooms[row].name, "i01h06") == 0) {
-        std::snprintf(text, size, "Player %d is at the\nmayor's house door.\nGo in together now?\nCome\nNot now", asker);
+        std::snprintf(text, size, "%s is at the\nmayor's house door.\nGo in together now?\nCome\nNot now", NetplayShownName((int) asker).c_str());
     } else {
-        std::snprintf(text, size, "Player %d is at a house\ndoor in %s.\nGo in together now?\nCome\nNot now", asker, doorgate::TownName(row));
+        std::snprintf(text, size, "%s is at a house\ndoor in %s.\nGo in together now?\nCome\nNot now", NetplayShownName((int) asker).c_str(), doorgate::TownName(row));
     }
 }
 
@@ -8362,17 +11837,54 @@ void BesideGateScript() {
     sceVu0CopyVector(BtEventInfo.direction, g_beside_gate.direction);
 }
 
-// Every other player said yes: they are brought beside the spot (beside its user), and the slot's script starts with the pick
-// as its window's answer, on every copy alike (the picker's own start, coop::StartPickedItemScene).
-void ItemSceneGo() {
+// coop-readyscreen (Jep 11-13: "the decliner keeps playing"): a player the item scene starts without (declined or not answered, START
+// NOW) on a floor every player shares. kLeftApart (Jep's A, the default): the pair splits on the floor (ItemSceneSplit): the user's copy
+// plays the scene, the others play on in their own world on the same floor, and they merge once the scene is over, by the scene's
+// copy's state (it stayed), each other player where they walked. kLeftStays (B, rc2's until A's rows were green): not brought to the
+// spot, left where they stand, the scene run on the lockstep (the partner hidden through it, CoopWorldsPartnerStandsInScene).
+// One line, as kStoryStart. DC_WORLDS_MUTATE=item_left_stays (twin): kLeftStays.
+enum ItemLeftBehind { kLeftStays, kLeftApart };
+constexpr ItemLeftBehind kItemLeftBehind = kLeftApart;
+
+// The ready check started it (every other player accepted, or the user's START NOW): the players who accepted are brought beside the
+// spot (beside its user), the others left where they stand (kItemLeftBehind), and the slot's script starts with the pick as its
+// window's answer, on every copy alike (the picker's own start, coop::StartPickedItemScene).
+void ItemSceneGo(bool all) {
     const ItemPick pick = g_item_pick;
     CDungeonEventData *slot = pick.slot >= 0 && pick.slot < 96 && NowEventMan != nullptr ? &NowEventMan->event[pick.slot] : nullptr;
     const float       *user_at = pick.user == 1 ? CharaMain.pos : coop::g_partner.pos;
     char               line[200];
 
     g_item_pick = ItemPick{};
+
+    // A: someone left behind on this floor plays on apart, the scene on the user's copy (two copies today: everyone else is the one
+    // left behind; with three, those who accepted would go with the user's copy and the split be the rest's).
+    bool behind = false;
+
+    for (int player = 1; player <= coop::kMaxPlayers; player++) {
+        behind = behind || (player != pick.user && ItemSceneLinked(player) && !coop::ready::Accepted(player));
+    }
+    // (a story scene needs player 1: story moments wait for him, a copy without Toan holds a story event at its start (Jep 11-10). Player
+    // 1 left out of another player's scene cannot play on apart while it plays without him: it plays on the lockstep, as B, player 1
+    // where he stands.)
+    const bool needs_one = pick.user != 1 && ItemSceneLinked(1) && !coop::ready::Accepted(1);
+
+    if (behind && needs_one && kItemLeftBehind == kLeftApart) {
+        VoteLog("item scene: player 1 is left out, but its story needs Toan (story moments wait for player 1): it plays on the lockstep, player 1 where he stands");
+    }
+    if (behind && !needs_one && kItemLeftBehind == kLeftApart && !Mutated("item_left_stays") && slot != nullptr) {
+        ItemSceneSplit(pick.user, pick.slot, pick.item, pick.shared);
+        return;
+    }
+
     for (int player = 1; player <= coop::kMaxPlayers && slot != nullptr; player++) {
         if (player == pick.user || !ItemSceneLinked(player)) {
+            continue;
+        }
+        if (!coop::ready::Accepted(player)) {
+            std::snprintf(line, sizeof line, "item scene: player %d is left where they stand (%s), the scene plays without them", player,
+                          coop::ready::StatusText(coop::ready::Get().status[player]));
+            VoteLog(line);
             continue;
         }
 
@@ -8396,7 +11908,8 @@ void ItemSceneGo() {
 
     const bool started = coop::StartPickedItemScene(pick.user, pick.slot, pick.item, pick.shared);
 
-    std::snprintf(line, sizeof line, "item scene: every player said yes: player %d's item %d starts script %d (%s)", pick.user, pick.item,
+    std::snprintf(line, sizeof line, "item scene: %s: player %d's item %d starts script %d (%s)",
+                  all ? "every player said yes" : "START NOW", pick.user, pick.item,
                   slot != nullptr && slot->event != nullptr ? (int) slot->event->script_no : -1, started ? "started" : "could not start");
     VoteLog(line);
 }
@@ -8409,12 +11922,31 @@ void ItemSceneCancel(const char *why, int other) {
     std::snprintf(line, sizeof line, "item scene: %s: nothing used, player %d's item %d kept", why, g_item_pick.user, g_item_pick.item);
     VoteLog(line);
     if (other > 0) {
-        std::snprintf(line, sizeof line, "Player %d %s. This scene needs every player", other,
+        std::snprintf(line, sizeof line, "%s %s. This scene needs every player", NetplayShownName((int) other).c_str(),
                       std::strcmp(why, "no answer") == 0 ? "did not answer" : std::strcmp(why, "a player left") == 0 ? "left" : "said no");
         SetGatherNote(g_item_pick.user, line, true);
     }
+    coop::ready::Close(why);
     g_item_pick = ItemPick{};
     g_vote = Vote{};
+}
+
+// coop-readyscreen: the item scene's ready check, one step on every linked copy alike: the asked players' questions (each unanswered
+// one closes after 10 s, its player still "not answered yet"), the user's box, and what they come to.
+void StepItemReady() {
+    static const char *const scripted = TestEnv("DC_WORLDS_TEST_VOTE"); // (the older rows' answer, as before)
+
+    ReadyQuestionsStep(kVoteTicks, scripted);
+
+    const coop::ready::Outcome outcome = coop::ready::Decide(ReadyBoxKeys(VotePad(g_vote.asker).buttons));
+
+    g_ready_keys.age++;
+    if (outcome == coop::ready::kStartAll || outcome == coop::ready::kStartNow) {
+        ItemSceneGo(outcome == coop::ready::kStartAll);
+        g_vote = Vote{};
+    } else if (outcome == coop::ready::kCancel) {
+        ItemSceneCancel("its user cancelled", 0);
+    }
 }
 
 void StepBesideVote() {
@@ -8433,15 +11965,20 @@ void StepBesideVote() {
         return;
     }
 
+    // coop-readyscreen: an item scene is the ready check's (its questions, the user's box with START NOW and CANCEL).
+    if (g_vote.gather == kGatherItem) {
+        StepItemReady();
+        return;
+    }
+
     const int pick = AskerPick(); // coop-gatepopup: the asker's Circle (1); coop-gatevote: its LEAVE NOW (2)
 
     if (pick == 1) {
-        if (g_vote.gather == kGatherItem) {
-            ItemSceneCancel("its user cancelled", 0);
-            return;
-        }
         g_vote = Vote{};
         return;
+    }
+    if (VoteWaitsFor(pick)) {
+        return; // coop-askwait (as CoopWorldsGateVote)
     }
 
     int           asked = g_vote.stage == 1 ? 1 - g_vote.asker : g_vote.asker;
@@ -8472,23 +12009,19 @@ void StepBesideVote() {
         no = false;
     }
 
-    // pt1111c: an item scene: this player's yes counted; the next player still to answer is asked, and once every other player
-    // said yes the scene starts. Any no or no answer drops it, nothing used. DC_WORLDS_MUTATE=item_scene_no_ignored (twin): a
-    // no is taken as a yes, as the gate's vote_ignore.
-    if (g_vote.gather == kGatherItem && g_vote.stage == 1 && (yes || ((no || g_vote.ticks <= 1) && Mutated("item_scene_no_ignored")))) {
-        g_item_pick.yes[asked + 1] = true;
-        if (const int next = ItemSceneNextAsked(); next > 0) {
-            g_vote.ticks = kVoteTicks;
-            g_vote.held = VotePad(next - 1).buttons;
-            g_vote.cursor = 0;
-            return;
-        }
-        ItemSceneGo();
+    // coop-choosing (Jep 11-12): every yes to the next floor takes every player to their own floor menu (the floor gate's picker
+    // way, FloorSplit all), none choosing for another; they are apart from there and meet again on a floor both pick. Back to
+    // town (answer 2) has no menu: the gate's script still takes both, its window answered; so does a floor that gathers every
+    // player (a story or boss floor: they go on together, coop-floorgate). DC_WORLDS_MUTATE=vote_one_menu (twin):
+    // the gate's script for both and its floor menu the asker's, answered on the asker's pad for both, as before.
+    if (g_vote.stage == 1 && yes && g_beside_gate.answer == 1 && g_vote.gather == kGatherNone && !Mutated("vote_one_menu") && mode == GAME_MODE_DUNGEON && UserStatus != nullptr) {
+        const int asker = g_vote.asker;
+
+        VoteLog("the other player says yes: every player leaves for their own floor menu");
+        ReachNextFloor();
         g_vote = Vote{};
-        return;
-    }
-    if (g_vote.gather == kGatherItem && g_vote.stage == 1 && (no || --g_vote.ticks <= 0)) {
-        ItemSceneCancel(no ? "said no" : "no answer", asked + 1);
+        gameTask = GAME_TASK_PLAY;
+        FloorSplit(asker, true, true);
         return;
     }
 
@@ -8501,15 +12034,18 @@ void StepBesideVote() {
         coop::SetEscapeWindowAnswer(g_beside_gate.answer);
         gameTask = GAME_TASK_SCRIPT_START;
 
-        // Both leave by her gate: the floor menu its "next floor" opens (program 100's entrance window) is hers to answer.
-        if (g_vote.asker == 1 && !Mutated("vote_p1floor")) {
+        // Both leave by her gate: the floor menu its "next floor" opens (program 100's entrance window) is the asker's to answer
+        // (only under the twin vote_one_menu now: a yes to the next floor goes the picker way above).
+        if (g_vote.asker == 1 && Mutated("vote_one_menu")) {
             coop::MenuNotePrompt(true);
         }
 
         return;
     }
 
-    if (g_vote.stage == 1 && (no || --g_vote.ticks <= 0)) {
+    // coop-askwait: no clock: the question stays till answered or the asker's CANCEL / LEAVE NOW (DC_WORLDS_MUTATE=ask_lapse, twin: no
+    // answer in 10 s asks the asker, then 10 s more both stay, as before)
+    if (g_vote.stage == 1 && (no || (--g_vote.ticks <= 0 && Mutated("ask_lapse")))) {
         if (g_vote.gather != kGatherNone && !Mutated("gather_leave_anyway")) { // coop-floorgate (as CoopWorldsGateVote)
             GatherDeclined(!no);
             g_vote = Vote{};
@@ -8544,7 +12080,7 @@ void StepBesideVote() {
         return;
     }
 
-    if (g_vote.stage == 2 && (no || --g_vote.ticks <= 0)) {
+    if (g_vote.stage == 2 && (no || (--g_vote.ticks <= 0 && Mutated("ask_lapse")))) {
         VoteLog("not leaving: both stay");
         g_vote = Vote{};
     }
@@ -8561,6 +12097,33 @@ void StepBesideVote() {
 // question is up: after a no that player plays on, and the floor with it. DC_WORLDS_MUTATE=vote_stage2_holds (twin): both held.
 // port 0: the game's player on this copy (together player 1); 1: player 2's partner (together). DC_WORLDS_MUTATE=question_no_hold
 // (twin): both walk on, as before.
+// coop-016 (Jep: the asker can always back out while a request waits): with every player of the zone paused or in a menu (the
+// asker in its box, the one asked in a menu) the world holds, and WorldStep (coop_fullmenu.cpp) then runs no play step: neither
+// the gate's script start (movechara's GAME_TASK_SCRIPT_START, CoopWorldsGateVote) nor CoopWorldsSimTick (StepBesideVote) came,
+// so the asker's box keys went unread until the menu closed (x-item-scene-menu-p1: "comes up after 0 steps waiting" after 261
+// held ticks; x-dungeon-suite-gate-p1-menu the same). The vote alone steps here, on every copy alike (the hold is agreed state),
+// the world still held: its questions, the asker's box (CANCEL, START NOW, LEAVE NOW). DC_WORLDS_MUTATE=held_vote_unstepped
+// (twin): not stepped, as before.
+void CoopWorldsVoteHeldStep() {
+    if (!g_vote.active || !On()) {
+        return;
+    }
+    if (Mutated("held_vote_unstepped")) {
+        static int held = 0;
+
+        if (++held == 180) { // (the twin's stop line, past the link's first in-sync reports)
+            std::fprintf(stderr, "worlds: test: the vote not stepped while the world holds, 180 ticks (held_vote_unstepped)\n");
+            std::fflush(stderr);
+        }
+        return;
+    }
+    if (g_vote.beside) {
+        StepBesideVote();
+    } else if (gameTask == GAME_TASK_SCRIPT_START) {
+        (void) CoopWorldsGateVote(g_vote.script_no); // (its script, still at its start, takes the outcome when the world runs)
+    }
+}
+
 bool CoopWorldsQuestionHolds(int port) {
     if (coop::PromptHolds(port)) { // coop-townwheel: the swap question holds both players as a gate's does
         return true;
@@ -8574,15 +12137,24 @@ bool CoopWorldsQuestionHolds(int port) {
     if (g_state.up && !g_state.apart) {
         const int player = port + 1;
 
-        return (q.open && !q.apart && (q.asked == player || q.asker == player)) || (g_vote.active && (port == g_vote.asker || (port == 1 - g_vote.asker && (g_vote.stage == 1 || Mutated("vote_stage2_holds")))));
+        // coop-readyscreen: a ready check holds its initiator throughout (its box) and each asked player while its question is up;
+        // a player who answered plays on.
+        if (coop::ready::IsOpen()) {
+            return player == coop::ready::Get().initiator || coop::ready::Asking(player);
+        }
+        return (q.open && !q.apart && (q.asked == player || q.asker == player)) || (g_vote.active && (port == g_vote.asker || (port == 1 - g_vote.asker && !g_vote.waits && (g_vote.stage == 1 || Mutated("vote_stage2_holds")))));
     }
     if (!g_state.apart || port != 0) {
         return false;
     }
-    if (doorgate::g_wait_answer != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() >= doorgate::g_wait_answer) {
+    // coop-askwait: the asker waits till the answer, its own Circle or the other player leaving the link; no clock ends it.
+    // (DC_WORLDS_MUTATE=ask_lapse, twin: given up after kAskTicks' time and a little, as before.)
+    if (Mutated("ask_lapse") && doorgate::g_wait_answer != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() >= doorgate::g_wait_answer) {
+        std::fprintf(stderr, "worlds: question: this copy (player %d) gives up waiting: no answer in time\n", Player());
         doorgate::WaitForAnswer(false); // (no answer came: given up)
     }
-    return (q.open && q.apart) || (g_call_ask.from != 0 && g_call_ask.shown > 0) || doorgate::g_wait_answer != std::chrono::steady_clock::time_point{};
+    return (q.open && q.apart) || (g_call_ask.from != 0 && g_call_ask.shown > 0) || doorgate::g_wait_answer != std::chrono::steady_clock::time_point{} ||
+           CoopWorldsArriveHoldsMerge(); // (coop-firstvisit: a held story arrival, on black)
 }
 
 // coop-gatepopup (Jep, 2026-10-28: "the player that initiated should have the same box that shows up on the receiving players
@@ -8590,6 +12162,21 @@ bool CoopWorldsQuestionHolds(int port) {
 // can press the cancel button, or circle"): whether this copy's player waits on a gate's question it asked (the door's call or
 // the gathered floor gate's, together; its call apart), and who was asked. DC_WORLDS_MUTATE=wait_box_off (twin): no box, the link
 // line's "Waiting for player N..." as before.
+// coop-readyscreen: whether this copy's player is the initiator of an open ready check, together (its box drawn on its own screen,
+// coop_useprompt's DrawReadyBox: a row per other player, START NOW and CANCEL). DC_WORLDS_MUTATE=wait_box_off (twin): no box.
+bool CoopWorldsReadyBox() {
+    const int local = NetplayLocalPlayer();
+
+    // (coop-firstvisit: apart, a story arrival's starter in its box)
+    return (On() && !Mutated("wait_box_off") && g_state.up && !g_state.apart && local != 0 && coop::ready::IsOpen() &&
+            coop::ready::Get().initiator == local) ||
+           (On() && !Mutated("wait_box_off") && g_state.apart && ArriveBoxHere());
+}
+
+void CoopWorldsReadyQuestionText(int initiator, char *text, int size) {
+    std::snprintf(text, size, "%s wants to\nstart a story scene.\nCome along?\nYes\nNo", NetplayShownName((int) initiator).c_str());
+}
+
 bool CoopWorldsWaitingFor(int *asked) {
     const doorgate::Question &q = doorgate::g_question;
     const int                 local = NetplayLocalPlayer();
@@ -8598,6 +12185,9 @@ bool CoopWorldsWaitingFor(int *asked) {
         return false;
     }
     if (g_state.up && !g_state.apart && local != 0) {
+        if (coop::ready::IsOpen()) {
+            return false; // coop-readyscreen: the ready box (CoopWorldsReadyBox)
+        }
         if (q.open && !q.apart && local == q.asker) {
             *asked = q.asked;
             return true;
@@ -8615,7 +12205,7 @@ bool CoopWorldsGateWaiting(int *waiting_on, int *state, int *where, int *to, boo
     const int local = NetplayLocalPlayer();
 
     if (!On() || Mutated("wait_box_off") || !g_state.up || g_state.apart || local == 0 || !g_vote.active || local != g_vote.asker + 1 ||
-        !VoteKeysInWindow()) {
+        !VoteKeysInWindow() || g_vote.gather == kGatherItem) { // (coop-readyscreen: an item scene's is the ready box, CoopWorldsReadyBox)
         return false;
     }
     *waiting_on = 2 - g_vote.asker;
@@ -8659,13 +12249,13 @@ const char *CoopWorldsStatus() {
             return ""; // coop-floorgate, coop-gatevote: asked in the game's own window (coop::DrawGatherQuestion)
         } else if (g_vote.stage == 1 && g_vote.gather != kGatherNone) {
             // DC_WORLDS_MUTATE=gather_hud_text (twin): the question on the link line, as first built.
-            std::snprintf(question, sizeof question, "Player %d wants to go to %s. Join?  Cross yes / Circle no  (%d)", g_vote.asker + 1,
+            std::snprintf(question, sizeof question, "%s wants to go to %s. Join?  Cross yes / Circle no  (%d)", NetplayShownName((int) (g_vote.asker + 1)).c_str(),
                           FloorName(selectMapNo, g_vote.to), (g_vote.ticks + 59) / 60);
         } else if (g_vote.stage == 1) {
-            std::snprintf(question, sizeof question, "Player %d is leaving the floor. Leave too?  Cross yes / Circle no  (%d)", g_vote.asker + 1,
+            std::snprintf(question, sizeof question, "%s is leaving the floor. Leave too?  Cross yes / Circle no  (%d)", NetplayShownName((int) (g_vote.asker + 1)).c_str(),
                           (g_vote.ticks + 59) / 60);
         } else {
-            std::snprintf(question, sizeof question, "Player %d declines. Leave anyway?  Cross yes / Circle no  (%d)", 2 - g_vote.asker,
+            std::snprintf(question, sizeof question, "%s declines. Leave anyway?  Cross yes / Circle no  (%d)", NetplayShownName((int) (2 - g_vote.asker)).c_str(),
                           (g_vote.ticks + 59) / 60);
         }
 
@@ -8687,7 +12277,8 @@ const char *CoopWorldsStatus() {
         return "Toan needs to be here";
     }
 
-    return CoopWorldsApart() ? g_state.status : "";
+    // coop-whereis: where the others are is the where-is-everyone list's (coop::DrawWhereIs) while it is on: not said twice here.
+    return CoopWorldsApart() && !coop::WhereIsSetting() ? g_state.status : "";
 }
 
 namespace {
@@ -8778,6 +12369,128 @@ bool PickupOnly(const void *program, int event_no, int *flag_out) {
 }
 
 bool HoldStory(const void *program, int event_no, bool arrival);
+
+// coop-xiaogap (Jep's rc1 playtest, 11-13: P2 can't use the cat in Toan's house, and gets no "!" there): the cat (i01h01, event 11)
+// reads the pad as it starts: no Cross, its "!" (_DRAW_EXCLAMATION_MARK); Cross, the cat's message; else its item window
+// (_GOTO_USE_ITEM, ext 11): the fish (item 237) sets game flag 18 and plays its scene. Its only story write is behind that window,
+// which a Cross start never opens. Whether every story write (kStoryExts) of an event lies behind its first item window: its
+// function read straight through, a call before the window read too (a story write there is in front of it); false when there
+// is no window. (Read as ScriptExtCalls reads: the ext's id is the first operand it pops.)
+bool StoryBehindItemWindowIn(const char *code, const vmcode_t *pc, int depth, bool *window) {
+    std::vector<int> pushed;
+    auto             pop = [&](int n) { pushed.resize(std::max(0, (int) pushed.size() - n)); };
+
+    for (int n = 0; pc != nullptr && n < 4000; n++, pc++) {
+        switch (pc->op) {
+            case RS_OP_PUSH_CONST:
+                pushed.push_back(pc->arg1 == 1 ? pc->arg2 : -1);
+                break;
+            case RS_OP_LOAD:
+            case RS_OP_LOAD_ADDR:
+                if (pc->arg2 & (RS_ADDR_LOCAL_INDEX | RS_ADDR_POINTER_INDEX | RS_ADDR_LOCAL_INDEX_FLOAT | RS_ADDR_POINTER_INDEX_FLOAT)) {
+                    pop(1);
+                }
+                pushed.push_back(-1);
+                break;
+            case RS_OP_POP:
+            case RS_OP_JMP_FALSE:
+            case RS_OP_JMP_TRUE:
+                pop(1);
+                break;
+            case RS_OP_STORE:
+            case RS_OP_ADD:
+            case RS_OP_SUB:
+            case RS_OP_MUL:
+            case RS_OP_DIV:
+            case RS_OP_MOD:
+            case RS_OP_CMP:
+            case RS_OP_AND:
+            case RS_OP_OR:
+                pop(2);
+                pushed.push_back(-1);
+                break;
+            case RS_OP_PRINT:
+                pop(pc->arg1);
+                break;
+            case RS_OP_EXT: {
+                const int at = (int) pushed.size() - pc->arg1;
+                const int id = at >= 0 && pc->arg1 > 0 ? pushed[at] : -1;
+
+                pop(pc->arg1);
+                pushed.push_back(-1);
+                if (id == 11) { // _GOTO_USE_ITEM
+                    *window = true;
+                    return true;
+                }
+                if (id == 15 || id == 6) {
+                    return false; // (_MAP_JUMP, _GOTO_INTERIOR in front of the window: it takes someone somewhere)
+                }
+                for (int story : kStoryExts) {
+                    if (id == story || id < 0) {
+                        return false; // (a story write in front of the window; an ext not read: not known safe)
+                    }
+                }
+                break;
+            }
+            case RS_OP_CALL: {
+                int addr = 0;
+
+                std::memcpy(&addr, code + pc->arg2, sizeof addr);
+                if (depth >= 4 || !StoryBehindItemWindowIn(code, reinterpret_cast<const vmcode_t *>(code + addr), depth + 1, window)) {
+                    return false;
+                }
+                if (*window) {
+                    return false; // (a window inside a call: not this simple shape)
+                }
+                pushed.clear();
+                pushed.push_back(-1);
+                break;
+            }
+            case RS_OP_RET:
+            case RS_OP_END:
+                if (depth > 0) {
+                    return true; // (a call before the window, read to its end: no story in it)
+                }
+                // (the event's own function: a return in front of the window is a branch's end; read on, the window may follow)
+                break;
+            default:
+                if (pc->op < RS_OP_LOAD || pc->op > RS_OP_COS) {
+                    return false;
+                }
+                break;
+        }
+    }
+    return false;
+}
+
+bool StoryBehindItemWindow(const void *program, int event_no) {
+    const auto *prog = static_cast<const RS_PROG_HEADER *>(program);
+
+    if (prog == nullptr || event_no <= 0 || Mutated("cat_story_whole")) {
+        return false;
+    }
+
+    const char        *base = reinterpret_cast<const char *>(prog);
+    const char        *code = base + prog->code;
+    const RS_PROGDATA *entry = reinterpret_cast<const RS_PROGDATA *>(base + prog->prog);
+    const vmcode_t    *pc = nullptr;
+    int                addr = 0;
+
+    for (int i = 0; i < prog->prog_num && i < 512; i++) {
+        if (entry[i].no == event_no) {
+            std::memcpy(&addr, base + entry[i].func, sizeof addr);
+            pc = reinterpret_cast<const vmcode_t *>(code + addr);
+        }
+    }
+    if (pc != nullptr && pc->op == RS_OP_CALL) { // (a program that is a stub calling its function)
+        std::memcpy(&addr, code + pc->arg2, sizeof addr);
+        pc = reinterpret_cast<const vmcode_t *>(code + addr);
+    }
+
+    bool window = false;
+
+    return pc != nullptr && StoryBehindItemWindowIn(code, pc, 0, &window) && window;
+}
 
 } // namespace
 
@@ -8939,19 +12652,204 @@ bool CoopWorldsPartnerRoomEvent(const void *program, int event_no) {
 
     int flags[4] = {-1, -1, -1, -1};
 
-    if (StoryFlags(program, event_no, flags, 4) != 0) {
+    // coop-xiaogap: an event whose story is only behind its item window (the cat in Toan's house) is anyone's on Cross: the Cross
+    // takes its talk branch. DC_WORLDS_MUTATE=cat_story_whole (twin): any story write anywhere makes it Toan's, as before.
+    const bool story_behind = StoryBehindItemWindow(program, event_no);
+
+    if (StoryFlags(program, event_no, flags, 4) != 0 && !story_behind) {
         return false;
     }
 
     const auto *prog = static_cast<const RS_PROG_HEADER *>(program);
 
     for (int ext : {710, 711, 15, 6}) {
+        if (story_behind) {
+            break; // (its other story writes, a character or an int flag, behind the window too: StoryBehindItemWindow read them)
+        }
         if (ScriptExtCalls(prog, event_no, ext, nullptr, 0) != 0) {
             return false;
         }
     }
 
     return true;
+}
+
+static bool FloorRolesSwap(int partner_member, int member, sceVu0FVECTOR at, float partner_yaw, sceVu0FVECTOR toan, float yaw, bool in_scene, const char *why,
+                           const char *note);
+// swapduel (Jep's rc1 playtest, 11-13: P1 and P2 traded, P1 as Xiao walked onto Divine Beast Cave floor 8, Seda's duel showed Xiao
+// and both copies crashed). Cause: retail's floor-8 program 300 (Seda's scene and duel, an event battle: _EB_INIT) drives the
+// game's player (CharaMain, UserStatus->cur_chara) with Toan's event motions and has no character check, because in retail
+// Toan is the cave's only member. Co-op puts player 2's member in the party early ("Xiao is in the party already"), so a trade
+// leaves the game's player a member who has joined (pt1111c's stand-in guard passes) and the duel plays Toan's motions on
+// Xiao's body: the same MulMatrix access violation as DCO-20. Retail's other Toan scenes say the rule outright: the cave's
+// floor-4 marker (102) and Wise Owl Forest's floor-9 marker (111) start with _GET_NOW_USER_ID and switch themselves off for
+// anyone but Toan.
+// The rule (Jep 11-13: story scenes that need a specific character use the player who IS that character, or switch per the
+// character-limited rule if nobody is): a dungeon story event (StoryFlags) that runs an event battle (_EB_INIT, 950) and does
+// not pick its own player (_SET_MAIN_CHR2, 1067: Wise Owl Forest's switch does) is Toan's. As it starts with another member
+// as the game's player, on every copy alike on the same tick:
+//   - the lowest-numbered other player on the floor who plays Toan takes the game's player for the scene: the roles swap
+//     (FloorRolesSwap: Toan the game's player where Toan stood, player 1's member the partner where player 1 stood) and the
+//     game's pad is that player's (NetplayRoute, CoopWorldsStoryOwner) until the scene is over; then the roles swap back,
+//     each character where the scene left it;
+//   - nobody plays Toan: player 1 is switched to Toan for the scene (the character-limited rule's), and back after.
+// The partner slot (g_partner) is player 2's alone today: a third player who plays Toan is found by the table (ZoneMemberOf),
+// logged, and the switch is used for them until the slot is per player. DC_WORLDS_MUTATE=story_role_off (twin): no role
+// change (held short of the crash, in CoopWorldsHoldStandInStory).
+namespace coop {
+StoryRole g_story_role;
+}
+
+// coop-rc2 (swapcombo (A) x swapduel, b9arrive): non-zero only while the copies swap roles, who is the game's player and who the
+// partner (FloorRolesSwap: her floor merge, her scene's handover, a Toan-only story event and its end; StoryTakeToan's switch of
+// player 1 to Toan), so ChangePlayer does not record it as anyone's own member (MemberRecordSet): a role swap changes no member,
+// and apart, mid-merge, the copies disagree on whose entry the game's player is (x-entrwin-* OUT OF SYNC at the catch-up's end).
+// Always 0 between ticks.
+int g_roles_swapping = 0;
+struct RolesSwapping {
+    RolesSwapping() { g_roles_swapping++; }
+    ~RolesSwapping() { g_roles_swapping--; }
+    RolesSwapping(const RolesSwapping &) = delete;
+    RolesSwapping &operator=(const RolesSwapping &) = delete;
+};
+
+bool CoopWorldsRolesSwapping() {
+    return g_roles_swapping != 0 || coop::g_story_role.due != 0;
+}
+
+int CoopWorldsStoryOwner() {
+    return coop::g_story_role.due != 0 && On() && mode == GAME_MODE_DUNGEON ? coop::g_story_role.owner : 0;
+}
+
+namespace {
+
+bool StoryNeedsToan(int script_no) {
+    if (mode != GAME_MODE_DUNGEON || EdEventScript.prog == nullptr || script_no < 0 || script_no == 100) {
+        return false;
+    }
+
+    const auto *prog = static_cast<const RS_PROG_HEADER *>(EdEventScript.prog);
+    int         flags[4] = {-1, -1, -1, -1};
+    int         pickup = -1;
+
+    return StoryFlags(EdEventScript.prog, script_no, flags, 4) != 0 && !PickupOnly(EdEventScript.prog, script_no, &pickup) &&
+           ScriptExtCalls(prog, script_no, 950, nullptr, 0) != 0 && ScriptExtCalls(prog, script_no, 1067, nullptr, 0) == 0;
+}
+
+// The roles change for story event script_no that needs Toan while the game's player is another member. True: done (the event
+// starts with Toan as the game's player); false: it could not be done (logged).
+bool StoryTakeToan(int script_no) {
+    auto     &role = coop::g_story_role;
+    const int was = UserStatus->cur_chara;
+    int       holder = -1;
+
+    for (int i = 1; i < coop::kMaxPlayers; i++) {
+        if (coop::ZonePlayerOnFloor(i) && coop::ZoneMemberOf(i) == CHARA_TOAN) {
+            holder = i;
+            break;
+        }
+    }
+
+    if (holder == 1 && !g_state.apart && coop::g_partner.chara != nullptr && coop::g_partner.loaded_chara == CHARA_TOAN && CharaFrame != nullptr) {
+        sceVu0FVECTOR rotation;
+        sceVu0FVECTOR partner_rot;
+        sceVu0FVECTOR his = {CharaMain.pos[0], CharaMain.pos[1], CharaMain.pos[2], 1.0f};
+        sceVu0FVECTOR toan = {coop::g_partner.pos[0], coop::g_partner.pos[1], coop::g_partner.pos[2], 1.0f};
+
+        CharaFrame->GetRotation(rotation);
+        coop::g_partner.chara->frame->GetRotation(partner_rot);
+        const bool swapped = FloorRolesSwap(was, CHARA_TOAN, his, rotation[1], toan, partner_rot[1], true, "story role", "");
+        if (!swapped) {
+            std::fprintf(stderr, "worlds: story role: event %d: the roles could not swap\n", script_no);
+            return false;
+        }
+        role = {1, 2, was, script_no};
+    } else {
+        if (holder > 1) {
+            std::fprintf(stderr, "worlds: story role: player %d plays Toan but has no partner slot here: player 1 is switched\n", holder + 1);
+        }
+        const int  task = gameTask;
+        const auto visible = BtActStatus.player_visible;
+
+        bool changed = false;
+        {
+            RolesSwapping swapping; // (player 1 switched for the event: a role, not his member)
+            changed = coop::PromptChangePlayer(CHARA_TOAN);
+        }
+        if (!changed) {
+            std::fprintf(stderr, "worlds: story role: event %d: player 1 could not become Toan\n", script_no);
+            return false;
+        }
+        gameTask = task; // (the event's start goes on: ChangePlayer's GAME_TASK_CHARA_CHANGED would take it)
+        BtActStatus.player_visible = visible;
+        role = {1, 1, was, script_no};
+    }
+
+    std::fprintf(stderr, "worlds: story role: event %d needs Toan; the game's player was %d: player %d plays Toan for it (%s)\n", script_no, was, role.owner,
+                 role.owner == 1 ? "player 1 switched" : "roles swapped, that player's pad drives it");
+    std::fflush(stderr);
+    return true;
+}
+
+// Each tick of play on every copy (CoopWorldsSimTick): the scene over, each player back to their own member.
+void StoryRoleTick() {
+    auto &role = coop::g_story_role;
+
+    if (role.due == 0) {
+        return;
+    }
+    if (!On() || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || CharaFrame == nullptr) {
+        role.due = 0;
+        std::fprintf(stderr, "worlds: story role dropped (%s)\n", mode != GAME_MODE_DUNGEON ? "off the floor" : "unlinked");
+        return;
+    }
+    if (BtEventMode != 0 || !CoopPlainPlay()) {
+        return;
+    }
+
+    const int owner = role.owner;
+    const int was = role.p1_member;
+
+    role.due = 0;
+    if (owner == 2 && !g_state.apart && coop::g_partner.chara != nullptr) {
+        sceVu0FVECTOR rotation;
+        sceVu0FVECTOR partner_rot;
+        sceVu0FVECTOR toan = {CharaMain.pos[0], CharaMain.pos[1], CharaMain.pos[2], 1.0f};
+        sceVu0FVECTOR his = {coop::g_partner.pos[0], coop::g_partner.pos[1], coop::g_partner.pos[2], 1.0f};
+
+        CharaFrame->GetRotation(rotation);
+        coop::g_partner.chara->frame->GetRotation(partner_rot);
+        FloorRolesSwap(CHARA_TOAN, was, toan, rotation[1], his, partner_rot[1], false, "story role's end", "");
+    } else if (was != UserStatus->cur_chara) {
+        coop::PromptChangePlayer(was);
+    }
+    std::fprintf(stderr, "worlds: story role over (event %d): the game's player is %d again, the partner %d\n", role.script, (int) UserStatus->cur_chara,
+                 coop::g_partner.loaded_chara);
+    std::fflush(stderr);
+}
+
+} // namespace
+
+// The other player standing in a walk-in story marker that needs Toan (DunMoveChara's marker check, recipe 0036): retail fires
+// its auto-start markers for the game's player alone, so player 2 could walk past floor 8's duel. Any player on the floor
+// starts it now (Jep 11-13: whoever reaches the duel's trigger first). DC_WORLDS_MUTATE=story_trigger_p1 (twin): the game's
+// player alone, as retail.
+CDungeonEventData *CoopWorldsStoryMarkerByOther() {
+    if (!On() || g_state.apart || mode != GAME_MODE_DUNGEON || NowEventMan == nullptr || coop::g_partner.chara == nullptr || !coop::ZonePlayerOnFloor(1) ||
+        Mutated("story_trigger_p1")) {
+        return nullptr;
+    }
+
+    sceVu0FVECTOR      at = {coop::g_partner.pos[0], coop::g_partner.pos[1], coop::g_partner.pos[2], 1.0f};
+    CDungeonEventData *state = NowEventMan->SearchDataSlotPos2(at);
+
+    if (state == nullptr || state->event == nullptr || state->event->fade == 0 || state->event->script_no < 0 || !StoryNeedsToan(state->event->script_no)) {
+        return nullptr;
+    }
+    std::fprintf(stderr, "worlds: story marker %d (%s) reached by player 2 at (%.0f %.0f %.0f): it starts\n", state->event->script_no, state->event->name, at[0],
+                 at[1], at[2]);
+    std::fflush(stderr);
+    return state;
 }
 
 // pt1111c (Jep's 11-11 playtest, item 19: the tester's copy crashed as Seda's duel began on Divine Beast Cave floor 8). Cause, from
@@ -8984,7 +12882,32 @@ bool CoopWorldsHoldStandInStory(int script_no, bool marker) {
     const bool apart_other = On() && g_state.apart && Player() != 1 && !NetplayCatchUnderWay() && !Mutated("apart_story");
 
     if (!stand_in && !apart_other) {
-        return false; // player 1's copy (or together) with a member who has joined: retail's own case
+        // swapduel: a Toan story event with another member as the game's player: the player who plays Toan takes it (above).
+        if (coop::g_story_role.due == 0 && UserStatus->cur_chara != CHARA_TOAN && StoryNeedsToan(script_no)) {
+            // DC_WORLDS_MUTATE=story_role_off (twin): no role change; the event would start on this member's body (the rc1 crash,
+            // proven by r4-trade-twin: both copies 0xC0000005 within 9 s), so the twin says so and holds it there, short of the crash.
+            if (Mutated("story_role_off")) {
+                static int said = -1;
+
+                if (said == script_no) {
+                    return true; // (said once)
+                }
+                said = script_no;
+                std::fprintf(stderr, "worlds: story role off (twin): event %d would start on member %d with Toan's motions; held short of the crash\n", script_no,
+                             (int) UserStatus->cur_chara);
+                std::fflush(stderr);
+                if (!marker) {
+                    BtEventInfo.script_no = -1;
+                    gameTask = GAME_TASK_PLAY;
+                }
+                return true;
+            }
+            if (StoryTakeToan(script_no)) {
+                return false;
+            }
+        } else {
+            return false; // player 1's copy (or together) with a member who has joined: retail's own case
+        }
     }
 
     int flags[4] = {-1, -1, -1, -1};
@@ -9266,10 +13189,10 @@ bool CoopWorldsHoldArrivalEvent(const void *program, int event_no) {
 
     g_state.arrival_held = 0;
 
-    // coop-doorgate: with the story gathered (game.coop_story_gather) a room's unseen story is gone into by both or by a player
+    // coop-doorgate: with the story gathered (always, coop-gatherpicker) a room's unseen story is gone into by both or by a player
     // whose partner is not linked (its door's gate): either way it plays as it is, its flag and gifts the party's (no "as
     // seen", no hold for player 1). DC_WORLDS_MUTATE=door_hold_kept (twin): held or as seen, as before.
-    if (CoopWorldsStoryGather() && !Mutated("door_hold_kept")) {
+    if (!Mutated("door_hold_kept")) {
         return false;
     }
 
@@ -9465,8 +13388,12 @@ static void HerRoomForTest() {
             }
         }
         EditPartsInfo.SetCompEvent(part, 0);
-        std::fprintf(stderr, "worlds: test: part %d complete, its scene unseen; her door into %s at link tick %lld\n", part, room, (long long) g_state.tick);
-        CoopWorldsTownEventBy(2);
+        // coop-joinwarp: DC_WORLDS_TEST_HER_ROOM_ASKER=1: his door instead (player 1 asks, player 2 is asked: the developer's 11-18 case).
+        static const int asker = TestEnvInt("DC_WORLDS_TEST_HER_ROOM_ASKER", 2) == 1 ? 1 : 2;
+
+        std::fprintf(stderr, "worlds: test: part %d complete, its scene unseen; %s door into %s at link tick %lld\n", part, asker == 1 ? "his" : "her", room,
+                     (long long) g_state.tick);
+        CoopWorldsTownEventBy(asker);
         // coop-pt1109e: DC_WORLDS_TEST_HER_ROOM_ALONE=1: she takes the door ungated (a test's way in, g_mod_door), as her Cross there does with the story gather off or the pair apart first:
         // the split, and the scene on her copy alone.
         if (TestEnvOn("DC_WORLDS_TEST_HER_ROOM_ALONE")) {
@@ -9479,7 +13406,7 @@ static void HerRoomForTest() {
             doorgate::g_mod_door = false;
             return;
         }
-        if (!CoopWorldsDoorRefused(room, 2)) {
+        if (!CoopWorldsDoorRefused(room, asker)) {
             std::fprintf(stderr, "worlds: test: her door into %s opens for her alone\n", room);
         }
         g_town_starter = 1;
@@ -9499,6 +13426,42 @@ int CoopWorldsTestTownEvent(const void *program) {
     static const char *const pick = TestEnv("DC_WORLDS_TEST_GEORAMA_PICK");
     static int               pick_ticks = 0;
     static bool              picked = false;
+
+    // coop-storygaps test hooks, together (every copy alike), K town walk ticks after the row's state has loaded, once:
+    // DC_WORLDS_TEST_PICK_TOGETHER=K:E his Georama menu's Event pick of town event E, as editloop's EDIT_MENU_MODE_EVENT takes it (its
+    // gates, then its fade); DC_WORLDS_TEST_STORY_EVENT=K:E[:F] town event E walked into as an event point's (editloop's RunEvent of
+    // it, the walker's: player_event_no), game flag F cleared first on every copy (its story unseen: Norune's 128 and flag 40).
+    static const char *const pick_together = TestEnv("DC_WORLDS_TEST_PICK_TOGETHER");
+    static const char *const story_event = TestEnv("DC_WORLDS_TEST_STORY_EVENT");
+    static int               together_ticks = 0;
+    static bool              together_done = false;
+
+    if ((pick_together != nullptr || story_event != nullptr) && !together_done && On() && g_state.up && !g_state.apart && program != nullptr &&
+        EdInteriorFlag == 0 && NetplayJobStateFileLoaded() && !NetplayStateLoadPending()) {
+        const char *spec = pick_together != nullptr ? pick_together : story_event;
+        const char *colon = std::strchr(spec, ':');
+        const int   event_no = colon != nullptr ? std::atoi(colon + 1) : 0;
+
+        if (++together_ticks >= std::atoi(spec)) {
+            together_done = true;
+            std::fprintf(stderr, "worlds: test: together, player 1 %s town event %d (link tick %lld)\n", pick_together != nullptr ? "picks Georama event" : "walks into",
+                         event_no, (long long) g_state.tick);
+            std::fflush(stderr);
+            if (pick_together == nullptr) {
+                const char *flag = std::strchr(colon != nullptr ? colon + 1 : spec, ':');
+
+                if (flag != nullptr && SaveData != nullptr) {
+                    SaveData->SetGameFlag(std::atoi(flag + 1), 0);
+                    std::fprintf(stderr, "worlds: test: game flag %d cleared on this copy (its story unseen)\n", std::atoi(flag + 1));
+                }
+                return event_no;
+            }
+            if (event_no > 0 && !CoopWorldsGeoramaEventRefused(event_no) && !CoopWorldsStoryFadeHeld(event_no, 0, 1, "Georama's Event pick")) {
+                FadeOutToEvent(event_no, 0);
+            }
+            return 0;
+        }
+    }
 
     // (counted only while the other copy is heard from: just after the split it is not yet, and the pick would not be gated)
     if (pick != nullptr && !picked && On() && g_state.apart && program != nullptr && EdInteriorFlag == 0 && doorgate::OtherLinked() &&
@@ -9563,7 +13526,20 @@ bool CoopWorldsMutated(const char *feature) {
     return Mutated(feature);
 }
 
+static bool CoopWorldsTakeScriptExitDecide(int next_map);
+
+// coop-daycrash: this copy leaves the town (a building, a map or a script's way out): the time of day's event in its world slot ends
+// here first (CoopDayTransTownLeft), as a zone load ends it.
 bool CoopWorldsTakeScriptExit(int next_map) {
+    const bool goes = CoopWorldsTakeScriptExitDecide(next_map);
+
+    if (goes) {
+        CoopDayTransTownLeft("CoopWorldsTakeScriptExit");
+    }
+    return goes;
+}
+
+static bool CoopWorldsTakeScriptExitDecide(int next_map) {
     // Only a jump into a dungeon splits (another town's map jump keeps the pair together, as the map menu's does not
     // yet either). DC_WORLDS_MUTATE=no_script_exit lets it through on both copies, as before (twin).
     if (On() && g_state.up && NetplayLocalPlayer() != 0 && !g_state.apart) {
@@ -9604,14 +13580,21 @@ bool CoopWorldsTestHoldExit() {
 // The gate test's facing for Toan (NAN: none given).
 float g_gate_yaw = NAN;
 
-// With a test's warp to a town exit: DC_WORLDS_TEST_GAME_FLAG=F sets game flag F too (Norune's cave door, event 130,
-// lets the player in once flag 1 is set, as in Jep's save; unset, it only says its message).
+// With a test's warp to a town exit: DC_WORLDS_TEST_GAME_FLAG=F[,F...] sets those game flags too (Norune's cave door, event
+// 130, lets the player in once flag 1 is set, as in Jep's save; unset, it only says its message; flag 0 is the mayor's
+// first-visit story, seen: since coop-gatherpicker his door is otherwise gone into together).
 static void TestGameFlag() {
-    static const int flag = TestEnvInt("DC_WORLDS_TEST_GAME_FLAG", -1);
+    static const char *const flags = TestEnv("DC_WORLDS_TEST_GAME_FLAG");
 
-    if (flag >= 0 && SaveData != nullptr && SaveData->GetGameFlag(flag) == 0) {
-        SaveData->SetGameFlag(flag, 1);
-        std::fprintf(stderr, "worlds: test: game flag %d set\n", flag);
+    for (const char *at = flags; at != nullptr && *at != '\0';) {
+        const int flag = std::atoi(at);
+
+        if (flag >= 0 && SaveData != nullptr && SaveData->GetGameFlag(flag) == 0) {
+            SaveData->SetGameFlag(flag, 1);
+            std::fprintf(stderr, "worlds: test: game flag %d set\n", flag);
+        }
+        at = std::strchr(at, ',');
+        at = at != nullptr ? at + 1 : nullptr;
     }
 }
 
@@ -9808,6 +13791,7 @@ bool CoopWorldsTestGateWarp(float *pos) {
         // Linked and together: on link tick N, both copies (the same tick in each).
         fired = now = true;
         std::fprintf(stderr, "worlds: test: Toan to (%.0f %.0f) at link tick %lld\n", x, z, (long long) g_state.tick);
+        g_test_warped[0] = true; // coop-warplight
         NetplayTestInputMark("warp"); // coop-p2toan: a held --input script goes on (DC_TEST_INPUT_HOLD; l-local-play -HisBusy talk)
 
         // coop-flagsync: DC_WORLDS_TEST_FLOOR_REACHED=D:N (both copies, this same linked tick): dungeon D's deepest floor
@@ -9924,6 +13908,7 @@ bool CoopWorldsTestPartnerWarp(float *pos) {
     pos[2] = z;
     pos[3] = yaw;
     std::fprintf(stderr, "worlds: test: player 2's partner to (%.0f %.0f) at link tick %lld\n", x, z, (long long) g_state.tick);
+    g_test_warped[1] = true; // coop-warplight
     std::fflush(stderr);
     return true;
 }
@@ -9949,6 +13934,28 @@ int CoopWorldsReenterBuilding() {
 
             std::snprintf(name, sizeof name, "%s", room);
             std::fprintf(stderr, "worlds: test: he goes in by her door into %s at his apart tick %d\n", room, ticks);
+            std::fflush(stderr);
+            doorgate::g_mod_door = true;
+            GotoInterior(name, row >= 0 && doorgate::g_rooms[row].part_count > 0 ? doorgate::g_rooms[row].parts[0] : 0, 0, nullptr, -1);
+            doorgate::g_mod_door = false;
+            return 0;
+        }
+    }
+    // coop-latejoinscene: DC_WORLDS_TEST_HER_ROOM_LATE=K (with DC_WORLDS_TEST_HER_ROOM): player 2's copy, apart and walking in town, K ticks after it hears
+    // player 1 in the room, in by that room's door: she walks in late on his scene. A test's way in: never gated.
+    if (static const int late = TestEnvInt("DC_WORLDS_TEST_HER_ROOM_LATE", 0); late > 0 && Player() == 2 && g_state.apart && mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK &&
+                                                                               EdInteriorFlag == 0 && g_state.peer.floor > 0 && g_state.peer_heard) {
+        static int  ticks = 0;
+        static bool done = false;
+
+        if (const char *const room = TestEnv("DC_WORLDS_TEST_HER_ROOM"); !done && room != nullptr && ++ticks >= late) {
+            done = true;
+            doorgate::Scan();
+            const int row = doorgate::Find(room);
+            char      name[32];
+
+            std::snprintf(name, sizeof name, "%s", room);
+            std::fprintf(stderr, "worlds: test: she goes in late by his door into %s at her apart tick %d\n", room, ticks);
             std::fflush(stderr);
             doorgate::g_mod_door = true;
             GotoInterior(name, row >= 0 && doorgate::g_rooms[row].part_count > 0 ? doorgate::g_rooms[row].parts[0] : 0, 0, nullptr, -1);
@@ -9985,7 +13992,11 @@ int CoopWorldsReenterBuilding() {
         if (at < 0 && std::sscanf(enter, "%lld:%31[^:]:%d:%d", &at, name, &entrance, &event) != 4) {
             at = 0x7fffffffffffffffLL;
         }
-        if (!done && NetplayLinkUp() && NetplayLinkTick() >= at && mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK && EdInteriorFlag == 0) {
+        // (coop-joinload: DC_COOP_TEST_ENTER_ALONE=1, a host playing alone before any join (j-joinload house): its first walking frame;
+        // alone there is no link tick to wait for, it stays 0 until a join)
+        static const bool alone = TestEnvIs("DC_COOP_TEST_ENTER_ALONE", "1");
+
+        if (!done && ((NetplayLinkUp() && NetplayLinkTick() >= at) || alone) && mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK && EdInteriorFlag == 0) {
             done = true;
             char said[96];
             std::snprintf(said, sizeof said, "test: in by the door of %s at link tick %lld (DC_COOP_TEST_ENTER)", name, (long long) NetplayLinkTick());
@@ -9999,6 +14010,27 @@ int CoopWorldsReenterBuilding() {
                 doorgate::g_mod_door = false;
                 return 0;
             }
+        }
+    }
+    // coop-wave1a test hook (DC_COOP_TEST_ENTER_AGAIN=N, with DC_COOP_TEST_ENTER's building): apart and walking outdoors, after N
+    // frames there this copy goes back into that building alone by its door, as its player walking back in would (the merge follows).
+    if (static const int again = TestEnvInt("DC_COOP_TEST_ENTER_AGAIN", -1); again >= 0 && g_state.apart) {
+        static int  frames = 0;
+        static bool gone = false;
+        char        building[32] = {};
+        long long   unused = 0;
+        int         door = -1, door_event = -1;
+
+        if (!gone && mode == GAME_MODE_EDIT && GameMode == ED_MODE_WALK && EdInteriorFlag == 0 && ++frames >= again &&
+            std::sscanf(TestEnvOr("DC_COOP_TEST_ENTER", ""), "%lld:%31[^:]:%d:%d", &unused, building, &door, &door_event) == 4) {
+            gone = true;
+            char said[96];
+            std::snprintf(said, sizeof said, "test: back in by the door of %s after %d frames apart (DC_COOP_TEST_ENTER_AGAIN)", building, frames);
+            Log(said);
+            doorgate::g_mod_door = true;
+            GotoInterior(building, door, 0, nullptr, door_event);
+            doorgate::g_mod_door = false;
+            return 0;
         }
     }
     // coop-housemerge: a joiner catching up to the host's building-start checkpoint goes in by the host's door, apart.
@@ -10020,6 +14052,29 @@ int CoopWorldsReenterBuilding() {
     if (g_door_yes_building != 0 && (!On() || !g_state.up || g_state.apart || mode != GAME_MODE_EDIT)) {
         g_door_yes_building = 0;
         Log("doorgate: the yes's way in is dropped (the pair split or left the town)");
+    }
+
+    // coop-readyscreen: a story door's START NOW with nobody along, both copies on the same tick: the opener goes in by the door
+    // (the story gate passed once), whose own split takes the opener in alone; the others stay outside and play on, apart.
+    if (g_door_alone_building != 0) {
+        if (!On() || !g_state.up || g_state.apart || mode != GAME_MODE_EDIT) {
+            g_door_alone_building = 0;
+            Log("doorgate: START NOW's way in is dropped (the pair split or left the town)");
+            return 0;
+        }
+        if (GameMode != ED_MODE_WALK || EdInteriorFlag != 0) {
+            return 0;
+        }
+
+        const int building = g_door_alone_building;
+        char      line[120];
+
+        g_door_alone_building = 0;
+        CoopWorldsTownEventBy(g_door_alone_by);
+        doorgate::g_ready_alone = true;
+        std::snprintf(line, sizeof line, "doorgate: START NOW: player %d goes in by the door alone", g_door_alone_by);
+        Log(line);
+        return building;
     }
 
     // The first walk after a merge inside a building (both copies, the same tick: the merge's load made them alike).
@@ -10189,6 +14244,10 @@ int CoopWorldsPeerFloorIn(int map) {
     return g_state.peer.floor;
 }
 
+void CoopWorldsUraOpened(int dungeon, int floor, int script, int item) {
+    QueueProgress(kWhatUra, floor, script, dungeon, item);
+}
+
 void CoopWorldsGateOpened(int dungeon, int floor) {
     QueueProgress(kWhatGate, floor, 0, dungeon, 0);
 }
@@ -10221,6 +14280,7 @@ struct FloorArrival {
     bool                                  setting_out = false; // on the way (-2): decided as it lands
     std::chrono::steady_clock::time_point at{};
     int                                   builds = 0; // coop-cutscenejoin: NetplayFloorBuilds() as it set out
+    int                                   half = -1; // coop-tram: Here().half last asked on that floor (-1 off a floor)
 };
 FloorArrival g_floor_arrival;
 
@@ -10314,6 +14374,27 @@ void FloorArrivalUpdate() {
         a.was = here;
     }
 
+    // coop-tram (Jep's 0.1.6 playtest: P1 rode the tram back to the front, where P2 had played for minutes, and the merge went by
+    // his state, mid-ride: "P2 watches P1's animation finish"): a floor's back half is a place of its own (Zone::half), and a copy
+    // swapping halves arrives in the half it swaps into, like a floor's arrival: where the other already plays it arrives, else
+    // it is there first. The record knew the floor alone: his copy came onto floor 9 first, long before, and kept saying so
+    // through both his rides, so CoopWorldsFloorFirst said his copy stayed and its Hello said stayer 1 (his log: "player 1 stayed
+    // in the floor (it was there first)" right after "there first: no longer (this copy changed zone)"). DC_WORLDS_MUTATE=
+    // half_arrive_floor (twin): the floor alone, as before.
+    {
+        const int half = here >= 0 ? Here().half : -1;
+
+        if (On() && g_state.apart && here >= 0 && here == a.was && a.half >= 0 && half != a.half && !a.setting_out && Mutated("half_arrive_floor")) {
+            std::fprintf(stderr, "worlds: floor arrival: this copy swaps halves of floor %d, its arrival kept (half_arrive_floor)\n", here);
+        } else if (On() && g_state.apart && here >= 0 && here == a.was && a.half >= 0 && half != a.half && !a.setting_out) {
+            a.arriving = g_state.peer_heard && Here() == g_state.peer;
+            a.at = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "worlds: floor arrival: this copy swaps into floor %d's %s half, the other %s\n", here, half != 0 ? "back" : "front",
+                         a.arriving ? "already in it: it arrives where the other plays" : "not in it: this copy is here first");
+        }
+        a.half = half;
+    }
+
     // coop-floorstay (Jep's 2026-11-04 pack 8 playtest: "P1 joined P2 in the dungeon and the dungeon desynced"): she arrived on
     // his floor 5, he left it for the town, she played it on alone for minutes, he came back by the floor menu, and the merge
     // went by his fresh build of the floor: her kills and chests undone, her copy put back at the stairs. Her record still said
@@ -10327,6 +14408,10 @@ void FloorArrivalUpdate() {
         if (peer_floor != here && peer_floor != -2 && !Mutated("arrive_kept")) {
             a.arriving = false;
             std::fprintf(stderr, "worlds: floor arrival: the other copy left floor %d (now %d): this copy is the one here\n", here, peer_floor);
+        } else if (peer_floor == here && g_state.peer.floor == here && g_state.peer.half != Here().half && !Mutated("half_arrive_floor")) {
+            // coop-tram: or heard in the floor's other half (it rode the tram away): this half is this copy's, as another floor's would be
+            a.arriving = false;
+            std::fprintf(stderr, "worlds: floor arrival: the other copy went into floor %d's other half: this copy is the one here\n", here);
         }
     }
 }
@@ -10425,6 +14510,13 @@ bool CoopWorldsHoldFloorStart() {
                        g_state.peer.floor == UserStatus->cur_floor;
 
     w.on = false;
+    // coop-floorrand (the floorcam row's 4.84 on her copy): her player stood in for his in his scene's view, and the view's
+    // end put it back only at the next worlds tick, after this "go dungeon" had set her camera behind the stand-in's place:
+    // her first frames of play then followed her player back from his place to hers (4.84 two frames in, no cut). Put back
+    // here, with the hold (w.on off ends the view), before the floor starts. DC_WORLDS_MUTATE=standin_late (twin): as before.
+    if (!Mutated("standin_late")) {
+        ScenePoseTick();
+    }
     g_floor_arrival.at = now;
     std::snprintf(line, sizeof line, "floor start: %s after %lld ms",
                   there   ? "the other's opening scene is over; this copy starts the floor and joins it"
@@ -10479,20 +14571,229 @@ bool CoopWorldsArrivalPlaysScene() {
     return false;
 }
 
+// coop-entrwin (Jep 11-11, playtest item 23, option A: "players arriving on a floor within the entrance animation's length each
+// play their own entrance and everyone sees everyone; later arrivals stay scene-arrivers"). Probed on coop-entrance (window.ps1,
+// dun1-f1, 6 ticks apart): the copies stayed apart through both walk-ins and merged only after them, each one's partner hidden all
+// through, so nobody saw anybody's entrance. Cause: a join during a floor's walk-in had no path. The arriver's own arrival on the
+// floor (CoopWorldsPickJoining) needs the other ON the floor (its walk-in over: its Here says the way, -2, until its floor starts),
+// and the opening-scene join (CoopWorldsSceneJoining) leaves the walk-in out (script 100 is "not a scene": a join during it went
+// after it). Now each copy's own walk-in apart has a place in the floor's entrance window, said in its presence: a copy whose
+// walk-in begins while the other's walk-in of that same floor runs (heard) is a walker (2); the other, hearing a walker, is the
+// lead (1) while its own walk-in still runs; two who began within a presence of each other (neither heard the other first): the
+// higher player number walks, the lower leads (both decide alike: a 2 is said before a 1 is taken, and a copy that said 2 never
+// leads). Lead and walker then join as the opening scene's join does (CoopWorldsSceneJoining 1 and 2): the lead's state goes
+// mid-walk-in, the walker's copy takes it behind its arrival's black, and at the lockstep the walker plays its own entrance from
+// its start at its entrance spot beside the lead (netplay's entrance word, coop::EntranceWalkStart), seen on every screen; nobody
+// waits (the lead plays on). A walk-in that begins after the lead's has ended finds no lead: a scene-arriver, as before.
+// DC_WORLDS_MUTATE=entrance_window_off (twin): no window, as before (apart through both walk-ins, merged after).
+namespace {
+struct WalkIn {
+    int key = -1000; // the floor of this copy's own walk-in apart, -1000 none
+    int  role = 0;    // 0 not decided, 1 the lead, 2 a walker
+    bool closed = false; // its window closed before the link (a walk-in over): no role on this floor any more
+    long long begun_ms = 0; // coop-entrance2 rule 3: when its walk-in began (ClockMs)
+    int       gap = -1;     // a walker's: the ticks its walk-in began after the lead's (CoopWorldsWalkInGap), -1 none
+};
+WalkIn g_walk_in;
+
+// coop-entrance2 rule 3 (Jep 11-12): how long ago the other copy's walk-in began, in ms, on this copy's clock (its start on its clock
+// moved by the least delta: the quickest trip not counted), -1 not heard.
+long long PeerWalkMs() {
+    return g_state.peer_walk_begun_ms >= 0 && g_state.peer_clock_delta != LLONG_MAX ? ClockMs() - (g_state.peer_walk_begun_ms + g_state.peer_clock_delta) : -1;
+}
+
+// A walker's gap: the lead's walk-in began PeerWalkMs ago, its own (now - begun_ms) ago; in ticks (60 a second), 0 at least (a tie
+// within the trip's time: the order by player number, CoopWorldsWalkInRole).
+int WalkInGapNow(const WalkIn &w) {
+    const long long peer = PeerWalkMs();
+
+    return peer < 0 ? -1 : (int) std::max(0LL, ((peer - (ClockMs() - w.begun_ms)) * 60 + 500) / 1000);
+}
+
+// This copy's own floor walk-in, apart: the floor's entrance (script 100), not a scene of its own (B2's cat: the scene join).
+bool OwnWalkInRuns() {
+    return On() && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && BtEventMode != 0 && BtEventInfo.running_script_no == 100 &&
+           BtGameModeFlag != BT_GAME_MODE_ENTRANCE_MENU && !g_state.floor_hold && g_floor_started_key != selectMapNo * 256 + UserStatus->cur_floor &&
+           !CoopWorldsArrivalPlaysScene();
+}
+
+// Said in its presence while its own walk-in runs (a role lapses with it: WalkInTick).
+int WalkInKey() {
+    return g_state.apart && !g_walk_in.closed && OwnWalkInRuns() && UserStatus != nullptr && g_walk_in.key == selectMapNo * 256 + UserStatus->cur_floor
+               ? g_walk_in.key
+               : -1000;
+}
+
+// The other copy walks into this very floor now (its own walk-in, or its join of it as the lead or a walker).
+bool PeerWalksIn(int key) {
+    return g_state.apart && g_state.peer_heard && g_state.peer.mode == GAME_MODE_DUNGEON && g_state.peer.map == selectMapNo &&
+           g_state.peer_walk_key == key && (g_state.peer.floor == -2 || g_state.peer.floor == (key & 255));
+}
+
+void WalkInTick() {
+    WalkIn &w = g_walk_in;
+
+    if (!On() || !g_state.apart || mode != GAME_MODE_DUNGEON || UserStatus == nullptr) {
+        w = WalkIn{};
+        return;
+    }
+    // (the twin entrance_window_off: its walk-in noted and said, its window never decided: no role, as before)
+    const bool window_off = Mutated("entrance_window_off");
+    const int  key = selectMapNo * 256 + UserStatus->cur_floor;
+    const bool runs = OwnWalkInRuns();
+
+    if (w.key != key) {
+        w = WalkIn{};
+        if (!runs) {
+            return;
+        }
+        w.key = key;
+        w.closed = window_off;
+        // Test hook (DC_WORLDS_TEST_WALKIN_LATE=P:G, test_follower_seen_all_the_way_down_the_cave_stairs): player P's copy arrives G
+        // ticks after the other, as a slower floor load would (the vote's flow puts both walk-ins within a millisecond). Its walk-in
+        // begins only once it hears the other's under way (tried each tick: the order is certain), and its gap is G ticks, not the
+        // milliseconds measured. (coop-followtick: it slept G ms before, which only set the order when the other copy's word came
+        // within them: on a loaded PC the order and gap were the scheduler's, and the test's "24 ticks after the lead" went red.)
+        static const char *const late = TestEnv("DC_WORLDS_TEST_WALKIN_LATE");
+        const bool               late_here = late != nullptr && std::atoi(late) == Player() && std::strchr(late, ':') != nullptr;
+
+        static int               late_waited = 0; // (the ticks it waited for that word)
+
+        if (late_here && !PeerWalksIn(key)) {
+            if (late_waited++ == 0) {
+                std::fprintf(stderr, "worlds: test: this copy (player %d) begins its walk-in once the other's is heard\n", Player());
+            }
+            w = WalkIn{}; // (tried again next tick)
+            return;
+        }
+        w.begun_ms = ClockMs();
+        // (heard walking in already: this copy arrives within its walk-in)
+        w.role = PeerWalksIn(key) && !window_off ? 2 : 0;
+        w.gap = w.role == 2 ? WalkInGapNow(w) : -1;
+        if (late_here && w.role == 2) {
+            w.gap = std::atoi(std::strchr(late, ':') + 1);
+            std::fprintf(stderr, "worlds: test: this copy (player %d) heard the other's walk-in after %d ticks: it arrives %d ticks after it\n", Player(),
+                         late_waited, w.gap);
+        }
+        late_waited = 0;
+        g_state.presence_due = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "worlds: entrance window: this copy (player %d) walks into floor %d of dungeon %d (clock %lld ms), %s (%d ticks after it)\n",
+                     Player(), (int) UserStatus->cur_floor + 1, selectMapNo, ClockMs(),
+                     w.role == 2 ? "the other's walk-in of it under way: a walker in its window (2)" : "no other walk-in of it heard", w.gap);
+        std::fflush(stderr);
+        return;
+    }
+    // The window closes for this floor when its own walk-in ends, or the other's is no longer heard (its walk-in over), before the
+    // merge's link starts: the lead's state would come after its walk-in, its floor started apart (the floor start then ran on one
+    // copy only: OUT OF SYNC at the first checksum, the probe with the walker some 6 s late), so the walker arrives as a
+    // scene-arriver (CoopWorldsPickJoining), as before. Once either copy links, the roles stay as the Hellos said them.
+    const bool linking = NetplayLinkUp() || NetplayPeerLinking();
+
+    // DC_WORLDS_MUTATE=window_kept (twin): the roles kept after a walk-in ends, as the first build had them.
+    if (!linking && !w.closed && (!runs || (w.role != 0 && !PeerWalksIn(key))) && !(w.role != 0 && Mutated("window_kept"))) {
+        if (w.role != 0) {
+            std::fprintf(stderr, "worlds: entrance window: closed on floor %d before the merge (this copy's walk-in %s, the other's %s): no %s\n",
+                         (int) UserStatus->cur_floor + 1, runs ? "under way" : "over", PeerWalksIn(key) ? "under way" : "not heard",
+                         w.role == 1 ? "lead" : "walker");
+            std::fflush(stderr);
+            g_state.presence_due = std::chrono::steady_clock::now();
+        }
+        w.role = 0;
+        w.closed = true;
+        return;
+    }
+    if (w.closed || linking || w.role != 0 || !PeerWalksIn(key)) {
+        return;
+    }
+    // Its own walk-in under way, the other's heard now: a walker heard (2) makes this the lead (1) while its walk-in runs; a lead
+    // heard (1) makes this a walker (2). Two undecided (each began before hearing the other): coop-entrance2 rule 3 (Jep 11-12, by
+    // ARRIVAL order): the host alone decides, by which walk-in began first on its estimate (PeerWalkMs: the other's start on its
+    // clock moved by the least delta, against its own; the quickest trip not counted, so a tie within it goes to the other),
+    // and says its role; the other takes the other role. DC_WORLDS_MUTATE=entrance_tie_by_player (twin): the higher player number
+    // walks, as before (x-entrwin-p2near: P2 began 80 ms first and still walked).
+    int role = 0;
+
+    if (runs && g_state.peer_walk_role == 2) {
+        role = 1;
+    } else if (runs && g_state.peer_walk_role == 1 && !Mutated("entrance_tie_by_player")) {
+        role = 2;
+    } else if (runs && g_state.peer_walk_role == 0) {
+        if (Mutated("entrance_tie_by_player")) {
+            role = Player() > g_state.peer_player ? 2 : 0;
+        } else if (Player() == 1) {
+            const long long peer = PeerWalkMs();
+
+            role = peer >= 0 && peer > ClockMs() - w.begun_ms ? 2 : 1;
+            std::fprintf(stderr, "worlds: entrance window: both began unheard: the other's walk-in %lld ms in, this copy's %lld: %s first\n", peer,
+                         ClockMs() - w.begun_ms, role == 2 ? "the other" : "this copy");
+        }
+    }
+
+    if (role != 0) {
+        w.role = role;
+        w.gap = role == 2 ? WalkInGapNow(w) : -1;
+        g_state.presence_due = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "worlds: entrance window: this copy (player %d) %s on floor %d (gap %d ticks)\n", Player(),
+                     role == 1 ? "leads: the other walks in within its walk-in (1)" : "walks in beside the other's walk-in, begun with its own (2)",
+                     (int) UserStatus->cur_floor + 1, w.gap);
+        std::fflush(stderr);
+    }
+}
+
+// When this copy's own walk-in apart began (ClockMs, said in its presence: Message::walk_begun_ms), -1 none.
+long long WalkInBegunMs() {
+    return WalkInKey() != -1000 ? g_walk_in.begun_ms : -1;
+}
+
+} // namespace
+
+int CoopWorldsWalkInRole() {
+    return On() && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && g_walk_in.key == selectMapNo * 256 + UserStatus->cur_floor
+               ? g_walk_in.role
+               : 0;
+}
+
+// coop-entrance2 rule 3: a walker's arrival after the lead (ticks, said in its Hello: NetplayHello::walk_gap), -1 none.
+int CoopWorldsWalkInGap() {
+    return CoopWorldsWalkInRole() == 2 ? g_walk_in.gap : -1;
+}
+
+bool g_scene_join_walk = false; // coop-entrwin: the scene join latched is the entrance window's (CoopWorldsSceneJoinIsWalkIn)
+
+bool CoopWorldsSceneJoinIsWalkIn() {
+    return CoopWorldsSceneJoining() != 0 && g_scene_join_walk;
+}
+
+// coop-entrance2: the entrance window's join latched, read without CoopWorldsSceneJoining's latching (no side effect: a reader
+// every tick there changed when joins latched and lapsed on each copy, and the merge rows went OUT OF SYNC).
+bool CoopWorldsWalkJoinLatched() {
+    return g_scene_join_walk && g_scene_join_key != -1000;
+}
+
 int CoopWorldsSceneJoining() {
     if (!On() || !g_state.apart || mode != GAME_MODE_DUNGEON || UserStatus == nullptr) {
         g_scene_join_key = -1000;
         g_scene_join_role = 0;
+        g_scene_join_walk = false;
         return 0;
     }
 
     const int key = selectMapNo * 256 + UserStatus->cur_floor;
 
-    if (g_scene_join_key == key) {
+    // (coop-entrwin: an entrance join lapses with its window, before the link: WalkInTick)
+    const bool walk_holds = !g_scene_join_walk || NetplayLinkUp() || NetplayPeerLinking() || Mutated("window_kept") ||
+                            (CoopWorldsWalkInRole() == g_scene_join_role && g_state.peer_walk_role == 3 - g_scene_join_role);
+
+    if (g_scene_join_key == key && walk_holds) {
         return g_scene_join_role;
+    }
+    if (g_scene_join_key == key) {
+        std::fprintf(stderr, "worlds: entrance join: off on floor %d (the window closed before the merge)\n", (int) UserStatus->cur_floor + 1);
+        std::fflush(stderr);
     }
     g_scene_join_key = -1000;
     g_scene_join_role = 0;
+    g_scene_join_walk = false;
 
     int built_map = -1, built_floor = -1;
 
@@ -10510,17 +14811,26 @@ int CoopWorldsSceneJoining() {
     const bool plays = !g_floor_arrival.arriving && BtEventMode != 0 && (BtEventInfo.running_script_no != 100 || CoopWorldsArrivalPlaysScene()) &&
                        g_state.peer.floor == UserStatus->cur_floor;
 
-    if (!held && !plays) {
+    // coop-entrwin: the floor's entrance window, lead (1) or walker (2): the lead once the walker is heard as one, the walker once
+    // the lead is heard as one (each joins the other's join, as the scene's held one and its player do).
+    const int  walk = CoopWorldsWalkInRole();
+    const bool walk_join = (walk == 1 && g_state.peer_walk_role == 2) || (walk == 2 && g_state.peer_walk_role == 1);
+
+    if (!held && !plays && !walk_join) {
         return 0;
     }
     g_scene_join_key = key;
-    g_scene_join_role = held ? 2 : 1;
+    g_scene_join_role = walk_join ? walk : held ? 2 : 1;
+    g_scene_join_walk = walk_join;
     g_state.presence_due = std::chrono::steady_clock::now(); // tell the other copy at once
     char line[200];
 
-    std::snprintf(line, sizeof line, held ? "scene join: this copy joins player %d's opening scene of floor %d: his state comes mid-scene"
-                                          : "scene join: player %d joins this copy's opening scene of floor %d: its state goes mid-scene",
-                  3 - Player(), (int) UserStatus->cur_floor + 1);
+    std::snprintf(line, sizeof line,
+                  walk_join && walk == 2 ? "entrance join: this copy walks in within player %d's walk-in of floor %d: its state comes mid-walk-in"
+                  : walk_join            ? "entrance join: player %d walks in within this copy's walk-in of floor %d: its state goes mid-walk-in"
+                  : held                 ? "scene join: this copy joins player %d's opening scene of floor %d: his state comes mid-scene"
+                                         : "scene join: player %d joins this copy's opening scene of floor %d: its state goes mid-scene",
+                  g_state.peer_player != 0 ? g_state.peer_player : 3 - Player(), (int) UserStatus->cur_floor + 1);
     Log(line);
     return g_scene_join_role;
 }
@@ -10579,6 +14889,16 @@ bool CoopWorldsPickJoining() {
                   (int) UserStatus->cur_floor + 1, 3 - Player());
     Log(line);
     return true;
+}
+
+// coop-b4arrive (Jep's rc3 playtest, B4: "the floor entrance animation didn't play"): a pick join's state lands over this copy's
+// own arrival a moment after it began (its screen black from the floor's first frame, NetplayArrivalHold), and the arrival walk
+// after the merge stood the arriver at its end, as for one that had played its arrival (coop-joinlate): it never saw it. The
+// Hello says it, so both copies play it for the arriver at the lockstep (coop::ArrivalWalkStart). DC_NETPLAY_MUTATE=cut_arrival_stands
+// (twin): never said, as before.
+bool CoopWorldsArrivalCut() {
+    return On() && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && g_pick_join_key == selectMapNo * 256 + UserStatus->cur_floor &&
+           g_floor_started_key != g_pick_join_key && !NetplayMutated("cut_arrival_stands");
 }
 
 bool CoopWorldsArrivingApart() {
@@ -10674,9 +14994,10 @@ SceneHandover g_scene_handover = {};
 // scene's task and the player's showing are kept.
 static bool FloorRolesSwap(int her, int member, sceVu0FVECTOR at, float her_yaw, sceVu0FVECTOR toan, float yaw, bool in_scene, const char *why,
                            const char *note) {
+    RolesSwapping swapping; // coop-rc2: the role swap's ChangePlayer records no member
     // Her member, the game's player until now, becomes the partner where she stands, facing as she faced; her camera goes
     // on from the player's as it is (no cut on her screen).
-    coop::g_partner.choice = her;
+    coop::SetPartnerBody(her); // coop-memberowner: the partner body's member for the roles (no player's member changes)
     if (!coop::Load(her)) {
         std::fprintf(stderr, "worlds: %s: her member %d could not load as the partner\n", why, her);
         return false;
@@ -10742,12 +15063,19 @@ static void SceneHandoverTick() {
     if (h.due == 0) {
         return;
     }
-    if (!On() || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || CharaFrame == nullptr || (g_state.apart && Player() == 2)) {
+    // coop-b9arrive (Jep's rc1 B9: she walked into the cave's B9 first, he within her walk-in; her walk-in ended while the merge's
+    // catch-up still ran, and she became Toan): a copy is "apart" from the merge's start to its lockstep, so her copy, the one
+    // sending, dropped the handover as a split on her first tick of play while his copy, replaying her state set, made it; the
+    // copies then played the two players' members the other way round (OUT OF SYNC). Under way, the merge is not a split: her
+    // merge state is in (g_merge_state_in, cleared at the lockstep). DC_WORLDS_MUTATE=handover_dropped_merging (twin): as before.
+    const bool split = g_state.apart && Player() == 2 && (!g_merge_state_in || Mutated("handover_dropped_merging"));
+
+    if (!On() || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || CharaFrame == nullptr || split) {
         h.due = 0;
         std::fprintf(stderr, "worlds: her scene's handover dropped (%s)\n", mode != GAME_MODE_DUNGEON ? "off the floor" : "apart: her floor alone");
         return;
     }
-    if (BtEventMode != 0 || gameTask != GAME_TASK_PLAY) {
+    if (BtEventMode != 0 || !CoopPlainPlay()) {
         return;
     }
 
@@ -10836,6 +15164,7 @@ bool CoopWorldsFloorBecomePartner() {
     if (!FloorRolesSwap(her, member, at, rotation[1], toan, yaw, in_scene, "her floor merge", known ? "" : " (his place not heard: beside her)")) {
         return false;
     }
+    coop::UsePromptToPartner(); // coop-clownchest: a prompt she opened apart goes on as hers (player 2's)
     g_merge_state_in = true; // her copy's player is player 1's from here (and hers the partner)
     return true;
 }
@@ -10874,6 +15203,38 @@ bool CoopWorldsPeerFloorRand(int floor, std::uint32_t *rand) {
     }
 
     *rand = g_state.peer_floor_rand;
+    // coop-floorrand: this build is the other's own, so it takes its count too.
+    FloorCounts &c = FloorCountsNow()[selectMapNo * 256 + floor];
+    c.own = std::max(c.own, g_state.peer_floor_rand_count);
+    g_floor_build_count = g_state.peer_floor_rand_count;
+    g_floor_build_seed = g_floor_counts_seed;
+    return true;
+}
+
+bool CoopWorldsAgreedFloorRand(int floor, std::uint32_t *rand) {
+    std::uint32_t seed = 0;
+    if (!On() || !g_state.apart || NetplayLinkUp() || selectMapNo < 0 || !NetplayLinkFloorSeed(&seed) || Mutated("own_floor_race") ||
+        Mutated("own_floor_apart")) { // (coop-localfix's twin: each copy its own roll, as before both)
+        return false;
+    }
+
+    FloorCounts &c = FloorCountsNow()[selectMapNo * 256 + floor];
+    const int    count = std::max(c.own, c.heard) + 1;
+
+    c.own = count;
+    g_floor_build_count = count;
+    g_floor_build_seed = seed;
+
+    // (A mix of the four words: each bit of each moves about half the state's.)
+    std::uint32_t x = seed ^ 0x9E3779B9u * (std::uint32_t) (selectMapNo + 1) ^ 0x85EBCA6Bu * (std::uint32_t) (floor + 1) ^ 0xC2B2AE35u * (std::uint32_t) count;
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    *rand = x;
+    std::fprintf(stderr, "worlds: floor rand agreed: dungeon %d floor %d, build %d apart (this copy's %d, heard %d) under link word %08x\n", (int) selectMapNo,
+                 floor + 1, count, c.own, c.heard, seed);
     return true;
 }
 
@@ -10974,6 +15335,12 @@ bool CoopWorldsHideDungeonPlayer() {
         return false;
     }
 
+    // coop-menutpose: her stay waits under her menu: the one who left is not drawn; her own body is, where she stood (CoopDraw).
+    if (CoopWorldsStayKeepsBody()) {
+        CoopWorldsIdentity(g_stay.chara, "her own body where she stood, under her menu");
+        return true;
+    }
+
     const int member = coop::TownPlayerMember();
 
     // Her member plays (the arriving change ran), or there is none to become, or the change did not happen in half a
@@ -10981,7 +15348,7 @@ bool CoopWorldsHideDungeonPlayer() {
     // (coop-twinfix: only on a floor started here: built and its start held behind the other's opening scene, it is not hers yet)
     const bool started_here = g_floor_started_key == selectMapNo * 256 + UserStatus->cur_floor;
 
-    played = !g_become_due && started_here && gameTask == GAME_TASK_PLAY && BtGameModeFlag == BT_GAME_MODE_PLAY ? played + 1 : 0;
+    played = !g_become_due && started_here && CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY ? played + 1 : 0;
     if (UserStatus->cur_chara == member || member == CHARA_TOAN || played >= 30) {
         g_entry_hide = false;
     }
@@ -11042,6 +15409,7 @@ bool CoopWorldsHideDungeonPlayer() {
 // hide CoopWorldsFloorStarted arms came only after those frames. Armed at the build too, for player 2's copy apart.
 // DC_WORLDS_MUTATE=toan_floor_build (twin): from the start only, as before.
 void CoopWorldsFloorBuilding() {
+    g_floor_build_count = 0; // coop-floorrand: set again below it when the build is one apart (CoopWorldsAgreedFloorRand)
     if (On() && g_state.apart && Player() == 2 && !Mutated("toan_floor_build")) {
         g_entry_hide = true;
     }
@@ -11092,6 +15460,7 @@ void CoopWorldsFloorStarted() {
     g_become_due = true;
     g_floor_played = false;
     g_entry_hide = true;
+    coop::MemberFloorStarted(); // coop-swapcombo (A): player 1's kept member at the floor's first tick of play
 
     if (UserStatus != nullptr) {
         g_floor_started_key = selectMapNo * 256 + UserStatus->cur_floor;
@@ -11105,7 +15474,14 @@ void CoopWorldsFloorStarted() {
 // stands on, and a split or merge on it went by the entrance (w-world-escape-p1-online~merge on dun1-f1-launcher never merged).
 // The floor counts as started and played here, as on the copy that saved it. DC_WORLDS_MUTATE=load_floor_unstarted (twin):
 // left as the jump made it, as before.
+static bool g_state_file_loaded = false; // coop-readyscreen: a state file loaded on this copy (x-ready-table's moment)
+
+bool CoopWorldsStateFileWasLoaded() {
+    return g_state_file_loaded;
+}
+
 void CoopWorldsStateFileLoaded() {
+    g_state_file_loaded = true;
     // coop-fx51c: the bags and flags as the file put them (DC_WORLDS_TEST_BAGDUMP / _FLAGDUMP), a row's "before" on its fixture
     // (x-door-gate: the story's flag unset before the door, with no 10 s of play before it to dump them)
     slotsync::BagDump("loaded");
@@ -11146,13 +15522,26 @@ static void WalkInTest() {
     int                      flag = -1;
 
     if (spec == nullptr || stage >= 3 || mode != GAME_MODE_DUNGEON || UserStatus == nullptr || SaveData == nullptr || NowEventMan == nullptr ||
-        gameTask != GAME_TASK_PLAY || std::sscanf(spec, "%15[a-z]:%d", who, &flag) != 2) {
+        !CoopPlainPlay() || std::sscanf(spec, "%15[a-z]:%d", who, &flag) != 2) {
+        return;
+    }
+    // coop-menubuffers: <who>:<flag>:<link tick>: not before that link tick (every copy alike), so another player's menu can be open first.
+    if (int from = 0; std::sscanf(spec, "%*[a-z]:%*d:%d", &from) == 1 && NetplayLinkTick() < from) {
         return;
     }
 
     // who apart (the follow-up's row): this copy waits until it stays on the floor apart as its own member (Toan took the way out
     // on player 1's copy, CoopWorldsStayOnFloor), and is that member, joined or not.
+    // swapduel (x-story-role): trade: linked together, the pair trades members first (P1 Xiao, P2 Toan: Trade, both copies on one
+    // tick) and P1 is put on the marker; partner: P1 stays Toan and is stood across the floor (at its gate-key chest), P2's member
+    // (Xiao) on the marker.
     const bool apart = std::strcmp(who, "apart") == 0;
+    const bool trade = std::strcmp(who, "trade") == 0;
+    const bool partner = std::strcmp(who, "partner") == 0;
+    if (stage == 0 && (trade || partner) &&
+        (coop::g_partner.chara == nullptr || coop::g_partner.loaded_chara != CHARA_XIAO || UserStatus->cur_chara != CHARA_TOAN)) {
+        return; // (the fixture's pair: Toan and her Xiao, both up)
+    }
 
     if (stage == 0 && apart && !(g_state.apart && UserStatus->cur_chara != CHARA_TOAN)) {
         return;
@@ -11182,17 +15571,45 @@ static void WalkInTest() {
                      (int) slot->event->script_no, FloorName(selectMapNo, UserStatus->cur_floor),
                      gather == kGatherScene ? "a story floor" : gather == kGatherBoss ? "a boss floor" : "no gathered floor",
                      NetplayFloorStoryFlag(selectMapNo, UserStatus->cur_floor));
-        want = apart ? (int) UserStatus->cur_chara : std::strcmp(who, "standin") == 0 ? (int) UserStatus->party_size : CHARA_TOAN;
-        if (want != UserStatus->cur_chara) {
-            BecomeMember(want, "test: walk-in");
+        want = apart ? (int) UserStatus->cur_chara : std::strcmp(who, "standin") == 0 ? (int) UserStatus->party_size : trade ? CHARA_XIAO : CHARA_TOAN;
+        if (trade) {
+            const int was = UserStatus->cur_chara;
+            const int her = coop::g_partner.loaded_chara;
+
+            std::fprintf(stderr, "worlds: test: walk-in: the pair trades (player %d, partner %d): %s\n", was, her, coop::PromptTradeForTest() ? "traded" : "refused");
+        } else if (want != UserStatus->cur_chara) {
+            BecomeMember(want, "test: walk-in", coop::MemberWhy::kTest); // (a solo copy whose partner may hold the stand-in: the hook's state)
         }
         stage = 1;
         return;
     }
 
-    if (stage == 1 && UserStatus->cur_chara == want) {
+    if (stage == 1 && UserStatus->cur_chara == want && (!trade || (coop::g_partner.chara != nullptr && coop::g_partner.loaded_chara == CHARA_TOAN))) {
         sceVu0FVECTOR to = {slot->pos[0], CharaMain.pos[1], slot->pos[2], 1.0f};
 
+        if (partner) {
+            // P2's member on the marker; P1 away from it, at the gate-key chest across the floor.
+            sceVu0FVECTOR away = {CharaMain.pos[0], CharaMain.pos[1], CharaMain.pos[2], 1.0f};
+
+            for (const TREASURE_BOX &box : NowDngMap->boxes) {
+                if (box.item_no == NowDngMap->gate_key_no && box.item_no > 0) {
+                    away[0] = box.pos[0];
+                    away[2] = box.pos[2] - 14.0f;
+                }
+            }
+            CharaMain.SetPosition(away);
+            sceVu0CopyVector(CharaMain.pos, away);
+            sceVu0FVECTOR her = {slot->pos[0], coop::g_partner.pos[1], slot->pos[2], 1.0f};
+
+            sceVu0CopyVector(coop::g_partner.pos, her);
+            coop::g_partner.chara->frame->SetPosition(her);
+            coop::g_partner.chara->SetPosition(her);
+            std::fprintf(stderr, "worlds: test: walk-in: player 2 (chara %d) put on event %d's marker at (%.0f %.0f), player 1 (chara %d) away at (%.0f %.0f)\n",
+                         coop::g_partner.loaded_chara, (int) slot->event->script_no, slot->pos[0], slot->pos[2], (int) UserStatus->cur_chara, away[0], away[2]);
+            std::fflush(stderr);
+            stage = 3;
+            return;
+        }
         CharaMain.SetPosition(to); // (as the warp test does, coop_core.cpp)
         sceVu0CopyVector(CharaMain.pos, to);
         std::fprintf(stderr, "worlds: test: walk-in: player %d (chara %d, party of %d) put on event %d's marker at (%.0f %.0f)\n", Player(),
@@ -11203,13 +15620,14 @@ static void WalkInTest() {
 }
 
 void CoopWorldsSimTick() {
+    coop::MemberRestoreTick(); // coop-swapcombo (A)
     WalkInTest(); // pt1111c
     static const std::int64_t exit_at = TestExitAt();
 
     int       &layout_floor = g_layout_floor;
     const int  floor_id = selectMapNo * 256 + (UserStatus != nullptr ? UserStatus->cur_floor : 0);
 
-    if (CoopDebug() && floor_id != layout_floor && NowDngMap != nullptr && gameTask == GAME_TASK_PLAY) {
+    if (CoopDebug() && floor_id != layout_floor && NowDngMap != nullptr && CoopPlainPlay()) {
         std::uint32_t sum = 2166136261u;
 
         for (const DUNGEON_EVENT &event : NowDngMap->events) {
@@ -11235,7 +15653,15 @@ void CoopWorldsSimTick() {
         std::fprintf(stderr, "worlds: test: floor task %d, atla ticks %d of %d\n", (int) gameTask, g_state.progress_ticks, atla_test);
     }
 
-    if (!On() || gameTask != GAME_TASK_PLAY) {
+    // coop-readyscreen test hook (x-item-scene -Case leftapart): the copy left out of an item scene says when it is merged again. Before
+    // the play-task return (coop-rc3): the merge's resync lands both copies at the dungeon's floor menu, where coop-resyncmenu splits
+    // them again (each their own menu) before any play tick, so the line below the return never came.
+    if (static const bool left_merged = TestEnvOn("DC_WORLDS_TEST_LEFT_WALK"); left_merged && g_item_left && !g_state.apart) {
+        g_item_left = false;
+        Log("item scene: test: this copy left out of the scene is merged again");
+    }
+
+    if (!On() || !CoopPlainPlay()) {
         return;
     }
 
@@ -11243,18 +15669,25 @@ void CoopWorldsSimTick() {
     // F1, F2 ... to V at the first play tick from link tick T on, the same tick on both (a floor's opening scene unseen, a boss beaten).
     // (coop-twinfix: more than one such set, comma-separated, each with its own kind and value: x-floor-call's floor 5 scene
     // unseen and floor 4's mid-floor story seen, so floor 4 is no gathered floor since coop-b4story)
+    // coop-016 (the row audit: no fixed tick waits): "loaded:kind:F:V" sets them on the first play tick after the row's fixture (its
+    // state file, DC_STATE_LOAD_AT: the same link tick on both copies) has loaded, the moment a tick of 61 stood for.
     static const char *const flag_at = TestEnv("DC_WORLDS_TEST_FLAG_AT");
+    static const bool        flag_on_load = flag_at != nullptr && std::strncmp(flag_at, "loaded:", 7) == 0;
     static bool              flag_at_done = false;
 
-    if (flag_at != nullptr && !flag_at_done && g_state.up && !g_state.apart && SaveData != nullptr && g_state.tick >= std::atoll(flag_at)) {
+    if (flag_at != nullptr && !flag_at_done && g_state.up && !g_state.apart && SaveData != nullptr &&
+        (flag_on_load ? NetplayJobStateFileLoaded() && !NetplayStateLoadPending() : g_state.tick >= std::atoll(flag_at))) {
         flag_at_done = true;
-        for (const char *set = flag_at; set != nullptr && *set != 0; set = std::strchr(set, ',') != nullptr ? std::strchr(set, ',') + 1 : nullptr) {
+        for (const char *set = flag_on_load ? flag_at + 7 : flag_at; set != nullptr && *set != 0;
+             set = std::strchr(set, ',') != nullptr ? std::strchr(set, ',') + 1 : nullptr) {
             long long at = 0;
             char      kind[8] = "";
             char      list[200] = "";
             int       value = 1;
+            const int got = flag_on_load ? 1 + std::sscanf(set, "%7[a-z]:%199[0-9/]:%d", kind, list, &value)
+                                         : std::sscanf(set, "%lld:%7[a-z]:%199[0-9/]:%d", &at, kind, list, &value);
 
-            if (std::sscanf(set, "%lld:%7[a-z]:%199[0-9/]:%d", &at, kind, list, &value) != 4) {
+            if (got != 4) {
                 std::fprintf(stderr, "worlds: test: DC_WORLDS_TEST_FLAG_AT '%s' not understood\n", set);
                 continue;
             }
@@ -11275,21 +15708,58 @@ void CoopWorldsSimTick() {
 
     StepBesideVote(); // coop-p2prompt: her exit gate's question to player 1, beside the game
 
-    if (gameTask != GAME_TASK_PLAY) {
+    if (!CoopPlainPlay()) {
         return; // both said yes: the gate's script starts
     }
 
     if (BtEventMode == 0 && mode == GAME_MODE_DUNGEON) {
         g_floor_played = true; // coop-localfix: its opening scene over (MergeReady)
     }
+    if (coop::g_story_role.due != 0) {
+        StoryRoleTick(); // swapduel: the Toan story scene over, each player's own member again
+        if (coop::g_story_role.due == 0 && !CoopPlainPlay()) {
+            return;
+        }
+    }
     if (coop::g_scene_handover.due != 0) {
         SceneHandoverTick(); // coop-sceneowner: her scene over, the change her floor merge held
-        if (coop::g_scene_handover.due == 0 && gameTask != GAME_TASK_PLAY) {
+        if (coop::g_scene_handover.due == 0 && !CoopPlainPlay()) {
             return; // the change runs first
         }
     }
 
+    // coop-readyscreen test hook (DC_WORLDS_TEST_LEFT_WALK=1, x-item-scene -Case leftapart): a copy left out of an item scene, apart on
+    // its floor, says where its player stands every 60 of its ticks till the merge (it plays on meanwhile: the test's stick).
+    if (static const bool left_walk = TestEnvOn("DC_WORLDS_TEST_LEFT_WALK"); left_walk && g_item_left) {
+        static int ticks = 0;
+
+        if (g_state.apart && ticks++ % 60 == 0) {
+            std::fprintf(stderr, "worlds: item scene: test: left out, apart: player %d at (%.0f %.0f) on floor %d, task %d\n", Player(), CharaMain.pos[0],
+                         CharaMain.pos[2], UserStatus != nullptr ? (int) UserStatus->cur_floor + 1 : -1, (int) gameTask);
+            std::fflush(stderr);
+        }
+    }
+
+    // coop-readyscreen (A): player 2's item scene, apart on its floor: her member change has run, so her pick starts it (this copy's
+    // player is hers now: the game's).
+    if (g_gate_again.item_slot >= 0 && g_state.apart) {
+        const GateAgain again = g_gate_again;
+
+        g_gate_again = GateAgain{};
+        std::fprintf(stderr, "worlds: item scene: player 2's scene starts on its copy (slot %d, item %d): %s\n", again.item_slot, again.item,
+                     coop::StartPickedItemScene(1, again.item_slot, again.item, again.item_shared) ? "started" : "could not start");
+        std::fflush(stderr);
+        return;
+    }
+
     // Player 2 left anyway: its change of member has run, so the gate's script starts, as its Cross at the gate does.
+    if (g_gate_again.script >= 0 && g_gate_again.ura_slot >= 0 && g_state.apart) {
+        std::fprintf(stderr, "worlds: back half: player 2 goes through its door (script %d)\n", g_gate_again.script);
+        std::fflush(stderr);
+        coop::UraEnterAgain(g_gate_again.script, g_gate_again.ura_slot);
+        g_gate_again = GateAgain{};
+        return;
+    }
     if (g_gate_again.script >= 0 && g_state.apart) {
         BtEventInfo.script_no = g_gate_again.script;
         BtEventInfo.ext_memory = g_gate_again.ext;
@@ -11302,6 +15772,40 @@ void CoopWorldsSimTick() {
         std::fflush(stderr);
         g_gate_again.script = -1;
         return;
+    }
+
+    // coop-backmerge (x-gate-flow -Case picker -Pick return -Who 2: she left by the gate, he stayed, she picked the floor again):
+    // her copy's floor start armed the change below, but his copy was on the floor and the merge came before her first tick of
+    // play (her arrival held black), so it ran in the catch-up's replay of his recorded ticks, on her copy alone: her member the
+    // game's player there, his state's Toan on his copy, OUT OF SYNC 40 ticks later. A copy taking the other's state replays the
+    // other's play: its own arrival's change is not in it (the state set says who plays whom). Dropped, not held: once linked the
+    // pair is together and the change is apart play only. DC_WORLDS_MUTATE=become_in_catchup (twin): it runs, as before.
+    if (g_become_due && g_state.apart && NetplayReplaying() && !Mutated("become_in_catchup")) {
+        g_become_due = false;
+        std::fprintf(stderr, "worlds: arriving: this copy (player %d) takes the other's state: its own member change is dropped\n", Player());
+        std::fflush(stderr);
+    }
+    // coop-b9arrive (Jep's rc1 B9): so too on the copy that SENT its state, her floor's start coming after her merge began (her
+    // walk-in ended inside the catch-up): her state set (taken mid-walk-in) says who plays whom (the handover above), which his copy
+    // replays without this change; run here alone it made her member the game's player again, his the partner. Dropped, as the
+    // taker's. DC_WORLDS_MUTATE=become_in_her_merge (twin): it runs, as before.
+    if (g_become_due && g_state.apart && g_merge_state_in && NetplayCatchUnderWay() && !Mutated("become_in_her_merge")) {
+        g_become_due = false;
+        std::fprintf(stderr, "worlds: arriving: this copy (player %d) sent its state to the merge under way: its own member change is dropped\n", Player());
+        std::fflush(stderr);
+    }
+
+    // coop-menutpose (the developer's rc4 playtest: "if P1 leaves while P2 has the menu open, they get warped to the floor exit and stuck in a
+    // T-pose; when they close the menu, they're right where they were"): the split with her own menu open leaves her stay waiting
+    // for her close (coop-016, option A: g_stay), and that stay is her member change, where she stood. This floor's change below
+    // (armed at the floor's start, due at its first tick apart) ran on the split's next tick anyway: her member made the game's
+    // player at the game's player's place, his Toan's at the gate he took, under a world her menu holds (no motion steps: her body
+    // in its bind pose), drawn behind her menu; her close's stay then put her back. The waiting stay owns the change: dropped here.
+    // DC_WORLDS_MUTATE=become_under_stay (twin): it runs, as before.
+    if (g_become_due && g_state.apart && g_stay.on && !Mutated("become_under_stay")) {
+        g_become_due = false;
+        std::fprintf(stderr, "worlds: arriving: player %d's stay waits for her menu's close: the stay is her member change (dropped here)\n", Player());
+        std::fflush(stderr);
     }
 
     // coop-p2entry: player 2's copy alone on a floor plays her own member, wherever it came from (her way in from town
@@ -11377,7 +15881,6 @@ void CoopWorldsSimTick() {
         getAtraToSaveData(atla_id, 0, SaveData, selectMapNo, UserStatus->cur_floor);
         slotsync::BagDump("atla");
     }
-
     // An apart copy's floor hooks (DC_NETPLAY_NEXT_FLOOR past the split tick), counted by its own floor play.
     if (g_state.apart) {
         NetplayTestFloorApart(g_state.split_tick + ++g_state.floor_ticks);
@@ -11427,6 +15930,19 @@ void CoopWorldsSimTick() {
 
     g_state.exit_fired = true;
 
+    // coop-firstvisit test hook (DC_WORLDS_TEST_NORUNE_ATLA=1): Norune's first Atla obtained (its Georama's part 0), on every copy on
+    // this shared tick, so the cave's way out brings its first return's story (Norune's arrival, game flag 40 still clear).
+    // (and DC_WORLDS_TEST_GAME_FLAG, as with a town warp: 9 is Matataki's first visit seen, so a row about something else that
+    // escapes Wise Owl Forest apart arrives there plainly, not into the first visit's story gather)
+    TestGameFlag();
+    if (TestEnvOn("DC_WORLDS_TEST_NORUNE_ATLA") && SaveData != nullptr) {
+        if (SV_EDIT_PARTS_INFO *part = SaveData->GetEditPartsInfo(0, 0); part != nullptr) {
+            part->obtained = 1;
+            std::fprintf(stderr, "worlds: test: Norune's Georama part 0 obtained (an Atla) at link tick %lld; game flag 40 = %d\n", (long long) g_state.tick,
+                         (int) SaveData->GetGameFlag(40));
+        }
+    }
+
     // DC_WORLDS_EXIT_BY=escape: by an Escape (the item's way out: GAME_TASK_ESCAPE_INIT, its effect and fade), as
     // Jep's Toan left on 2026-10-20, instead of the exit's fade alone.
     static const char *const by = TestEnv("DC_WORLDS_EXIT_BY");
@@ -11468,4 +15984,188 @@ bool CoopWorldsPartnerOnFloor(int *map, int *floor) {
     *map = g_state.peer.map;
     *floor = g_state.peer.floor;
     return true;
+}
+
+// coop-whereis (coop_whereis.hpp): the players' places as this copy knows them.
+int CoopWorldsPlayers() {
+    // (a link holds two copies today; the list and its record are per player, kMaxPlayers, for more)
+    return On() && Player() != 0 && (g_state.up || g_state.apart) ? 2 : 1;
+}
+
+int CoopWorldsSelf() {
+    return Player() != 0 ? Player() : 1;
+}
+
+int CoopWorldsOwnActivity() {
+    if (SceneHere()) {
+        return coop::kWhereScene;
+    }
+    if (mode == GAME_MODE_EDIT && ApartBuilds()) {
+        return coop::kWhereGeorama;
+    }
+    if (mode == GAME_MODE_EDIT && EdInteriorFlag == 0 && (GameMode == ED_MODE_FISHING || CoopFishingHere())) {
+        return coop::kWhereFishing;
+    }
+    if (TalkHere()) {
+        return coop::kWhereTalk;
+    }
+    return coop::kWhereNone;
+}
+
+namespace {
+
+void WhereOfZone(const Zone &zone, coop::Where *out) {
+    if (zone.mode == GAME_MODE_EDIT && zone.map >= 0) {
+        out->kind = coop::WhereKind::Town;
+        out->map = zone.map;
+        out->room = zone.floor > 0 ? zone.floor : 0;
+    } else if (zone.mode == GAME_MODE_DUNGEON && zone.map >= 0) {
+        out->kind = coop::WhereKind::Dungeon;
+        out->map = zone.map;
+        out->floor = zone.floor;
+    } else {
+        out->kind = coop::WhereKind::Away;
+    }
+}
+
+} // namespace
+
+bool CoopWorldsWhere(int player, coop::Where *out) {
+    *out = coop::Where{};
+    if (!On() || player < 1 || player > coop::kMaxPlayers) {
+        return false;
+    }
+    if (player == CoopWorldsSelf()) {
+        WhereOfZone(Here(), out);
+        out->activity = CoopWorldsOwnActivity();
+        return true;
+    }
+    if (player > CoopWorldsPlayers()) {
+        return false;
+    }
+    if (!g_state.apart) {
+        // Together: on this copy's map, in lockstep; what that player does there from the state both copies simulate alike.
+        WhereOfZone(Here(), out);
+        out->together = true;
+        out->activity = SceneHere() ? coop::kWhereScene : CoopFishingOn(player - 1) ? coop::kWhereFishing : coop::kWhereNone;
+        return true;
+    }
+    // Apart: that player's own presence, once heard since the split (before it: Unknown, "?").
+    const Heard &heard = g_heard[player - 1];
+
+    if (!heard.set || heard.at < g_state.split_at) {
+        return true;
+    }
+    WhereOfZone(heard.zone, out);
+    out->activity = heard.activity;
+    // (a test's seam, DC_COOP_TEST_WHEREIS_STALE_MS: a shorter silence than 30 s counts, so a row needs no 30 s wait)
+    static const int stale_ms = TestEnvInt("DC_COOP_TEST_WHEREIS_STALE_MS", 30000);
+
+    out->stale = std::chrono::steady_clock::now() - heard.at > std::chrono::milliseconds(stale_ms);
+    return true;
+}
+
+const char *CoopWorldsTownName(int map) {
+    return map >= 0 && map < 5 ? doorgate::kTowns[map] : nullptr;
+}
+
+const char *CoopWorldsDungeonName(int map) {
+    return DungeonName(map);
+}
+
+bool CoopWorldsWhereIsFree(const char **why) {
+    if (mode == GAME_MODE_DUNGEON && BtGameModeFlag == BT_GAME_MODE_ENTRANCE_MENU) {
+        *why = "the entrance's floor menu";
+        return false;
+    }
+    if (int from = 0, map = 0, to = 0, floor = 0, cursor = 0; CoopWorldsCallQuestion(&from, &map, &to, &floor, &cursor)) {
+        *why = "a question is up";
+        return false;
+    }
+    if (CoopWorldsOwnActivity() != coop::kWhereNone) {
+        *why = "a scene, the Georama, fishing or a talk";
+        return false;
+    }
+    if (!CallFree()) {
+        // (the reason with the state it read, for the test's log: a menu, a message, a load, an event)
+        static char reason[128];
+
+        std::snprintf(reason, sizeof reason, "not walking or playing (mode %d task %d flag %d event %d menu %d game %d)", (int) mode, (int) gameTask,
+                      (int) BtGameModeFlag, (int) BtEventMode, coop::FullMenuOpenFor(Player()) ? 1 : 0, (int) GameMode);
+        *why = reason;
+        return false;
+    }
+    return true;
+}
+
+// coop-choosing (ura): see SplitIntoBack.
+// Test hook (x-back-half -Away, coop_interact's bonedoor hook): player leaver leaves the floor for the dungeon's floor menu, the
+// pair split as at a floor's gate taken (FloorSplit, the picker's way), on every linked copy alike.
+void CoopWorldsTestAway(int leaver) {
+    if (!On() || g_state.apart || !g_state.up || UserStatus == nullptr || mode != GAME_MODE_DUNGEON) {
+        return;
+    }
+    std::fprintf(stderr, "worlds: test: player %d leaves floor %d for the floor menu (the other stays)\n", leaver, (int) UserStatus->cur_floor + 1);
+    std::fflush(stderr);
+    FloorSplit(leaver - 1, true);
+}
+
+void CoopWorldsUraEnter(int user, int script, int slot) {
+    if (!On() || g_state.apart || !g_state.up || !NetplayHasPlayer() || UserStatus == nullptr || mode != GAME_MODE_DUNGEON) {
+        if (user == NetplayLocalPlayer() || !NetplayHasPlayer()) {
+            coop::UraEnterAgain(script, slot);
+        }
+        return;
+    }
+    SplitIntoBack(user, script, slot);
+}
+
+bool CoopWorldsTogether() {
+    return On() && !g_state.apart && g_state.up && NetplayHasPlayer();
+}
+
+// coop-doorrace (port row 77, w-town-apart-p2cave-p1zoning: her Cross at the cave door one tick before his at the mayor's door, and
+// his door did not open till his next Cross): a press the mod puts on the game pad's first port for one tick (her cave door's Cross,
+// a key's walk in) stayed in it, and CGamePad::UpDate copies the pad as edited into previous_pad: the next tick that button read as
+// held, so a real press of it there (his Cross on the next tick) had no down edge and was lost. CoopWorldsPadPress puts the press on
+// and notes what of it the player did not hold; UpDate takes that back out of previous_pad (CoopWorldsPadPressedTake), so only what
+// was really read (and retail's own edits, its key repeat) is the next tick's previous pad. DC_WORLDS_MUTATE=pad_press_carries (twin):
+// the press carries into the next tick's previous pad, as before.
+static int g_pad_pressed = 0;
+
+void CoopWorldsPadPress(int mask) {
+    PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1]
+
+    g_pad_pressed |= mask & ~data[0].input.status.button;
+    data[0].input.status.button |= mask;
+    data[2].input.status.button &= ~mask;
+}
+
+int CoopWorldsPadPressedTake() {
+    const int pressed = g_pad_pressed;
+
+    g_pad_pressed = 0;
+    return Mutated("pad_press_carries") ? 0 : pressed;
+}
+
+// coop-padtake (the other side of coop-doorrace): a held button the mod takes off the game pad's first port for one tick (his Square at
+// the cave door, which opens his own picker; the Cross, Circle or Triangle that closes it) was missing from that tick's pad, so
+// UpDate's previous_pad lacked it and the next tick it read as a new press while still held: his Square went on to retail's event 130,
+// whose Use Item window opened over his picker for both screens; the Triangle that shut his picker opened his town menu.
+// CoopWorldsPadTake takes it off and notes what of it the player held; UpDate puts that back into previous_pad (CoopWorldsPadTakenTake),
+// so the button is seen as held until it is let go. DC_WORLDS_MUTATE=pad_take_carries (twin): the take carries, as before.
+static int g_pad_taken = 0;
+
+void CoopWorldsPadTake(int mask) {
+    PAD_DATA *data = reinterpret_cast<PAD_DATA *>(&GamePad); // pad[0], pad[1], previous_pad[0], previous_pad[1]
+
+    g_pad_taken |= mask & data[0].input.status.button;
+    data[0].input.status.button &= ~mask;
+}
+
+int CoopWorldsPadTakenTake() {
+    const int taken = g_pad_taken;
+
+    g_pad_taken = 0;
+    return Mutated("pad_take_carries") ? 0 : taken;
 }

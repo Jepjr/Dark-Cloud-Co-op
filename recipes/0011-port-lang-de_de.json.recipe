@@ -1,0 +1,25 @@
+# port/lang/de_de.json from Chronicle's port/lang/de_de.json (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/lang/de_de.json
+base port/lang/de_de.json
+from 693c0b457d3f56ad51f0e5f19b72dd9c8d2119f9
+to 27b8e5df197a1b1af259c60b75e3056d5025bd97
+@@ -6,0 +7,1
++    "options.help.host_sets": "Spieler 1 legt das\nim Koop fest.",
+@@ -46,0 +48,4
++    "options.game.chara_quick_select.label": "Charakter-Schnellwahl",
++    "options.game.chara_quick_select.help": "\"Charakter-Schnellwahl\"\nSteuerkreuz unten\nöffnet den\nCharakterring.",
++    "options.game.chara_quick_select.choice.0": "An",
++    "options.game.chara_quick_select.choice.1": "Aus",
+@@ -167,0 +173,10
++    "options.page.co-op": "Koop",
++    "options.page.co-op.help": "\"Koop\"\nGemeinsam spielen.",
++    "options.game.coop_whereis.label": "Wo sind alle",
++    "options.game.coop_whereis.help": "\"Wo sind alle\"\nDie Liste oben rechts:\nwo jeder Spieler ist.",
++    "options.game.coop_whereis.choice.0": "An",
++    "options.game.coop_whereis.choice.1": "Aus",
++    "options.game.coop_swap_same_zone.label": "Tausch nur zusammen",
++    "options.game.coop_swap_same_zone.help": "\"Tausch nur zusammen\"\nFiguren nur tauschen,\nwenn beide Spieler am\nselben Ort sind.",
++    "options.game.coop_swap_same_zone.choice.0": "An",
++    "options.game.coop_swap_same_zone.choice.1": "Aus",
+@@ -316,0 +332,1
++    "title.menu.multiplayer": "MEHRSPIELER",

@@ -1,0 +1,100 @@
+# port/src/platform/config.hpp from Chronicle's port/src/platform/config.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/platform/config.hpp
+base port/src/platform/config.hpp
+from b06a678d4fb1724ddce235a5e4ad1f117023ad74
+to b4664fa9a7e38dd14511921aa2cd5647fb2b83ed
+@@ -3,0 +4,1
++#include <optional>
+@@ -49,1 +50,2
+- d09741a06981784f
++    bool element_quick_select = true; // coop-dpadwheel (Jep 11-17): on by default, D-pad Up the element ring
++    bool chara_quick_select = true;   // coop-dpadwheel: D-pad Down opens the character ring (Select still does)
+@@ -50,0 +53,75
++    // game.coop: on a dungeon floor, the second controller walks a second party member (port/src/coop);
++    // coop: georama: in a town's build mode the two take turns with the editor (coop/coop_georama.hpp).
++    bool              coop = false;
++    // input.controller: 0 reads every controller as usual; 1 or 2 binds this copy's player to the
++    // first or second controller only (port/src/coop/copies.cpp), for two copies side by side.
++    int               controller = 0;
++    // game.window_title, video.window_left and video.window_top: the window's title and where it
++    // opens; empty and -1 keep the defaults.
++    std::string       window_title;
++    int               window_left = -1;
++    int               window_top = -1;
++    // game.netplay: 0 plays alone; 1 or 2 links this copy to another over UDP as that player (port/src/coop/
++    // netplay.cpp), the other copy at game.netplay_peer. Copy n listens on game.netplay_port + n and sends to
++    // game.netplay_port + the other's n. (coopoptions, Jep 11-17: game.netplay_delay, game.netplay_controller_only and
++    // game.netplay_keyboard retired: a link starts at 3 ticks of input delay and follows the round trip; while linked the mouse
++    // never reaches the game and the keyboard plays this copy's pad. config.cpp kRetired reads old files' keys quietly.)
++    int               netplay = 0;
++    std::string       netplay_peer = "127.0.0.1";
++    int               netplay_port = 47100;
++    // game.netplay_wan_lookup: one client hosting asks a STUN server (DC_NETPLAY_STUN, or stun.l.google.com:19302) for
++    // this PC's internet address, to show it. On; false (or DC_NETPLAY_STUN=off) asks nobody.
++    bool              netplay_wan_lookup = true;
++    // coop-upnp: game.netplay_upnp: a host by Multi-player > Host > IP (or NAT > Code) asks the router by UPnP to forward its
++    // UDP port (game.netplay_port + 1) to this PC for as long as it plays, so a friend can join by address or code without
++    // a manual port forward (port/src/coop/netplay_upnp.hpp; DC_NETPLAY_UPNP=1 or 0 overrides). On; false asks nobody.
++    bool              netplay_upnp = true;
++    // coop-lobby: game.lobby_local, where players on this PC come in: "combined" (any
++    // lobby takes one by Start on a free controller; no LOCAL row) or "separate" (MULTIPLAYER > LOCAL's own lobby);
++    // DC_LOBBY_LOCAL overrides. game.netplay_last_code: the code Join > Code joined last (its entry opens with it).
++    // game.netplay_player_id: this copy's own lobby identity (16 hex digits, made once), so a rejoin gets its seat back.
++    std::string       lobby_local = "combined";
++    std::string       netplay_last_code;
++    std::string       netplay_player_id;
++    // coop-consent (Jep, 2026-11-02: the player's own call): game.lobby_show_ip: the host's outside IP shown in the lobby's
++    // header and the waiting lines (R1 in the lobby). Off.
++    bool              lobby_show_ip = false;
++    // game.netplay_catchup (or DC_NETPLAY_CATCHUP=1): the host, playing alone, starts its place over once from its own
++    // state and records its pads from there (netplay's Option B, so a joiner can catch up without a reload). Off.
++    bool              netplay_catchup = false;
++    // coop-areacard (Jep, 2026-11-09): the area name card a mode's load shows (coop/coop_boot.hpp). game.area_card: "retail"
++    // (the default), "short" (a resync's card), "custom" (game.area_card_start, _fade_in, _hold, _fade_out in ticks, 60 a
++    // second, each divided by game.area_card_speed). A single-player game keeps retail's.
++    std::string       area_card = "retail";
++    int               area_card_start = 20;
++    int               area_card_fade_in = 128;
++    int               area_card_hold = 120;
++    int               area_card_fade_out = 128;
++    float             area_card_speed = 1.0f;
++    // coop-snapshot: game.netplay_snapshot (or DC_NETPLAY_SNAPSHOT=1): a catch-up join on a dungeon floor sends the host's
++    // state as a memory snapshot and the joiner replays only the ticks since. Takes effect
++    // only in a build with the fixed layout (DC_FIXED_LAYOUT: the two copies hold the game's memory at one address);
++    // elsewhere a join catches up as before. Off.
++    bool              netplay_snapshot = false;
++    // coop-steamrate: game.netplay_steam_rate: how fast a join's state goes over Steam. 0 or "auto" (the default): the
++    // host paces by what reaches the joiner, starting at 1 MB/s and rising to at most 40 MB/s, backing off when pieces
++    // are lost. A number is a fixed rate in KB/s (e.g. 2048), or text with its unit ("512 KB/s", "2 MB/s"), from
++    // 64 KB/s to 1024 MB/s: Steam sends at exactly that rate, no pacing (DC_STEAM_SEND_RATE, bytes a second, overrides).
++    // Held here in KB/s.
++    int               netplay_steam_rate = 0;
++    // coop-eventslots (Jep 11-11): game.coop_fishing_shared: in co-op the fishing points and the fishing log are the party's (true, the
++    // default) or each player's own, kept with their profile beside their bag (false). Switching keeps every point.
++    bool              coop_fishing_shared = true;
++    // (coop-gatherpicker, Jep 11-17: game.coop_story_gather and game.coop_gate_picker retired, always on: a floor or room whose
++    // story is unseen is gone into together, and a floor's exit gate opens the dungeon's floor menu; port/src/coop/coop_worlds.cpp.)
++    // coop-whereis: game.coop_whereis: the where-is-everyone list (port/src/coop/coop_whereis.hpp), each other player's place
++    // on this player's screen while linked. On; false: none drawn. Each player's own (Options > Co-op > Where Is Everyone).
++    bool              coop_whereis = true;
++    // coop-faces (Jep 11-18): game.coop_faces: faces that move on every player's body (blinks, and the fisher's own looks while
++    // fishing), with the faces' frames the disc has for each member (port/src/coop/coop_faces.hpp). On; false: retail's faces
++    // exactly. Each player's own look (never sent, never in the sync check).
++    bool              coop_faces = true;
++    // trade3 (Jep 11-13): game.coop_swap_same_zone: character trades are offered only while both players are in the same zone (a
++    // trade asked across zones is refused on the asker's screen, port/src/coop/coop_prompt.cpp). Off (default): trades across
++    // zones too. A link plays by the host's (Options > Co-op > Trade Only Together; player 1's to change while linked).
++    bool              coop_swap_same_zone = false;
+@@ -51,0 +129,3
++    // release2: game.write_log: Play Dark Cloud Co-op.exe keeps the game's output in save\log.txt (local only, never sent;
++    // the last three starts kept). On; false: no log. The game only keeps the key.
++    bool write_log = true;
+@@ -186,0 +267,8
++// coop: settings for this run only, never written to config.json (the title's Multi-player turns co-op on for the
++// session it starts). apply sets them on the running settings; restore copies the saved values of the same keys from
++// saved into the settings about to be saved. ConfigChange keeps both apart while a session is set; nullptr ends it
++// (the running settings go back to the saved ones). The change hooks run as for ConfigChange.
++using ConfigSessionApply = void (*)(Config &config);
++using ConfigSessionRestore = void (*)(Config &config, const Config &saved);
++void ConfigSetSession(ConfigSessionApply apply, ConfigSessionRestore restore);
++

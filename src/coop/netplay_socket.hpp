@@ -41,6 +41,11 @@ bool NetSocketQueue(int &pending_bytes, int &rate);
 // coop-steamceiling: over Steam, Steam's view of the link as one log line (NetSteamLine); false over UDP.
 bool NetSocketSteamLine(char *line, std::size_t size);
 
+// coop-hostquit: what the transport itself knows of the peer: over Steam, the session's state (NetSteamSessionState: 3
+// connected, 4/5 closed or failed, 0 none, -1 unknown); -2 over UDP, where udp_resets counts the system's reports that a
+// datagram found no one at the peer's port (WSAECONNRESET) and udp_heard every datagram read so far, from anyone.
+int NetSocketPeerTransport(long long &udp_resets, long long &udp_heard);
+
 // Bytes of the next datagram waiting, copied into data; 0 when none is.
 int NetSocketReceive(void *data, std::size_t size);
 

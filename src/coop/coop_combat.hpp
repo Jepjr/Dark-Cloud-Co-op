@@ -6,7 +6,8 @@
 // lock-on, aiming, weapons and items.
 //
 // Pad 2 (fixed buttons, so linked copies agree whatever each one's OK/NO setting):
-//   Cross       tap swings (or opens a door or chest); held past the swing it charges, and letting go
+//   Cross       tap swings (or opens a door or chest), and a tap mid-swing goes on with a melee member's combo
+//               (coop-swapcombo: its retail key's chain); held past the first swing it charges, and letting go
 //               lands a charged blow or shot (one and a half times the damage); the second level,
 //               which a character reaches once it has its event skill, adds a wave as strong round
 //               the partner, as the player's does.
@@ -16,7 +17,7 @@
 //               dots shows where a shot goes, and Cross fires.
 //   Square      uses the item picked from the shared pack: food heals the partner, bombs, stones and
 //               fruit are thrown ahead (or at the locked monster).
-//   D-pad       Left and Right pick the item, Up and Down the partner's weapon.
+//   D-pad       Left and Right pick the item; Up opens her element ring with her Element Quick Select on (coop_wheel.cpp).
 //   Triangle    opens the partner's panel under its life bar (weapons and items; the game does not
 //               pause): Up and Down move, Left and Right change page, Cross equips or uses,
 //               Triangle or Circle closes. The partner stands still while it is open.
@@ -33,6 +34,8 @@ namespace dc::game {
 class CCharacter;
 
 struct WEAPON_HAVE;
+// coop-p2hurt2 (recipe, game/dun/gameloop.cpp): retail's ambient pulse state exchanged with a body's own (PulseRun).
+void UnitAmbientAnimeExchange(float *rgb, float *count, float *speed, int *timer, int *flag);
 } // namespace dc::game
 
 namespace coop {
@@ -66,6 +69,25 @@ struct Combat {
     float scale = 1.0f;
     int   charges = 0;
 
+    // coop-swapcombo: a melee member's chain and charge as its retail key runs them (MeleeRule, coop_combat.cpp): a press
+    // in a stage queues the next; the stages that hit in the chain under way and in the last one ended; the charge's
+    // wind-up (Ungaga's 13 before his pose); the charged release's motions (its index + 1, 0 none; release_two: the
+    // second level's), and the motion its blow last landed in (the tests').
+    bool combo_queued = false;
+    int  chain_hits = 0;
+    int  last_chain = 0;
+    bool winding = false;
+    int  release_step = 0;
+    bool release_two = false;
+    int  release_blow_motion = -1;
+
+    // coop-comboaudio: Toan's leap as retail's (BtActStatus.jumping, jump_velocity_y: Walk adds it to her step each tick and takes
+    // 0.1 off, as DunMoveChara does the player's), and her height over the floor below her (ground_height: the leap lands under 2).
+    bool  jumping = false;
+    float jump_vy = 0.0f;
+    float ground_height = 0.0f;
+    bool  swinging = false; // ToanKey_Play's / UngagaKey_Play's BtActStatus.swinging: set by her key step, cleared by StepGauge
+
     // The partner's "speed" gauge (0 to 100) as the game keeps the player's (BtActStatus.action_gauge):
     // a tap's swing costs none of it, a charge empties it, and it fills back at its weapon's speed
     // (StepGauge). The bottom-left panel shows it on the copy whose player is P2.
@@ -81,6 +103,12 @@ struct Combat {
     // The monster locked onto, or -1, and how long Circle has been held.
     int lock = -1;
     int circle_ticks = 0;
+    // coop-p2controls3: her L1's place in the lock-on's order and how many it had (retail's targetCursorShiftNo / ShiftRot).
+    int lock_shift_no = 0;
+    int lock_shift_rot = 0;
+    // coop-lockon1118: her lock-on cursor's count, retail's targetCursorCnt for her (setTargetCursor's countdown, LockOnCountdown): 8 as a
+    // lock is taken, down to 0 while it holds, up a quarter a tick while it slips; past 8 the lock lets go. Her corners' size reads it.
+    float lock_cursor = 8.0f;
 
     // R2 held: the partner's aim, a yaw and a tilt (up positive).
     bool  aiming = false;
@@ -168,6 +196,13 @@ struct Combat {
 };
 
 extern Combat g_combat;
+// coop-p2actions: her first-person view (retail's R2 view, GAME_TASK_EYE_CAMERA) is on, on every copy alike; its eye and the
+// point it looks at (EyeCamera's). Her own copy draws from it (CoopViewChoose).
+bool PartnerFirstPerson();
+void PartnerEyeView(float *eye, float *ref);
+void PartnerHandStep(); // coop-p2eyehand: her view's hand (retail's CharaHand) and the slingshot it holds, stepped on every copy
+bool PartnerWeaponHold(bool hold); // coop-p2eyehand: her weapon onto her view's hand's "pati1" (true) or back to her body's "weapon"
+int CombatPressCount(); // coop-p2actions: new Circle/Triangle/Square presses her combat input took so far (a test's count)
 
 // The partner's equipped weapon, or null when its slot holds none (a stand-in that has not joined has
 // slot -1).
@@ -184,6 +219,9 @@ bool Stamina(int chara);
 // DunMoveChara, CombatTestPad puts the pad 2 buttons it holds into pad. Both do nothing unless set.
 void CombatTestTick();
 bool CombatTestPad(InputPadState &pad);
+// coop-comboaudio: pad 1's buttons the bot holds (the combo rows' P1 attack), ORed into the game pad's port 0 as it is read
+// (MenuFilterPort); 0 unless set.
+std::uint16_t CombatTestP1Buttons();
 
 // Puts all of combat's state (g_combat, the floor it last saw, whom each monster goes after) back as a
 // fresh boot has it. CoopResetForSession calls it when a linked session starts over.
@@ -193,6 +231,10 @@ void CombatResetForSession();
 // bottom-left panel: full when it can swing, filling through a swing and through a charge (full at the
 // level its character can reach). Read only.
 int PartnerGauge();
+
+// coop-comboaudio: whether her attack runs her member's retail key (coop-swapcombo's MeleeRule: Toan, Goro, Ungaga), whose sounds
+// coop_audio plays at retail's frames.
+bool PartnerMeleeKey();
 
 // Fills the partner's gauge back one tick, as MotionDrive fills the player's; Walk calls it each tick.
 void StepGauge();
@@ -276,6 +318,18 @@ int  PlayerDownStep();
 // Whether the player lies down now (it neither walks nor turns; DC_COOP_MUTATE=p1spin turns it, the twin).
 bool PlayerLiesDown();
 bool BothDown();
+// coop-downmenu (the developer's rc5b playtest, 11-19): whether player (1 up) lies down now: player 1 by the co-op down (PlayerLiesDown, the one
+// rule coop-fpsound's first-person refusal reads too), player 2 the partner body's. A player past 2 has no body on a floor yet, so is
+// never down. Retail never had a player lying down in play (its down is the game over), so its lock-on, its monsters' target and its
+// menu never asked; each asks this now.
+bool PlayerDown(int player);
+// coop-downmenu: player (1 up), lying down, leaves the dungeon by their menu's way out (its close command, every copy): they get up with a
+// quarter of their life (the old free get-up's) as the fade begins, so they arrive in the town standing, not with no life.
+void DownPlayerLeaves(int player);
+// coop-downmenu test hooks, on every copy alike (coop_pause's test tick): DC_COOP_TEST_DOWN=P:T, player P goes down at press clock T (its
+// life out, the co-op down as a blow gives it); DC_COOP_TEST_DOWNTRACE=1, every 30 ticks of the press clock each present player's down,
+// lock-on (held, and the monster ready for it) and how many monsters go after it.
+void DownTestTick();
 
 // Whether owner (a hit's) is the partner's: its character, on the floor, not the controlled one's.
 bool PartnerHit(int owner);
@@ -297,6 +351,15 @@ void StepShots();
 void TakeHits();
 void BeginHurt(int hurt, int kind); // coop-p2hurt: her hurt motion from g_combat.blow
 
+// coop-p2hurt2 (p2-like-p1): retail's ambient pulse on a player's body after a hit or a revive (setUnitAmbientAnime: the model
+// lit to a colour and back over `speed` draws, `time` times; unitAmbientAnime steps it each draw). Player 1's is retail's own; each
+// other player's body runs that same routine on its own state (coop_party.cpp, UnitAmbientAnimeExchange). Draw-only, not game
+// state. Player is 1 up.
+void PulseSet(int player, float speed, float time, float red, float green, float blue);
+bool PulseStep(int player, float *colour); // the draw's ambient while it runs (true)
+void PulseRead(int player, int *flag, int *timer, float *count); // its state now (tests)
+constexpr int kReviveInvincible = 0xA0; // retail's revive (GAME_TASK_REVIVE_DONE): BtActStatus.invincible_frames 0xA0
+
 // coop-p2hurt: the partner at no life lies down (Jep's down rule): its play stops and the dead motion holds. A blow,
 // thirst and poison (Jep's 2026-10-28 playtest: P2 poisoned to 0 showed near death but was never down) all come here.
 // why names the cause in the log.
@@ -310,6 +373,9 @@ void HurtPush(float *velocity);
 // Reads pad 2's combat buttons for the tick, cross_pressed being Cross's press. Returns true when
 // the partner stands still this tick: swinging, charging, aiming or in its panel.
 bool CombatInput(const InputPadState &pad, bool cross_pressed);
+void PartnerSwapLock(bool keep); // coop-p2controls: her ring swap keeps or drops her lock-on (her own Swap Keeps Lock-On)
+// coop-lockon1118: her lock-on kept or let go each tick by player 1's rule (setTargetCursor's keep and countdown, run for her body).
+void StepHerLock();
 
 // The partner's guard for the tick (R1 held while locked on); true while it guards.
 bool StepGuard(std::uint16_t buttons);

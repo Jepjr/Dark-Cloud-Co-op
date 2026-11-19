@@ -3,7 +3,7 @@
 #include "coop/game_ns.hpp"
 
 // Debug start: a start in any town or on any floor of any dungeon, for testing. The picker opens at any time
-// with pad 1's L3+R3 (gameloop.cpp; the lockstep's pad 1 when linked, so both co-op copies open it on the same
+// with pad 1's L3+R3, while debug mode is on (game.debug_mode, or DebugMode toggled; off, L3+R3 does nothing here) (gameloop.cpp; the lockstep's pad 1 when linked, so both co-op copies open it on the same
 // tick and its choice, made with pad 1, takes both there), or at boot with --jump pick (or DC_JUMP); --jump
 // also takes "town:<0-4>" and "dungeon:<0-6>:<floor>" (floor 1 up). A debug start turns DebugMode on.
 
@@ -17,7 +17,7 @@ int DebugStartFloors(int dungeon);
 // The tests' mutation twins (DC_DEBUG_START_MUTATE, comma-separated): "local" reads the L3+R3 chord from the
 // copy's own pad 1, not the lockstep's; "floor" enters the floor next to the
 // one asked for, "town" starts the town next to the one picked, "scene" leaves the story scenes unseen,
-// "menu" leaves a join's resync at the floor menu, "save" lets saves through after a debug start.
+// "menu" leaves a join's resync at the floor menu, "ungated" opens the picker with debug mode off too (as before the gate), "save" lets saves through after a debug start.
 bool DebugStartMutated(const char *what);
 // pt1111c: DC_DEBUG_START_SEEN's game flags, set by a test start (GameTakeJumpFloor) beside its scenes; and the floor (0 up)
 // that start goes to, kept for a join's resync that comes before the floor is entered (DebugStartOnResync's read).

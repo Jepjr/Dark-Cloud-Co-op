@@ -2,7 +2,7 @@
 
 #include "coop/game_ns.hpp"
 
-// coop: mouse: a linked copy (game.netplay with game.netplay_controller_only) never takes the mouse.
+// coop: mouse: a linked copy (game.netplay) never takes the mouse.
 // Its SDL event filter drops every mouse and keyboard event, so a window that captured the cursor on
 // focus could never let it go again: the click and the Escape that release it never arrive. While
 // linked, mouse capture is off whatever input.mouse_capture says; solo and couch co-op keep it.

@@ -1,6 +1,7 @@
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
 #include "coop/coop_worlds.hpp" // coop-worlds
+#include "coop/coop_whereis.hpp" // coop-whereis
 #include "coop/coop_perf.hpp"
 #include <cstdint>
 #include "coop/netplay.hpp"
@@ -64,6 +65,7 @@
 #include "coop/coop_core.hpp"
 #include "coop/coop_inventory.hpp" // coop-inventory
 #include "coop/coop_party.hpp"
+#include "coop/coop_prompt.hpp" // coop-revive2: ReviveFreeGetUp
 #include "coop/coop_interact.hpp" // coop-floorgate: DrawCallQuestion
 #include "coop/coop_wheel.hpp"
 #include "text/captionfont.hpp"        // coop-statusicons
@@ -291,17 +293,19 @@ void CoopDrawCombatHud(int y) {
                       (spRGBA *) &kLevel[g_combat.charge_level]);
     }
 
-    // Down, the bar under the life shows how far the player's standing by has got it up.
+    // Down (coop-revive2): in debug mode the bar under the life shows how far its free get-up has got; in the base game it waits
+    // for a Revive Powder (an alive player near it sees its red mark and asks with Cross).
     if (g_partner.down > 0) {
         static const spRGBA kRevive = {0x30, 0x80, 0x40, 0x80};
         static const spRGBA kTrough = {0x10, 0x10, 0x10, 0x60};
-        int                 fill = std::min(60, g_partner.revive * 60 / std::max(1, kReviveTicks));
+        const bool          free_getup = ReviveFreeGetUp();
+        int                 fill = free_getup ? std::min(60, (kDownTicks - g_partner.down) * 60 / std::max(1, kDownTicks)) : 0;
 
         set2DSpriteC4(Vif1Packet, CRect_i_(0x33, y + 17, 60, 4), (spRGBA *) &kTrough, (spRGBA *) &kTrough, (spRGBA *) &kTrough,
                       (spRGBA *) &kTrough);
         set2DSpriteC4(Vif1Packet, CRect_i_(0x33, y + 17, fill, 4), (spRGBA *) &kRevive, (spRGBA *) &kRevive, (spRGBA *) &kRevive,
                       (spRGBA *) &kRevive);
-        dc::text::caption::DrawLine(g_partner.revive > 0 ? "reviving" : "down: P1 stand by to revive", 0x30 + 110.0f, (float) y + 34.0f, 8.0f, 1.0f,
+        dc::text::caption::DrawLine(free_getup ? "down: getting up" : "down: needs a Revive Powder", 0x30 + 110.0f, (float) y + 34.0f, 8.0f, 1.0f,
                           220.0f, style, 1.0f, 1.0f, nullptr);
         return;
     }
@@ -454,6 +458,18 @@ void CoopDrawHud(int y) {
         // coop-gatepopup: the notice too, alone on a floor (a call's answer; the other copy's news apart): it was drawn only
         // beside the partner's bar. DC_WORLDS_MUTATE=answer_link_line is the answer's twin.
         NetplayDrawNotice();
+        if (Mutated("whereis_over_hud")) {
+            coop::DrawWhereIs(); // twin: the list after the game's HUD, over it, as the rc4 playtest saw
+        }
+        // coop-keydoor1118 (Jep's 2026-11-18 playtest: P1 at the Bone Key door on cave floor 12, P2 apart in Norune: "There is a
+        // bone-shaped keyhole" and his Use Item window were never seen, his stick moved a cursor he could not see): this copy's own
+        // player's prompts and pickers (the door's message, the key picker, the swap question, the rings) are drawn from
+        // CoopDrawWheel, which was called only beside the partner's bar: alone on a floor (apart, or no partner shown) none drew
+        // while they held their player. They are that player's, not the partner's: drawn here too. DC_COOP_MUTATE=alonedraw_off
+        // (twin): not drawn alone, as before.
+        if (!Mutated("alonedraw_off")) {
+            CoopDrawWheel();
+        }
         return;
     }
 
@@ -550,6 +566,9 @@ void CoopDrawHud(int y) {
         }
 
         NetplayDrawNotice(); // "<name> has joined"
+        if (Mutated("whereis_over_hud")) {
+            coop::DrawWhereIs(); // twin: the list after the game's HUD, over it, as the rc4 playtest saw
+        }
         CoopDrawWheel();     // coop-party: pad 2's character wheel
         CoopDrawCombatHud(y + 0x27); // its charge, revive and panel, under the water row
         return;
@@ -623,6 +642,9 @@ void CoopDrawHud(int y) {
     }
     dc::text::caption::DrawLine(label, (float) x + 34.0f, (float) y + 5.0f, 9.0f, 1.0f, 80.0f, style, (float) alpha / 128.0f, 1.0f, nullptr);
     NetplayDrawNotice(); // "<name> has joined"
+    if (Mutated("whereis_over_hud")) {
+        coop::DrawWhereIs(); // twin: the list after the game's HUD, over it, as the rc4 playtest saw
+    }
     CoopDrawWheel(); // coop-party: pad 2's character wheel
     CoopDrawCombatHud(y);
 }
@@ -799,6 +821,12 @@ static void SpeedIconReport() {
 }
 
 bool CoopDrawWeaponPanel(int alpha) {
+    // coop-whereisz (Jep's rc4 playtest: "P2 here" drew over the life/quick-item panel on his screen): the first thing the
+    // dungeon's HUD pass calls, so the where-is-everyone list is drawn before every piece of the game's HUD and under all of it.
+    coop::WhereIsHudBegin();
+    if (!Mutated("whereis_over_hud")) {
+        coop::DrawWhereIs();
+    }
     g_weapon_panel_shown.drawn = false;
     g_weapon_panel_shown.icon_item = -1;
     SpeedIconReport();
@@ -868,6 +896,7 @@ void HudIconSheetEntered() {
 // controlled character's place (cur_chara, and its life where it is a stand-in); all of it is put back
 // before it returns, so nothing in the tick ever sees it.
 void CoopTopStatusInfo(int y, int selected_item, int floor) {
+    coop::WhereIsHudDrawn(); // (the test's draw order: the list was drawn before this)
     g_top_status_shown.drawn = false;
 
     if (!LocalIsPartner()) {
@@ -942,7 +971,7 @@ void CoopCharaWheelMark(int chara, float x, float y, int alpha) {
         return;
     }
     if (frame - open_seen > 60) {
-        std::printf("coop-wheel: the character wheel is open\n");
+        std::fprintf(stderr, "coop-wheel: the character wheel is open\n");
     }
     open_seen = ++frame;
     if (Mutated("wheel_marks_off")) {

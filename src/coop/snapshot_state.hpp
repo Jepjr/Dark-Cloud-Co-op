@@ -60,8 +60,32 @@ bool SnapshotTakeBytes(std::vector<unsigned char> &out, std::string &why, const 
 struct SnapshotTakeStats {
     std::size_t regions = 0, scanned = 0, kept = 0;
     double      list_ms = 0.0, copy_ms = 0.0;
+    double      scan_ms = 0.0; // cand1112c: the zero test alone (part of copy_ms), on scan_threads threads (the game thread one of them)
+    unsigned    scan_threads = 1;
+    // jointake: the arenas' write watch (SnapshotTakePrepare): the bytes tested, the arenas' bytes watched, the watch's own time,
+    // the set's layout and its kept pages' copy (on the same threads), and a test's check of the untested pages.
+    std::size_t tested = 0, watched = 0;
+    double      watch_ms = 0.0, layout_ms = 0.0, emit_ms = 0.0, check_ms = 0.0; // (layout_ms: the headers and page lists, part of emit_ms)
+    long long   check_missed = -1; // DC_SNAPSHOT_TEST_WATCH_CHECK: untested pages found not zero (-1: not checked)
+    bool        prepared = false; // the take found SnapshotTakePrepare's work done
+    double      prep_ms = 0.0;    // that work's time, on its own threads
 };
 SnapshotTakeStats SnapshotLastTake();
+// jointake: the next take's preparation, started on threads of its own (the state set's checkpoint, the stayer's game going
+// on): each arena's write watch reset and its pages tested, and room for the set. A take that finds it done tests only the
+// arena pages that were not zero then or were written since (snapshot_state.cpp). Windows only (elsewhere it does nothing).
+void SnapshotTakePrepare();
+// coop-firsttick: the taker's arenas prepared for its next apply (SnapshotApplyBytes leaves an arena page that is zero already).
+void SnapshotApplyPrepare();
+struct SnapshotApplyStats {
+    bool        prepared = false;  // a preparation done in time
+    std::size_t left_zero = 0;     // the bytes of zero pages left as they were
+};
+SnapshotApplyStats SnapshotLastApply();
+// coop-takeprep: the preparation started is done, or none is under way (the take may come; snapshot_state.cpp).
+bool SnapshotTakePrepDone();
+// coop-p2tick: a preparation made and not yet taken up (a take after it is still right: its watch names every write since).
+bool SnapshotTakePrepHeld();
 bool SnapshotApplyBytes(const unsigned char *data, std::size_t size, std::string &why, std::size_t *regions_put, std::size_t *bytes_put,
                         const std::vector<SnapshotExtra> &extras);
 

@@ -1,0 +1,330 @@
+# port/src/app/presence.cpp from Chronicle's port/src/app/presence.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/app/presence.cpp
+base port/src/app/presence.cpp
+from 816f34c60ef2fc8640e9cd96adb47ad5bc0b6755
+to 8d5a4283e7c707b35402770ce08b3d37403ab22d
+@@ -1,161 +1,163
+- 58e9e0336caee2a3
+- e3b0c44298fc1c14
+- 699aa9b04b985250
+- 56bbebcfafb1d618
+- 75b3b4aaa4e59fcc
+- d3e40941e4948441
+- e3b0c44298fc1c14
+- 2cd6253553c4698e
+- f59ee42453081361
+- af0dbca2f4b49352
+- 154a0d70671d0776
+- 89b0d43860da7e40
+- 0414cf252d0ca439
+- e3b0c44298fc1c14
+- 5fb6b03e349f569c
+- e3b0c44298fc1c14
+- f295b016cec6eee8
+- 6798c9eb8d22b86b
+- e3b0c44298fc1c14
+- 54a9260f25582e84
+- e3b0c44298fc1c14
+- 0f0b9be04e0d4629
+- 586282c20d2dbc57
+- 5447b4fe007240e6
+- df3982fd61017359
+- e3b0c44298fc1c14
+- 99f59f01b4e7e316
+- 2dcfd94f9d646ae3
+- fdf8e9e09cdc5b20
+- d216655425a446ee
+- b51b8e0621f88afa
+- f8cf1e707a90d49d
+- 26f62688d0017242
+- df3982fd61017359
+- e3b0c44298fc1c14
+- d30e9819ab9fa754
+- fdea545462073454
+- b0e8c4ed91313952
+- e44658cfa2640bb0
+- ba3087d0fabdf106
+- cf249413f93c8629
+- 85dac46b3f863730
+- 08730160f3511702
+- df3982fd61017359
+- e3b0c44298fc1c14
+- f253b37abcc7b86d
+- 6c7a4b0e1f3d7fec
+- 0a40137d7fefe261
+- 852e9ddf9d5c678b
+- 5715ce5ab857f25b
+- 96546164b58ef6df
+- df3982fd61017359
+- e3b0c44298fc1c14
+- 88313b702cd78598
+- e58472201c75b22a
+- 1ab391c0b9272e94
+- 9bdbaa7ec5d0d0d5
+- b2271ae487e2c0fa
+- 8e3b383c3d633b22
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 640153fb3994c6db
+- bd58f5ab23eda62d
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 4a92752bf33214f8
+- 44436a9dd604099b
+- 3ab02d2aa7565284
+- 54f782cd10bcdd43
+- 642680f9c3b4dd15
+- 3ca0e4d1535452ac
+- 29740251d426823e
+- b19faab9f48040b1
+- b63dfc51f517571a
+- 28d86778615f6af4
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 3b65fb373b75b606
+- d15c7e9a1ca043b3
+- e3b0c44298fc1c14
+- 790c3db664d020d7
+- 06277eabdc899621
+- 53b39dc14cec77e7
+- e3b0c44298fc1c14
+- 0fdd034175cd9c06
+- e3b0c44298fc1c14
+- 8cb7ff1febbc6c0f
+- e6aafebb6b6dd0a3
+- 03eda2710013e5e1
+- e94be14bc888d5db
+- 4b63c2447bf7a4f4
+- 86afdf70a95436e8
+- 93f1119fd53f76db
+- 714f1e97f1f0cec4
+- 5b38098946d41292
+- 7c2a955f1db948ae
+- 8447d65ac72655c5
+- 7b4e27fbc9f4ad39
+- 06b92d62d1a833ec
+- 0d668bf737805f90
+- 86afdf70a95436e8
+- 640274b254859068
+- 2a44168318e224e1
+- 1cd171f5e18478e0
+- 6477fdce052acefb
+- 2b09f4a455791686
+- 86afdf70a95436e8
+- c88305862a8d3093
+- 794e691af2f7af0c
+- 5063ab5eec2b5fa5
+- 86afdf70a95436e8
+- 142fd1cf46631410
+- 66a1d0240057e19d
+- 86afdf70a95436e8
+- 04295d6d86cf12bb
+- 2a44168318e224e1
+- 278782ddbf69b6bf
+- 1a8c8f98736bce98
+- 0d7d2bab19dfc94b
+- a34b7e004c4f6054
+- b19faab9f48040b1
+- 009c667cb6104bc2
+- 28d86778615f6af4
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 0b329d1404979e84
+- b7aaff728fa2a0e6
+- cf500df9bfa9d065
+- c623a13a07ca5115
+- 9c0ea26f40f52d07
+- dbd594ce1022b475
+- 0ad79ca811925271
+- 9668bf2a8f79ec25
+- 3617448e4294e909
+- b19faab9f48040b1
+- 4db5ea8a8ef990da
+- 28d86778615f6af4
+- 68cf2d98ac33f53e
+- c036fb5f5f906ff2
+- cd89533709b31081
+- 088447b970a56038
+- 78df098081650990
+- e7f1066cee2316ae
+- fc980530961e841f
+- 81a373c06f2ae96c
+- 0f085b1059d3e945
+- 1d4991194d756ed3
+- d8023729a38ddd10
+- 28d86778615f6af4
+- 1d793a10a39abbaf
+- 1f511f85d00f4316
+- 36f74274b4f83afa
+- 3598581b353a8d2a
+- 28d86778615f6af4
+- 8906db12a164157a
+- 2fd4b67ad829399f
+- 5e3760b1c010cc74
+- 28d86778615f6af4
+- d10b36aa74a59bcf
+- e3b0c44298fc1c14
+- 0e9c7603a2298f3f
++#include "app/presence.hpp"
++#include "coop/coop_members.hpp" // coop-memberstage4
++
++#include <array>
++#include <format>
++#include <string>
++#include <utility>
++
++#include "dun/gameloop.hpp"
++#include "editground.hpp"
++#include "editmapscript.hpp"
++#include "itemdata.hpp"
++#include "main.hpp"
++#include "savedata.hpp"
++
++namespace dc::app {
++
++using namespace dc::game;
++using namespace dc::platform;
++
++namespace {
++
++struct Character {
++    const char *name;
++    const char *image;
++};
++
++constexpr std::array kCharacters = {
++    Character{.name = "Toan",   .image = "toan"  },
++    Character{.name = "Xiao",   .image = "xiao"  },
++    Character{.name = "Goro",   .image = "goro"  },
++    Character{.name = "Ruby",   .image = "ruby"  },
++    Character{.name = "Ungaga", .image = "ungaga"},
++    Character{.name = "Osmond", .image = "osmond"},
++};
++
++constexpr std::array<const char *, DUNGEON_COUNT> kDungeons = {
++    "Divine Beast Cave",
++    "Wise Owl Forest",
++    "Shipwreck",
++    "Sun and Moon Temple",
++    "Moon Sea",
++    "Gallery of Time",
++    "Demon Shaft",
++};
++
++constexpr std::array<const char *, TOWN_COUNT> kTowns = {
++    "Norune Village",
++    "Matataki Village",
++    "Queens",
++    "Muska Lacka",
++    "Yellow Drops",
++};
++
++DiscordActivity Playing(int chara, std::string state) {
++    const Character &character = kCharacters[chara >= CHARA_TOAN && chara <= CHARA_OSMOND ? chara : CHARA_TOAN];
++    return {.details = std::format("Playing as {}", character.name),
++            .state = std::move(state),
++            .large_image = character.image,
++            .large_text = character.name};
++}
++
++DiscordActivity Away(std::string details) {
++    return {.details = std::move(details), .state = {}, .large_image = "dark_cloud", .large_text = "Dark Cloud"};
++}
++
++bool Georama(int edit_mode) {
++    switch (edit_mode) {
++        case ED_MODE_GEORAMA:
++        case ED_MODE_GEORAMA_MENU_INIT:
++        case ED_MODE_GEORAMA_MENU:
++        case ED_MODE_RETURN_MENU_GEORAMA:
++            return true;
++        default:
++            return false;
++    }
++}
++
++// PresenceTick calls an activity must stay unchanged before it is sent, so brief transitions are not published.
++constexpr int kSettleTicks = 25;
++
++DiscordActivity g_shown;
++DiscordActivity g_pending;
++int             g_pending_ticks = 0;
++
++} // namespace
++
++DiscordActivity PresenceDescribe(const PresenceState &state) {
++    switch (state.mode) {
++        case GAME_MODE_DUNGEON: {
++            if (state.dungeon < 0 || state.dungeon >= DUNGEON_COUNT) {
++                return Playing(state.chara, "In a dungeon");
++            }
++            std::string where = kDungeons[state.dungeon];
++            if (state.choosing_floor) {
++                where += " · Choosing a floor";
++            } else if (state.floor >= 0 && state.dungeon == DUNGEON_GALLERY_OF_TIME) {
++                where += std::format(" · {}{} Years Ago", state.back_floor ? "Back Floor, " : "",
++                                     BtGetFloorLevel(state.floor));
++            } else if (state.floor >= 0) {
++                where += std::format(" · {}Floor {}", state.back_floor ? "Back " : "", state.floor + 1);
++            }
++            return Playing(state.chara, std::move(where));
++        }
++        case GAME_MODE_EDIT: {
++            if (state.map_no < 0 || state.map_no >= TOWN_COUNT) {
++                return Playing(state.chara, "Out in the world");
++            }
++            const char *town = kTowns[state.map_no];
++            if (Georama(state.edit_mode)) {
++                return Playing(state.chara, std::format("Rebuilding {}", town));
++            }
++            if (state.edit_mode == ED_MODE_FISHING) {
++                return Playing(state.chara, std::format("Fishing in {}", town));
++            }
++            return Playing(state.chara, town);
++        }
++        case GAME_MODE_MENU:
++            return Away("In the developer menu");
++        case GAME_MODE_OPENING:
++            return Away("Watching the opening");
++        default:
++            return Away("At the title screen");
++    }
++}
++
++void PresenceTick() {
++    switch (mode) {
++        case GAME_MODE_LOADER:
++        case GAME_MODE_SAVE:
++        case GAME_MODE_UNUSED_4:
++        case GAME_MODE_UNUSED_6:
++        case GAME_MODE_UNUSED_8:
++        case GAME_MODE_UNUSED_12:
++            return;
++        default:
++            break;
++    }
++    PresenceState state;
++    state.mode = mode;
++    state.map_no = MapNo;
++    state.edit_mode = GameMode;
++    state.dungeon = selectMapNo;
++    state.back_floor = BtUraDongeon != 0;
++    state.choosing_floor = BtGameModeFlag == BT_GAME_MODE_ENTRANCE_MENU;
++    if (SaveData != nullptr) {
++        CDngStatusData *status = SaveData->GetDngStatus();
++        state.floor = status->cur_floor;
++        // Jep (co-op), coop-memberstage4: this screen's player's own member, not the game's player (player 1's on every copy together).
++        state.chara = coop::OwnBodyChara(status->cur_chara);
++    }
++    DiscordActivity activity = PresenceDescribe(state);
++    if (activity != g_pending) {
++        g_pending = std::move(activity);
++        g_pending_ticks = 0;
++    }
++    if (++g_pending_ticks >= kSettleTicks && g_pending != g_shown) {
++        g_shown = g_pending;
++        DiscordSetActivity(g_shown);
++    }
++}
++
++} // namespace dc::app

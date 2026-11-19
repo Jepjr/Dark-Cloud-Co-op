@@ -7,8 +7,8 @@
 //    after; and the same around a local menu's own scope (CoopPartsWritesBegin/End: every local menu's step, open and draw, its
 //    pokes back by then, on its owner's copy alone). A byte that changed in a menu's scope is a write to the shared world from
 //    one copy, the class behind most menu desyncs. A draw's run on every copy, so its lines are a census, not a fault. One line
-//    per scope kind, caller and global: "writeguard: menu|draw +<caller's RVA> wrote <global>+0x<offset> ...". The row checks the
-//    menu lines against qa\local-writes-allow.txt (t-triangle-menu -WriteGuard, lib\Waste.ps1 Get-LocalWriteStrays).
+//    per scope kind, caller and global: "writeguard: menu|draw +<caller's RVA> wrote <global>+0x<offset> ...". A test checks the
+//    menu lines against debug\test\local-writes-allow.txt (dcq's run.local_writes(); tests\test_sync.py's menu tour, coop-tripwires).
 // 2. The census (with a dir). Every N link ticks (default 240) both copies write every state-set global's and every outside
 //    global's hash, plus the bytes of those of 512 bytes or fewer, to <dir>\census-p<player>-<tick>.txt: what differs between two
 //    copies in lockstep on one tick.
@@ -27,6 +27,8 @@
 
 #include "coop/coop.hpp"
 #include "coop/coop_camera.hpp" // coop-guard: DrawRngHeld
+#include "coop/netplay.hpp" // coop-tripwires2: NetplayPartnerLinked
+#include "coop/coop_core.hpp" // coop-tripwires2: Mutated
 #include "platform/paths.hpp"
 
 #ifdef _WIN32
@@ -202,6 +204,12 @@ void WriteGuardLeave(int kind) {
     if (scope.depth == 0 || --scope.depth != 0) {
         return;
     }
+    // coop-tripwires2: a menu's scope is judged only while linked: alone (the other copy gone, a catch-up's replay) there is no other
+    // copy to part from, and a lockstep command applies at once, inside the scope (the floor tour's end: player 1's copy stopped
+    // first, her menu's melt landed in her step). DC_COOP_MUTATE=guard_unlinked (twin): judged alone too, as before.
+    if (kind == kGuardMenu && !NetplayPartnerLinked() && !Mutated("guard_unlinked")) {
+        return;
+    }
     const std::uintptr_t base = ImageAt();
     const std::uintptr_t caller = scope.site != nullptr ? (std::uintptr_t) scope.site : (std::uintptr_t) scope.caller - base; // (the dedupe's key)
 
@@ -291,6 +299,26 @@ void WriteGuardTick(long long tick, int player, bool lockstep) {
             }
         }
         out << std::dec << '\n';
+    }
+    // coop-drawwrite: DC_QA_CENSUS_FULL=<name>,<name>...: those globals' whole bytes as well, one raw file each
+    // (census-p<player>-<tick>-<name>.bin), so two copies' can be compared byte by byte and the bytes named by field.
+    static const char *full = std::getenv("DC_QA_CENSUS_FULL");
+
+    if (full != nullptr) {
+        const std::string names = std::string(",") + full + ",";
+
+        for (const GuardRegion &region : g_guard.regions) {
+            const std::size_t colon = region.name.rfind("::");
+            const std::string leaf = colon == std::string::npos ? region.name : region.name.substr(colon + 2);
+
+            if (names.find("," + leaf + ",") == std::string::npos) {
+                continue;
+            }
+            const std::string bin = g_guard.dir + "/census-p" + std::to_string(player) + "-" + std::to_string(tick) + "-" + leaf + ".bin";
+            std::ofstream     raw(PathsFromUtf8(bin.c_str()), std::ios::binary);
+
+            raw.write((const char *) (base + region.offset), (std::streamsize) region.size);
+        }
     }
 }
 

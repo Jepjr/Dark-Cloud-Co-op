@@ -37,6 +37,12 @@ void CoopGeoramaResetForSession();
 // both copies, after the town's own mode step: her Select opens or closes it, and while it is open her editor steps.
 // CoopP2Building: whether it is open now. Reset with the session (CoopResetForSession).
 bool CoopP2Building();
+bool CoopGeoramaWalkerBuilds(int player); // coop-daytrans2: walker n's (1 up) own Georama open, every copy alike (the game's player's: retail's mode)
+// coop-integrate1118: the steer row's port the Georama cursor's move reads (editloop.cpp MoveEditCursor): 1 while player 2's editor is
+// in the globals (her own Georama's step), else 0. CoopP2GeoramaCameraAngle: her own Georama's view angle as this copy shows it
+// (false while it is shut): the yaw her steer row carries then.
+int  CoopGeoramaStepPort();
+bool CoopP2GeoramaCameraAngle(float *angle);
 // coop-georamabar: each town frame (one call a frame) whether it is one of the frames just after her Georama closed, while
 // the help bar her editor set may still be up.
 bool CoopP2HelpLeftFrame();
@@ -57,6 +63,7 @@ bool CoopP1GeoramaBesideHerMenu();
 void CoopPartsWritesBegin(bool collect);
 void CoopPartsWritesEnd();
 bool CoopP1PartsMenuElsewhere();
+void CoopP1PartsMenuOpenElsewhere(); // coop-016: his parts menu's opening's melt, on the other copies
 bool CoopPartsMenuLocalOpen();
 bool CoopP1PartsMenuShutHere();
 int  CoopP1PartsMenuStep();
@@ -66,7 +73,8 @@ void CoopP2GeoramaCommandHandler();
 // Around the town's mode step: a part player 1 puts down on her puts her out of it.
 void CoopGeoramaP1StepBegin();
 void CoopGeoramaLeaveVillagers(float (*at)[4]); // coop-pt1109c: as a Georama ends, retail's placement for the villagers a new part blocks
-void CoopGeoramaP1StepEnd();
+void CoopGeoramaP1StepEnd();     // (coop-georamavillagers: and the villagers walk on through the town's Georama)
+void CoopGeoramaDrawVillagers(); // coop-georamavillagers: the villagers in a Georama's frame (from CoopGeoramaDrawWalker)
 // Around the town's frame on her copy while her Georama is open: her editor in the globals for its drawing.
 // The twin's old rule (DC_COOP_MUTATE=p2georama_one_at_a_time): player 1's Select waits while her Georama is open.
 bool CoopP2GeoramaHoldsP1();

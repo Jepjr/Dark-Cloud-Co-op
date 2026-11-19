@@ -28,6 +28,7 @@ __declspec(dllimport) std::uintptr_t __stdcall socket(int family, int type, int 
 __declspec(dllimport) int __stdcall bind(std::uintptr_t socket, const void *address, int size);
 __declspec(dllimport) int __stdcall sendto(std::uintptr_t socket, const char *data, int size, int flags, const void *to, int to_size);
 __declspec(dllimport) int __stdcall recvfrom(std::uintptr_t socket, char *data, int size, int flags, void *from, int *from_size);
+__declspec(dllimport) int __stdcall WSAGetLastError(); // coop-hostquit
 __declspec(dllimport) int __stdcall ioctlsocket(std::uintptr_t socket, long command, unsigned long *argument);
 __declspec(dllimport) int __stdcall connect(std::uintptr_t socket, const void *address, int size);
 __declspec(dllimport) int __stdcall getsockname(std::uintptr_t socket, void *address, int *size);
@@ -143,6 +144,7 @@ Impair g_impair;
 // DC_NETPLAY_TEST_NAT_BLOCK=1 (test hook): every datagram but STUN's dropped as it comes, as routers that never let
 // the other side's punch in (the fallback to Steam then carries the link).
 long long g_udp_sent = 0, g_udp_heard = 0;
+long long g_udp_resets = 0; // coop-hostquit: WSAECONNRESETs read (a send found the peer's port closed)
 Address   g_udp_from{};
 // coop-pt1108s (Jep's 11-08 playtest: "port forward open (proven)" on any datagram): a datagram proves the port open only from an
 // address this socket never sent to (a reply to our own punch or Hello comes through the hole we made). g_udp_fresh counts those,
@@ -421,6 +423,13 @@ bool NetSocketQueue(int &pending_bytes, int &rate) {
     return g_peer_steam != 0 && NetSteamQueue(g_peer_steam, pending_bytes, rate);
 }
 
+// coop-hostquit: netplay_socket.hpp.
+int NetSocketPeerTransport(long long &udp_resets, long long &udp_heard) {
+    udp_resets = g_udp_resets;
+    udp_heard = g_udp_heard;
+    return g_peer_steam != 0 ? NetSteamSessionState(g_peer_steam) : -2;
+}
+
 bool NetSocketSteamLine(char *line, std::size_t size) {
     return g_peer_steam != 0 && NetSteamLine(g_peer_steam, line, size);
 }
@@ -588,6 +597,14 @@ int NetSocketReceive(void *data, std::size_t size) {
     int got = (int) recvfrom(g_socket, (char *) data, (int) size, 0, (void *) &g_from, &from_size);
 #else
     int got = (int) recvfrom(g_socket, (char *) data, size, 0, reinterpret_cast<sockaddr *>(&g_from), &from_size);
+#endif
+#if defined(_WIN32)
+    // coop-hostquit: the system's word that a datagram this socket sent found no one listening at its port (ICMP port
+    // unreachable, WSAECONNRESET 10054): the peer's game is gone from that address. Counted; the next read goes on.
+    if (got < 0 && WSAGetLastError() == 10054) {
+        g_udp_resets++;
+        continue;
+    }
 #endif
     if (got > 0 && g_stun_state != 0 && g_from.address == g_stun_server.address && TakeStun((const unsigned char *) data, got)) {
         continue; // the STUN server's answer, not the other copy's

@@ -1,0 +1,13 @@
+# port/src/game/hitvalue.cpp from Chronicle's port/src/game/hitvalue.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/hitvalue.cpp
+base port/src/game/hitvalue.cpp
+from 51e0338d3301c618809110873fc292534f2c721b
+to 20211746dd6cc631b1331b83cf47140177860eee
+@@ -20,0 +21,2
++bool CoopHitValueCulled(const void *slot, const float *world); // coop-farcull (port/src/coop/coop_party.cpp)
++
+@@ -254,0 +257,4
++    if (::CoopHitValueCulled(this, world)) { // coop-farcull: not past the floor's own draw on this screen
++        return;
++    }
++

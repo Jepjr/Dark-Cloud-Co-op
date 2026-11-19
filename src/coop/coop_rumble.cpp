@@ -1,6 +1,8 @@
 #include "coop/game_ns.hpp"
 #include "coop/coop_rumble.hpp"
 
+#include "coop/coop_actor.hpp"
+#include "coop/coop_audio.hpp"
 #include "coop/coop_core.hpp"
 #include "coop/coop_worlds.hpp"
 #include "coop/netplay.hpp"
@@ -18,9 +20,11 @@ struct Motors {
     int           timer[2] = {0, 0};
 };
 
-Motors g_partner;          // the partner's hits' motors (both copies alike; not game state)
-int    g_device = -1;      // the controller this copy last shook, -1 none
-bool   g_shaking = false;  // whether it shakes now (the log's starts and stops)
+Motors        g_motors[coop::kMaxPlayers]; // each player's own motors but the walker's game pad (every copy alike; not game state)
+int           g_device = -1;               // the controller this copy last shook, -1 none
+unsigned char g_said[2] = {0, 0};          // what the log last said was sent (and to which controller)
+int           g_said_device = -2;
+int           g_said_owner = 0;
 
 // The player the game's own walker (Chara, CharaMain) is on this copy: player 1 together; apart, this copy's player;
 // while her town event runs on the game's pad (CoopWorldsP2Drives), player 2.
@@ -32,42 +36,62 @@ int WalkerPlayer(int local) {
     return CoopWorldsApart() ? local : 1;
 }
 
-void Say(int local, int device, bool shaking, const char *whose, int owner) {
-    if (shaking == g_shaking && (device == g_device || !shaking)) {
+// The send's line, when what goes out (or where) changes.
+void Say(int local, int device, int owner, const unsigned char *sent) {
+    if (sent[0] == g_said[0] && sent[1] == g_said[1] && device == g_said_device && owner == g_said_owner) {
         return;
     }
-
-    if (shaking) {
-        std::fprintf(stderr, "coop-rumble: copy of p%d: controller %d starts (%s motors, player %d's) at link tick %lld\n", local, device + 1,
-                     whose, owner, (long long) NetplayLinkTick());
-    } else {
-        std::fprintf(stderr, "coop-rumble: copy of p%d: controller %d stops at link tick %lld\n", local, device + 1, (long long) NetplayLinkTick());
-    }
+    g_said[0] = sent[0];
+    g_said[1] = sent[1];
+    g_said_device = device;
+    g_said_owner = owner;
+    std::fprintf(stderr, "coop-rumble: copy of p%d: player %d's motors (%d %d) to controller %d at link tick %lld\n", local, owner, sent[0], sent[1],
+                 device + 1, (long long) NetplayLinkTick());
 }
 
 } // namespace
 
-void CoopRumblePartner(int motor, int intensity, int duration) {
-    if (motor < 0 || motor >= 2 || duration < 0 || duration > 1200) {
+void CoopRumbleFor(int player, int motor, int intensity, int duration) {
+    if (player < 1 || player > coop::kMaxPlayers || motor < 0 || motor >= 2 || duration < 0 || duration > 1200) {
         return;
     }
 
-    g_partner.timer[motor] = duration;
-    g_partner.level[motor] = (unsigned char) (motor == 0 ? intensity != 0 : intensity);
+    Motors &m = g_motors[player - 1];
+
+    m.timer[motor] = duration;
+    m.level[motor] = (unsigned char) (motor == 0 ? intensity != 0 : intensity);
+}
+
+void CoopRumbleNote(bool game, int motor, int intensity, int duration) {
+    const int owner = coop::SoundOwnerPlayer();
+
+    if (!game || owner == 0 || coop::Mutated("rumble_owner_off")) {
+        return;
+    }
+
+    CoopRumbleFor(owner, motor, intensity, duration);
+}
+
+void CoopRumbleStopAll() {
+    for (Motors &m : g_motors) {
+        m = Motors{};
+    }
 }
 
 void CoopRumbleSend(const unsigned char *game, int enabled) {
-    // The partner's timers, as CGamePad::Step steps the game's.
-    for (int motor = 0; motor < 2; motor++) {
-        if (!enabled) {
-            g_partner.level[motor] = 0;
-        }
+    // Every player's timers, as CGamePad::Step steps the game's.
+    for (Motors &m : g_motors) {
+        for (int motor = 0; motor < 2; motor++) {
+            if (!enabled) {
+                m.level[motor] = 0;
+            }
 
-        if (g_partner.timer[motor] > 0) {
-            g_partner.timer[motor]--;
-        } else {
-            g_partner.timer[motor] = 0;
-            g_partner.level[motor] = 0;
+            if (m.timer[motor] > 0) {
+                m.timer[motor]--;
+            } else {
+                m.timer[motor] = 0;
+                m.level[motor] = 0;
+            }
         }
     }
 
@@ -82,29 +106,33 @@ void CoopRumbleSend(const unsigned char *game, int enabled) {
     const int walker = WalkerPlayer(local);
 
     if (coop::Mutated("rumble_retail")) {
-        const bool shaking = game[0] != 0 || game[1] != 0;
-
-        Say(local, 0, shaking, "the game's", walker);
+        Say(local, 0, walker, game);
         g_device = 0;
-        g_shaking = shaking;
         scePadSetActDirect(0, 0, const_cast<unsigned char *>(game));
         return;
     }
 
-    // This copy's player's motors: the game's when it plays the walker, else the partner's (the other player's body).
-    const bool           own_walker = walker == local;
-    const unsigned char *mine = own_walker ? game : g_partner.level;
-    const int            device = NetplayOwnPad();
-    const bool           shaking = device >= 0 && (mine[0] != 0 || mine[1] != 0);
+    // This copy's player's motors: the game's when it plays the walker, and their own from here (their own steps' and hits'),
+    // the stronger of the two. Never another player's.
+    const bool    own_walker = walker == local;
+    const Motors &own = g_motors[(local - 1) % coop::kMaxPlayers];
+    unsigned char mine[2];
+
+    for (int motor = 0; motor < 2; motor++) {
+        const unsigned char from_game = own_walker && enabled ? game[motor] : 0;
+
+        mine[motor] = from_game > own.level[motor] ? from_game : own.level[motor];
+    }
+
+    const int device = NetplayOwnPad();
 
     // A controller this copy no longer plays is let go (never another player's: only the one this copy shook).
     if (g_device >= 0 && g_device != device) {
         InputSetRumble(g_device, {});
     }
 
-    Say(local, device, shaking, own_walker ? "the game's" : "the partner's", own_walker ? walker : 3 - walker);
+    Say(local, device, local, mine);
     g_device = device;
-    g_shaking = shaking;
 
     if (device >= 0) {
         InputSetRumble(device, {mine[0] != 0, mine[1]});

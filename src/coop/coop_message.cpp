@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "dngmessageman.hpp"
+#include "dungeonparts.hpp" // coop-notices: the treasure boxes' item lists
 #include "itemdata.hpp" // coop-pt1111b: ITEM_WEAPON_START
 #include "sysmes.hpp"
 #include "dun/gameloop.hpp" // coop-pt1111h: UserStatus
@@ -37,6 +38,7 @@ struct Tagged {
     int          owner = 1;
     int          item = -1;
     bool         scene = false; // coop-pt1109e: set in a scene both copies watch: its text is on both screens, whoever's Cross closes it
+    bool         notice = false; // coop-notices: another player's find shown here apart, timed: it holds nobody's walk
     bool         fades = false; // coop-closetitem: an Atla's name, shown to the other player for its time (kOthersTicks)
     std::int64_t set = 0;       //   the link tick it was set on
 };
@@ -65,30 +67,51 @@ int GameOwner() {
 }
 
 // coop-pt1111b (Jep 11-11, item 20: "the other player sees a pickup notice ONLY for important items; ordinary drops/consumables
-// show on the picker's screen only"): the kinds of thing whose "acquired" the other players see too. One list, to change as Jep
-// decides (his default, 11-11: Atla finds, key items with the party's Keys tab, story items, weapons). An Atla find is not an item:
-// its notice is OthersAtlaNotice's, asked by its kind alone.
-enum class Notice { AtlaFind, KeyItem, StoryItem, Weapon, Ordinary };
-constexpr Notice kOthersSee[] = {Notice::AtlaFind, Notice::KeyItem, Notice::StoryItem, Notice::Weapon};
+// show on the picker's screen only"): the kinds of thing whose "acquired" the other players see too. An Atla find is not an item:
+// its notice is OthersAtlaNotice's (together) or ApartNoticeHeard's (apart), asked by its kind alone.
+// coop-notices (Jep 11-18: "Georama should broadcast to everyone since obtaining Georama can be useful to everyone. Things like
+// getting the map should only broadcast to the people on the same floor"): each kind has an audience. Together the pair is always on
+// one floor, so a same-floor kind and an everyone kind both reach every player there; apart (another floor, a town, a floor's back
+// half) an everyone kind reaches every player wherever they are, a same-floor kind only a player on the find's dungeon floor (its
+// front or back half). One table, to change as Jep decides (debug\notes\pickup-notices.md).
+enum class Notice { AtlaFind, FloorItem, KeyItem, StoryItem, Weapon, Ordinary };
+
+Audience AudienceOfKind(Notice kind) {
+    switch (kind) {
+        case Notice::AtlaFind:
+            return Audience::Everyone;
+        case Notice::FloorItem: // the floor's map, magic crystal and keys: of use on that floor alone
+            // DC_COOP_MUTATE=floor_items_everyone (twin): every player, wherever they are.
+            return Mutated("floor_items_everyone") ? Audience::Everyone : Audience::SameFloor;
+        case Notice::KeyItem:   // (Jep 11-18: the story and quest items that last past the floor, every player's)
+        case Notice::StoryItem: //   (one a treasure box can hold again is not one of them: PickupAudience)
+            // DC_COOP_MUTATE=story_items_floor (twin): their floor's alone, as before.
+            return Mutated("story_items_floor") ? Audience::SameFloor : Audience::Everyone;
+        case Notice::Weapon: // (Jep 11-18: another player may care outside the finder's floor)
+            // DC_COOP_MUTATE=weapons_floor (twin): their floor's alone, as before.
+            return Mutated("weapons_floor") ? Audience::SameFloor : Audience::Everyone;
+        case Notice::Ordinary:
+            break;
+    }
+    return Audience::Picker;
+}
 
 bool OthersSee(Notice kind) {
-    for (Notice seen : kOthersSee) {
-        if (seen == kind) {
-            return true;
-        }
-    }
-    return false;
+    return AudienceOfKind(kind) != Audience::Picker;
 }
 
 Notice NoticeOf(int item) {
     if (item >= ITEM_WEAPON_START) {
         return Notice::Weapon;
     }
-    if (FloorKeyItem(item) || RingItem(item)) {
-        return Notice::KeyItem; // a floor's key, a gate key, the party's Keys tab
+    if (item == ITEM_MAP || item == ITEM_MAGICAL_CRYSTAL || FloorKeyItem(item)) {
+        return Notice::FloorItem; // a floor's map, crystal, door key or gate key: that floor's alone
+    }
+    if (RingItem(item)) {
+        return Notice::KeyItem; // the party's Keys tab
     }
     if (SharedItem(item)) {
-        return Notice::StoryItem; // the quest and story items, the map and crystal
+        return Notice::StoryItem; // the quest and story items
     }
     return Notice::Ordinary;
 }
@@ -182,6 +205,149 @@ void OthersAtlaNotice(int opener, int map_no, int atla) {
                  (long long) NetplayLinkTick());
 }
 
+// coop-notices: an item a dungeon's treasure boxes can hold (dungeonparts.cpp's ItemPutListTbl*, every floor's lists): found again and
+// again, so not a one-time story find (the Crystal Eyeball is in one; Dran's Feather, in every one, is sorted an ordinary item anyway). Rows per list as
+// dungeonparts.cpp's kItemPutListCounts (the first normal list has four).
+bool BoxListItem(int item) {
+    constexpr int kRows[14] = {4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3};
+
+    for (int list = 0; list < 14; list++) {
+        const ITEM_PUT_SET *rows = ItemPutListPtr[list];
+
+        for (int row = 0; rows != nullptr && row < kRows[list] && rows[row].floor != -1; row++) {
+            for (int i = 0; i < 128 && rows[row].item[i] != -1; i++) {
+                if (rows[row].item[i] == item) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+Audience PickupAudience(int item) {
+    if (item <= 0) {
+        return Audience::Picker;
+    }
+    const Notice kind = NoticeOf(item);
+
+    // (a story or key item a box can hold again: its floor's, as before Jep's 11-18 call). DC_COOP_MUTATE=box_items_everyone (twin):
+    // every player's, as a one-time story find.
+    if ((kind == Notice::StoryItem || kind == Notice::KeyItem) && BoxListItem(item) && !Mutated("box_items_everyone")) {
+        return Audience::SameFloor;
+    }
+    return AudienceOfKind(kind);
+}
+
+Audience AtlaAudience() {
+    return AudienceOfKind(Notice::AtlaFind);
+}
+
+// coop-notices (Jep 11-18: an Atla find to every player wherever they are, apart included; own-ui-rule: never over the game's UI;
+// merge-no-wait: nobody waits): apart, another player's find came as a line of our own at the screen's top left ("Player 2 found an
+// Atla", NetplayShowNotice), drawn over whatever was up (a menu, a talk, the game's own messages) and never naming the part. Now it
+// is the game's own "acquired" in this player's own message window, as the others' notice is together (OthersAtlaNotice), once this
+// player is free, for an item drop's time, never waiting for a key. DC_COOP_MUTATE=apart_atla_hud (twin): the top-left line, as before.
+namespace {
+struct ApartFind {
+    int finder = 0;
+    int kind = -1; // 0 an Atla, 1 an item
+    int map_no = -1;
+    int id = -1;
+    int waited = 0; // ticks queued before this player was free
+};
+ApartFind g_apart_finds[8];
+int       g_apart_find_count = 0;
+bool      g_noticing = false; // showing another player's find: not this player's own to tell
+int       g_apart_up = -1;    // the message the last one showed, while it is up
+int       g_apart_up_ticks = 0; // its ticks up
+bool      g_apart_up_key = false; // it waited for a key at any tick up
+} // namespace
+
+void ApartNoticeHeard(int finder, int kind, int map_no, int id) {
+    const int local = NetplayRole(); // (the session's player number: the link's local player reads 0 apart)
+
+    if (kind == 0 && Mutated("apart_atla_hud")) {
+        char line[64];
+
+        std::snprintf(line, sizeof line, "%s found an Atla", NetplayShownName(finder).c_str()); // (main's line, naming the player)
+        NetplayShowNotice(line);
+        std::fprintf(stderr, "coop-mes: p%d hears player %d's Atla %d apart: the top-left line (apart_atla_hud)\n", local, finder, id);
+        return;
+    }
+    if (g_apart_find_count >= 8) {
+        std::fprintf(stderr, "coop-mes: p%d hears player %d's %s %d apart: eight already waiting, not shown\n", local, finder, kind == 0 ? "Atla" : "item", id);
+        return;
+    }
+    g_apart_finds[g_apart_find_count++] = ApartFind{finder, kind, map_no, id, 0};
+    std::fprintf(stderr, "coop-mes: p%d hears player %d's %s %d apart: shown when this player is free\n", local, finder, kind == 0 ? "Atla" : "item", id);
+}
+
+void ApartNoticeTick(bool free) {
+    // (DC_COOP_DEBUG: the notice's end on this copy, its ticks up and whether it waited for a key. The game's own end line,
+    // SystemMesCross's, is for a message with an owner on a linked copy: apart it never runs.)
+    if (g_apart_up > 0) {
+        if (SystemMesNo == g_apart_up) {
+            g_apart_up_ticks++;
+            g_apart_up_key = g_apart_up_key || SystemMesInputKey != 0;
+        } else {
+            static const bool debug = CoopDebug();
+
+            if (debug) {
+                std::fprintf(stderr, "coop-mes: p%d's find notice (message %d) went after %d ticks, it waited for a key %d\n", NetplayRole(), g_apart_up,
+                             g_apart_up_ticks, g_apart_up_key ? 1 : 0);
+            }
+            g_apart_up = -1;
+        }
+    }
+    if (g_apart_find_count == 0) {
+        return;
+    }
+    const int local = NetplayRole(); // (as above)
+
+    if (!CoopWorldsApart()) {
+        std::fprintf(stderr, "coop-mes: p%d together again: %d find notice(s) heard apart not shown\n", local, g_apart_find_count);
+        g_apart_find_count = 0;
+        return;
+    }
+    // (free, and no message of this player's own up: the game's window holds one message)
+    if (!free || SystemMesNo > 0) {
+        for (int i = 0; i < g_apart_find_count; i++) {
+            g_apart_finds[i].waited++;
+        }
+        return;
+    }
+
+    const ApartFind find = g_apart_finds[0];
+
+    for (int i = 1; i < g_apart_find_count; i++) {
+        g_apart_finds[i - 1] = g_apart_finds[i];
+    }
+    g_apart_find_count--;
+    g_noticing = true;
+    if (find.kind == 0) {
+        AtraGetMes(find.map_no, find.id, kNoticeTicks);
+    } else {
+        ItemGetMes(find.id, -1, kNoticeTicks, 0);
+    }
+    g_noticing = false;
+    SystemMesInputKey = 0; // (AtraGetMes always waits for a key: this one goes in its time)
+    g_apart_up = SystemMesNo;
+    g_apart_up_ticks = 0;
+    g_apart_up_key = false;
+    g_sys.notice = !Mutated("notice_holds_walk"); // DC_COOP_MUTATE=notice_holds_walk (twin): the town's walk held by it, as any message
+    std::fprintf(stderr, "coop-mes: p%d shows player %d's %s %d (apart) as message %d in its own window for %d ticks, after %d ticks waiting to be free\n", local,
+                 find.finder, find.kind == 0 ? "Atla" : "item", find.id, SystemMesNo, kNoticeTicks, find.waited);
+}
+
+int ApartNoticeUp() {
+    return g_apart_up > 0 && SystemMesNo == g_apart_up ? g_apart_up : -1;
+}
+
+bool SystemMesNotice() {
+    return SystemMesNo > 0 && g_sys.notice && g_sys.message == SystemMesNo;
+}
+
 void SystemMesSet(int message_no) {
     int owner = g_next_by != 0 ? g_next_by : GameOwner();
 
@@ -198,10 +364,16 @@ void SystemMesSet(int message_no) {
     g_sys.item = g_next_item;
     g_sys.owner = KeyMessage(g_next_item) ? 0 : owner;
     g_sys.fades = message_no == kAtlaNameMes;
+    g_sys.notice = false; // coop-notices: ApartNoticeTick marks its own after
     // coop-pt1109e (Jep's 11-09 playtest, 1l: the Stone Breaker's "acquired" on one screen of a scene both watched): a scene is one show, so what it says is said on both.
     // DC_COOP_MUTATE=scene_mes_owner (twin): its owner's screen alone.
     g_sys.scene = message_no > 0 && CoopTownSceneWatchedTogether();
     g_sys.set = NetplayLinkTick();
+    // coop-notices: apart, a find of this copy's player that others hear of goes out on the progress channel (an Atla goes by its own
+    // progress, kWhatAtla). Never another player's find shown here.
+    if (message_no > 0 && g_next_item > 0 && !g_noticing && CoopWorldsApart() && PickupAudience(g_next_item) != Audience::Picker) {
+        CoopWorldsPickupNotice(g_next_item, PickupAudience(g_next_item) == Audience::Everyone);
+    }
     g_next_item = -1;
 
     if (message_no > 0 && SystemMesInputKey != 0 && (g_sys.owner == 0 ? GameOwner() : g_sys.owner) == 2) {

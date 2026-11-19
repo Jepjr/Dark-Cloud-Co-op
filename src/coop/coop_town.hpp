@@ -22,6 +22,11 @@ class CTexAnimeData;
 
 // Steps the partner. The town's walking mode calls it each tick after MainMode.
 void CoopTownStep();
+// coop-fishing3: each step of retail's own fishing mode (a copy fishing apart, or alone): the players' fishing records take its
+// catches as they land (FishPoolsStep), as the walk's step does.
+void CoopTownFishingModeStep();
+float CoopTownPartnerCameraAngle(); // coop-wave3: the yaw her town stick is read against now (her own camera; the steer row's)
+void CoopTownEventStep(); // coop-cavewalk: editloop's event mode, after the event's step: the drawn player follows the game's on an apart copy
 void CoopEventSlotsStep(); // coop-eventslots (coop_eventslots.cpp): once a town walk tick
 int  CoopEventSlotsStepPlayer();    // coop-eventslots: the player (1 up) whose parked slot's event steps now, 0 none
 bool CoopEventSlotParked(int index); // coop-eventslots: player index (0 up) has an own event running in its parked slot
@@ -37,6 +42,7 @@ bool                  CoopTownEventBagSwap(int index);
 void                  CoopTownOwnEventEndNow();
 int                   CoopTownPlayerTextureBlock(int index);
 dc::game::CCameraFollow *CoopTownPlayerFollowCamera(int index);
+void                  CoopTownFishWalk(int index, dc::game::CCharacter *body, dc::game::CCameraFollow *camera); // coop-xiaofish: her walk with the rod
 bool                  CoopTownPlayerBodyAgain(int index);
 void                  CoopTownWalkersForTest();
 bool                  CoopTownPlayerEventIsMap(int event_no);
@@ -49,11 +55,17 @@ void                  CoopEventSlotsApplied();
 // coop-eventslots: each player's own fishing (coop_eventslots.cpp), and the hooks editloop calls
 bool  CoopEventKeepsVillagers();
 bool  CoopFishingOn(int index);
+int   CoopFishingStateOf(int index); // coop-faces: their fishing step (chara_fishing) as their last step left it, -1 not fishing
 bool  CoopFishingHere();
+bool  CoopFishingHidesLiveHelp(); // coop-fishhud: the game player's fishing help bar, left out on the other copies
+void  CoopEventClipDrawBegin(); // coop-dayhouses: this copy's screen's frame with its player's own clip point
+void  CoopEventClipDrawEnd();
 void  CoopFishingWalkIn();
 void  CoopFishingWalkOut();
 void  CoopFishingStepOthers();
 void  CoopFishingDraw(int pass);
+std::uint32_t CoopPondHash(); // coop-pondfish: the town's ponds (every fish, its hook, line and refill), for the sync check
+void          CoopPondTick(); // coop-pondfish: each town tick, every copy: the town's ponds made as it loads, then stepped
 bool  CoopEventFishingStarts();
 void *CoopEventSlotsLiveInitIn(void *work, int player, int event_no);
 void  CoopEventSlotsLiveInitOut(bool started);
@@ -115,6 +127,7 @@ CCameraFollow *CoopTownHerTalkCamera();
 // opt8: the villagers' walk holds only while every player talks or is in a menu (Jep 11-09); each villager stops for the nearest player.
 bool  CoopTownVillagersHeld();
 float CoopTownNearestPlayer(const float *villager, float from_game_player);
+bool  CoopTownBodyStands(int player, float *pos); // coop-georamavillagers: player (1 up)'s body standing in the town, not while they build
 // opt8 (Jep 11-09: one talk path for every player): each player's talk from a slot of its own (coop_town.cpp).
 bool CoopTalkOn(int index);
 bool CoopTalkAny();
@@ -131,6 +144,8 @@ void CoopTalkCameraTrace(float angle, float distance, bool ends);
 bool CoopTalkShadowsOff(); // opt8: retail's talk mode's no-shadow look on a talker's own screen
 void CoopTalkHudHiddenEnd(bool hidden);
 unsigned char *CoopTownTalksBytes(std::size_t *size); // the snapshot extra
+void           CoopTownTalkKeepBefore(); // coop-wave2: this copy's own talk window across a state set's apply (its window is its own)
+void           CoopTownTalkKeepAfter();
 void        CoopTownHerTalkStepIn(CCamera *room);
 void        CoopTownHerTalkStepOut();
 int         CoopTownTestTalkShop(int result); // coop-p1parts: test hook DC_COOP_TEST_HERTALK_SHOP
@@ -171,6 +186,11 @@ bool CoopTownHidesToan();
 
 // coop-worlds: player 2's copy apart draws her member in Toan's place this tick (Toan is then not drawn).
 bool CoopTownSkinsToan();
+// coop-warplight: her member stands in Toan's place and is drawn in his place in the order too: before the game's characters
+// (editloop's EdDrawCharacter: the villagers and an event's characters), as retail draws Toan.
+bool CoopTownSkinDrawsFirst();
+// coop-warplight: the game's characters of this frame are drawn (the order trace).
+void CoopTownCharactersDrawn();
 // coop-p2skin: the same skin inside a building (EditInLoop calls it each tick, before its frame): player 2's copy apart
 // there draws her member in Toan's place too. Clears the town partner otherwise (no partner indoors).
 void CoopTownInteriorStep();
@@ -188,6 +208,8 @@ namespace coop {
 // coop-worlds: Toan stands where the partner stood (player 2's copy staying in town); its place in out.
 // False when the partner was not in town.
 bool TownPlacePlayerAtPartner(float *out);
+// coop-warplight: player leaver's town menu way out seen from a copy that stays: retail's escape.chr light around their body here.
+void TownWarpLightStart(int leaver);
 
 // coop-town, player 2's own Georama: its camera starts from hers (TownCamPose); she leaves it where its cursor
 // stood (TownPlacePartner).
@@ -196,6 +218,14 @@ void TownPlacePartner(const float *at);
 
 // Session reset (CoopResetForSession): nobody loaded; the next town tick loads the partner again.
 void TownResetForSession();
+
+// towncrash: a floor's partner load writes its model over `model`, the arena the town body's model was loaded into too: the
+// town body is unloaded as retail unloads a character (CCharacter::Initialize), so no town step or draw walks its old frames.
+void TownModelArenaTaken(const unsigned char *model);
+// towncrash: after a floor's partner load, says so if the town body still has frames in the model that load wrote over.
+void TownBodyAfterFloorLoad();
+// towncrash test (zone op townbody): on a floor, the town body loaded as `chara` as a Norune visit leaves it; the floor partner loads again.
+bool TownBodyOnFloorForTest(int chara);
 
 // coop-housemerge: the pair merged inside a building (both copies, the merge's tick): player 2's character goes into the
 // room afresh on her next step there (PlaceInRoom, from Toan's pose), so both copies have her where they both would.
@@ -215,6 +245,9 @@ bool TownMemberPickable(int chara);
 
 // The member player 2 plays (her pick, if that member has joined, else Xiao): coop-p2entry, her copy apart on a floor.
 int TownPlayerMember();
+
+// coop-memberstage4 (item 5): the body budget measure on a dungeon floor (DC_COOP_TEST_BODY_BUDGET=1, once); called each floor tick.
+void CoopBodyBudgetFloorTest();
 
 } // namespace coop
 
@@ -266,6 +299,7 @@ int  CoopTownDrawnMode(int mode);
 bool CoopTownHidesPause();
 // Whether this copy leaves out the Georama's help bar (the other player's Georama).
 bool CoopTownHidesBuildHelp();
+void CoopSysMesOthersDraw(); // coop-eventslots (coop_eventslots.cpp): the others' own messages, drawn by EdSystemMesDraw
 // coop-uiflash test hook (DC_COOP_TEST_UNBUILD_APART=T): player 2's copy apart closes the game's Georama T ticks after it opened.
 // DC_COOP_TEST_UNBUILD_APART_FROM_PEER=1: T ticks after it hears player 1's copy in her town instead (coop-localplay).
 void CoopTownTestApartUnbuild();
@@ -290,6 +324,8 @@ CCamera *CoopTownSkyCamera(CCamera *camera);
 bool CoopTownIndoorPose(float *pos);
 // coop-inbuild: the room walks this tick (Toan in none of its talk, event, menu, pause or door), for her own menu.
 bool CoopTownIndoorWalks();
+// coop-townally: the town (or the room) walks and nobody talks: a trade question in town steps (its answer, its cancel).
+bool CoopTownQuestionFree();
 // coop-inbuild: the room is in Toan's menu (its setting up or running) this tick.
 bool CoopTownIndoorP1Menu();
 void CoopTownIndoorMenuLeft();
@@ -301,6 +337,21 @@ int CoopTownIndoorMode();
 void CoopTownHisTalkHiddenEnd(bool hidden);
 void CoopTownClockStepBegin(); // coop-pt1108c: before the town's mode step (the clock put back after it when every player is in a menu)
 bool CoopTownDayChangeHeld();   // coop-pt1109c: someone's talking, in co-op: the day change's event waits
+bool CoopTownFadeStepped();    // coop-daytrans: the town's event fade steps once a tick on every copy (EdFadeStep), not in the draw
+bool        CoopDayTransHolds(int index);  // coop-daytrans: player index (0 up; this copy's index, apart 0 its own) watches the time of day's scene: their walk, Cross, menus held
+bool        CoopDayTransHoldsPlayer(int player); // coop-joinload: the same by player number (1 up), whatever the copy's indexes
+bool        CoopDayTransOn();              // coop-daytrans: the time of day's event runs in its world slot
+void        CoopTownVillagerWalkCounts(long long *asks, long long *let); // coop-daycrash (test trace): the villagers' walk asked, and let run
+void        CoopDayTransTownLeft(const char *by); // coop-daycrash: this copy leaves the town: the world slot's event ends first
+bool        CoopDayTransTakes();           // coop-daytrans: together outdoors: the change is the world slot's (no hold, no owe)
+void        CoopDayTransTick();            // coop-daytrans: each town tick's start outdoors, every copy
+bool        CoopDayTransView(float (*view)[4], float *eye); // coop-daytrans: this copy's watcher's frame
+void        CoopDayTransDraw();            // coop-daytrans: the scene's windows and fade (shown where its player watches)
+int         CoopTalkVillager(int k);       // coop-daytrans: the villager (EdVillager index) player k talks with, or -1
+bool        CoopTownPlayerPresent(int k);  // coop-daytrans: player k (0 up) plays in this town now
+const char *CoopTownPlayerBusy(int k);     // coop-daytrans: what player k is busy with, nullptr when free
+bool        CoopTownPlayerStandsAt(int k, float *at); // coop-storygaps: where player k's (1 up) own body stands, true when they play here
+int         CoopTownBodyPlayerNo();    // coop-storygaps: the player whose Cross starts the town's other body's events
 void CoopTownDayChangeStarted(); // coop-pt1109c: said as its event starts
 
 // coop-machotalk: the town's talks outdoors as a room's. His talk (the town's talk mode), linked and together: she walks on
@@ -320,6 +371,9 @@ void CoopTownBesideWalkCamera(bool moved); // coop-pt1111a: whether that walk mo
 void CoopTownHisWalkInHerEventIn();
 void CoopTownHisWalkInHerEventOut();
 bool CoopTownOwnEventHiddenBegin(bool windows);
+// coop-fishing3: outside event mode, the fade a player's own town event left running (its closing fade-in), drawn out of sight on
+// the other players' copies until it ends (End: CoopTownHisTalkHiddenEnd).
+bool CoopTownEventFadeLeftHiddenBegin();
 // coop-pt1106-batch: the frames a door opening together had its fade drawn out of sight on this copy, since last asked.
 int  CoopTownDoorFadeHiddenTake();
 void CoopTownTownTalkTick();
@@ -331,6 +385,11 @@ bool CoopTownDrawnEye(float *eye, float *over);
 // (and before the registry: the host's partner textures out of the texture table)
 void CoopTownSnapshotTexturesOut();
 void CoopTownSnapshotApplied();
+// jointake: her model ahead of the state set's take, the frame between its checkpoint and the take (dormant till the take);
+// a model so loaded that no take took up let go (her texture blocks emptied); the texture slots' hash (both copies say it).
+bool          CoopTownPreloadForTake(); // (true: loaded now)
+void          CoopTownPreloadDrop(const char *why);
+std::uint32_t CoopTownTextureSlotsHash();
 
 // coop-localfix: the town camera (NowCamera) eye and look now, for a desync's log (false out of town or with none).
 bool CoopTownCameraNow(float *eye, float *look);
@@ -346,10 +405,13 @@ void           CoopTownSyncApply();
 // becomes the partner where she stands, her camera the one she sees through now, and the game's player Toan where player 1's
 // copy has him (toan, yaw). False if she has no skin to become.
 bool           CoopTownBecomePartner(const float *toan, float yaw);
+void           CoopTownOwnCameraBefore(bool lands_here); // coop-housecam2: the arriver's own town camera across a merge's state set (its own screen's)
+void           CoopTownOwnCameraAfter();
 // coop-stage4 4e part 2: her own event carried through her merge, the swap due at its end on every copy (coop_town.cpp).
 unsigned char *CoopTownSwapDeferBytes(std::size_t *size);
 bool           CoopTownSwapDeferred();
 bool           CoopTownSceneWatchedTogether();
+bool           CoopTownStorySceneTogether(); // coop-storywarp: a story scene every player watches (its name entry everyone's)
 void           CoopTownSwapDefer(const float *toan, float yaw, int player);
 void           CoopTownSwapDeferTick();
 // coop-localfix2: player 2's copy waiting to join, walking as her in a town (its game started before player 1's arrived): a
@@ -366,6 +428,9 @@ int CoopTownPartnerGroundEvent();
 
 // coop-worlds: player 2's partner's position and rotation (both 4 floats), when she is in town.
 bool CoopTownPartnerPose(float *pos, float *rot);
+
+// coop-joinwarp (tests): the ground under at (her walk's), for the story yes's line.
+bool CoopTownGroundUnder(const float *at, float *ground);
 
 // coop-mergestand: where both stand on this copy now, for a resync's state (netplay.cpp TakeState, in the town mode): false
 // indoors; partner_set when the town partner is shown (her 3 floats and yaw too), else Toan's 3 floats and yaw only.

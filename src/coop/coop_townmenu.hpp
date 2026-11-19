@@ -17,6 +17,8 @@ bool CoopTownMenuRunsFor(int player);
 // other copies know it by the in-menu bit). Her closed local menu's map jump for the close command (jump + 1, 0 for none), and
 // that command applied on every copy on its link tick.
 bool CoopTownMenuRunsLocalHere(int player);
+// coop-townally: the player (1-based) whose own town menu engine steps or draws now, 0 none (retail's town menu).
+int  CoopTownMenuStepPlayer();
 int  CoopTownMenuCloseJump(int player);
 void CoopTownMenuClosedByCommand(int player, int code, long long tick);
 void CoopTownMenuQuestShopTick(); // coop-pt1111e: each tick, every copy: the open quest shop's first good, for its close's line
@@ -71,6 +73,7 @@ bool CoopTownP1MenuDrawing();
 bool CoopP2TownMenuDrawing();
 // Her own pause in the linked town (Start): she stands, her copy shows the town's pause.
 bool CoopP2TownPaused();
+bool CoopTownWalkerPaused(int player); // coop-daytrans2: walker n's (1 up) own town pause or menu, every copy alike (the game's player's: retail's)
 void CoopP2TownPauseForTest(); // coop-mergecam test hook: her pause opened now (DC_COOP_TEST_PAUSE_AT_SPLIT)
 // coop-mergecam: her pause with a merge's state set (an extra beside her town place): taken on the sender, put back on the
 // taker after the apply.
@@ -94,3 +97,7 @@ void CoopMenuLoaded();
 void CoopTownMenuClosedByLoad();
 // After the load's resync reset every module: her menu, Georama and pause as they are now (logged; the tests read it).
 void CoopTownAfterLoad();
+
+// coop-crashmenuchar: the town's menu work area (EdMenuBuffer's base, from both InitWorkBuffers): an arena block of its own, not retail's
+// span from 1.5 MB before read_buffer into it. retail is that span's start (DC_COOP_MUTATE=menuwork_readbuffer, the twin: it).
+unsigned char *CoopTownMenuWorkBuffer(unsigned char *retail);

@@ -8,7 +8,7 @@
 // a menu stands where they are and the world can still hit them ("they become able to 'cheese' fight
 // mechanics").
 //
-// With the menus on and the overlay off (game.coop_menus, not game.coop_menu_panel), on a floor under control:
+// In co-op, on a floor under control:
 //   Start toggles that player's pause. Their character stands (their pad reaches nothing), their copy draws
 //   the pause over the running world (couch: a line per paused player).
 //   The zone is the floor; player 2 counts while her character is on it (coop's partner visible).
@@ -27,11 +27,15 @@ struct PAD_STATUS;
 
 namespace coop {
 
-// The pauses are this module's (game.coop_menus on, game.coop_menu_panel off).
+// The pauses are this module's (in co-op).
 bool PauseOn();
 
 // From MenuTick (the agreed pads): Start's toggles, the downed leaving, the zone's hold.
 void PauseTick(const InputPadState &one, const InputPadState &two);
+
+// coop-pausemotion: the world held beside menus (no world tick, only its draw): the monsters' unit takes retail's paused step, so their
+// draw holds their motions as in retail's pause.
+void PauseHeldWorldStep();
 
 // Whether player 1 or 2 is in their pause.
 bool PausePlayer(int player);

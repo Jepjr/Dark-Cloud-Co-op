@@ -6,6 +6,7 @@
 
 namespace dc::game {
 class CCameraFollow;
+class CMotionModel;
 } // namespace dc::game
 
 // coop-opt7 (Jep 11-09; debug\notes\opt7-design.md): a chest's or an Atla's presentation is its opener's own. Two halves:
@@ -64,6 +65,18 @@ bool PresentEngineStance(float *turn);
 // The engine's camera while it frames this copy's view (CoopViewChoose), else null.
 CCameraFollow *PresentEngineCamera();
 
+// coop-camflash (Jep's 11-16 playtest: "when P1 goes to open a chest, it plays a frame of a different camera angle or something
+// before it starts the animation"). Retail's chest step 1 (BtGetTreasureboxSmall_Loop / Big_Loop, btitem.cpp) poses the opener
+// at the box and puts the presentation on SubCamera with `SubCamera = MainCamera__4`, but CCameraFollow's operator= copies only
+// follow, distance and height (ps2/src/camerafollow.cpp, the retail function): SubCamera's eye and look stay where its last
+// user (the floor's opening script, the last chest, a key or an Atla) left them, and step 1's tick is drawn from there. Step 2
+// then reads the effect's "cam"/"int" frames (setCameraPassData) as motionDrive posed them. ChestCameraOwe (step 1, after it
+// set the effect's frame 10): the effect posed at that frame, its clock put back, and retail's step-2 read, so the scene's first
+// drawn frame is its own camera and the next one does not move, whatever order the opener's step and motionDrive run in (player
+// 2's engine steps after motionDrive). DC_COOP_MUTATE=camflash_stale (twin): as retail, step 1's tick drawn from SubCamera's
+// last eye ("coop-camflash: ... (camflash_stale)").
+void ChestCameraOwe(CMotionModel *effect);
+
 // coop-opt7e: the Atla's light follows its opener (P2+ run P1's routines). Retail's Draw_MainUnit lights the game's player's body
 // (CharaMain) from the effect's "light01" frame while atraGetStatus; the opener's copy runs retail's Atla as its engine, so the
 // body lit is the engine's player's, any player. PresentLitPlayer: whose body is lit on this copy (0 none). PresentLight: for a
@@ -87,6 +100,21 @@ void PresentTestTick(bool held);
 // leaves this copy's own, so the engine goes on through a resync onto the opener. Unused anywhere else (nothing to keep).
 // DC_COOP_MUTATE=present_screen_lost (twin): the apply puts the set's over it. (The take's side has no twin yet: it needs a
 // real join into a presentation, left in opt7-design.md.)
+// coop-tripwires3: the opener's engine's own screen state (the box's and the Atla's flags, the message window's switch, the mini-map)
+// exchanged in for its scope, on the opener's copy while its engine runs; nothing elsewhere (coop_opener.cpp EngineScreenSwap).
+// The floor's draw (coop_camera.cpp CoopViewBegin/End) and motionDrive's presentation effects (motiondrive.cpp) hold one.
+class PresentScreenIn {
+  public:
+    PresentScreenIn();
+    ~PresentScreenIn();
+    PresentScreenIn(const PresentScreenIn &) = delete;
+    PresentScreenIn &operator=(const PresentScreenIn &) = delete;
+
+  private:
+    bool on_;
+    bool counted_;
+};
+
 class PresentSetScope {
   public:
     explicit PresentSetScope(bool take);

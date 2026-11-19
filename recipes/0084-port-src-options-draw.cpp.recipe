@@ -1,0 +1,31 @@
+# port/src/options/draw.cpp from Chronicle's port/src/options/draw.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/options/draw.cpp
+base port/src/options/draw.cpp
+from 0ccbba78d75c4e2c990d2c9267987ac739cb4d07
+to ce715a0cab94527b78fe8cfbc84224ade7d3be3a
+@@ -16,0 +17,5
++#include <cstdio>  // coop-settings
++#include <cstdlib>
++
++bool CoopOptionRowHostSet(const char *key); // coop-settings: a row the host sets for every player (port/src/coop/netplay.cpp)
++
+@@ -184,0 +190,5
++        // coop-settings: a row the host sets, on another player's copy: drawn at half its alpha, as the screen draws a tab not shown,
++        // with no arrows (its Left and Right are refused)
++        const bool host_set = row.key != nullptr && CoopOptionRowHostSet(row.key);
++        const int  row_alpha = host_set ? alpha / 2 : alpha;
++
+@@ -186,1 +196,1
+- ffedf228b0b86e4e
++        label.Draw(kLabelX, y, row_alpha);
+@@ -204,1 +214,6
+- 201c72158e5efdf0
++            val_lbl.Draw(val_center, y, row_alpha);
++            static const bool trace = std::getenv("DC_OPTIONS_TRACE") != nullptr; // coop-settings (tests): each row's draw, as numbers
++            if (trace) {
++                std::fprintf(stderr, "options: draw: row %s alpha %d of %d%s%s\n", row.key != nullptr ? row.key : "-", row_alpha, alpha,
++                             selected ? " selected" : "", host_set ? " (player 1 sets it)" : "");
++            }
+@@ -206,1 +221,1
+- 714564e1166286f9
++            if (selected && !host_set && row.action == nullptr && row.activate == nullptr) {

@@ -6,6 +6,7 @@
 // put, pad 2's member swap, and lying down and getting up.
 
 #include "collision.hpp"
+#include "dataalloc_fwd.hpp" // coop-p1body: CDataAlloc2 (LoadWeaponInto)
 #include "platform/input.hpp"
 
 namespace dc::game {
@@ -22,6 +23,8 @@ int  PickPartner();
 void PartyTestHooks(bool apply);
 void StepSwap(const InputPadState &pad);
 bool StepDown();
+// coop-downmenu: the partner, lying down, gets up with that life as she leaves the dungeon by her menu's way out (DownPlayerLeaves).
+void PartnerUpToLeave(int life);
 bool OwnLife(int chara);
 int  Life();
 void SetLife(int life);
@@ -29,15 +32,39 @@ int  MaxLife();
 void PlayMotion(int motion, int flags);
 bool HasMotion(int motion);
 // coop-pt1109b (Jep's 2026-11-09 playtest: in a long hall the walls go dark past the draw distance and the far player still draws bright over
-// the dark): whether the other player's body is beyond the distance retail draws a monster at (CheckViewLevel's clip_distance, 300, wake and
-// draw alike; 310 to go again), seen from this copy's own player. Linked copies on a floor only. DC_COOP_MUTATE=farplayer_drawn (twin): drawn
-// at any distance, as before.
+// the dark): whether the other player's body is hidden on this copy. Linked copies on a floor only. DC_COOP_MUTATE=farplayer_drawn (twin):
+// drawn at any distance, as before.
+// coop-farcull (Jep's rc1 playtest: past 300 the other player vanished in plain sight, the walls round them still drawn): hidden exactly
+// where this copy's floor hides the world there (BeyondFloorDraw), not at a monster's 300 between the players.
+// DC_COOP_MUTATE=farplayer_clip300 (twin): the 300 rule, as before.
 bool OtherBeyondClip();
+// coop-farcull: what the floor's draw (CDungeonMap::DrawMap) decided for the place: a grid floor draws a map cell (160 square, centred
+// on 160*col, 160*row) while its centre is within 160 * draw_dist_scale of the camera (the floor's VIEWLEVEL; 4, so 640, by default)
+// and not behind the camera past one cell; the darkness past it is no wall drawn there. A place is hidden when the cell it stands in was
+// not drawn on this copy's screen this frame. A floor of freely placed parts (a boss room) draws everything: never hidden.
+struct FloorCull {
+    float from_camera = 0.0f; // flat, from this copy's shown camera
+    int   cell = -1;
+    float cell_dist = 0.0f;   // the cell's centre from the camera, as DrawMap measures it
+    bool  cell_drawn = false;
+    bool  has_part = false;   // the cell holds a map part (one with none is never drawn: by the distance)
+    float reach = 0.0f;       // 160 * draw_dist_scale
+};
+bool BeyondFloorDraw(const float *at, FloorCull *out = nullptr);
+// coop-entrance2 (DCO-45): where the game's player is drawn (PlayerDrawnPlace: a scene's node carrying him leaves CharaMain.pos at
+// (0 0 0)), for this copy's own uses of "where is he"; DC_COOP_MUTATE=farplayer_main_pos (twin): CharaMain.pos, as before.
+void PlayerDrawnAt(float *out);
+// coop-entrance9: the drawn lead's cloths hanging on him (all: his cloths), for x-entrance-forest's check.
+int DrawnLeadClothsOn(int *all);
 void KeepApart(CCPoly *polys, int count);
 // Puts the partner at the player's right hand. Every call logs "coop: P2 placed beside P1 (reason)";
 // the default reason is Walk's (fallen off the floor, or the shared camera's leash).
 void PlaceBesidePlayer(const char *reason = "walk: fell or leash");
 void LoadWeapon(int chara, CCharacter *body = nullptr);
+// coop-p1body: the same load into any body's own set (pack buffer, arena rewound to weapon_mark, weapon model, texture block); loaded says
+// whether it is in holder's hand; whose names the body in the log line ("partner", "player 1's body").
+void LoadWeaponInto(int chara, CCharacter *holder, u_int *pack, CDataAlloc2<1> &arena, CCharacter *&weapon, int weapon_mark, int block, bool &loaded,
+                    const char *whose);
 bool ReloadWeapon();
 void GrantStandInWeapon(int chara);
 // coop-fx51b (tests): DC_COOP_TEST_STANDIN_REGRANT=1, after a state fixture was put back (netplay.cpp's StateFileFrameStart).
@@ -90,6 +117,12 @@ void PresenceTrace(const char *where, bool drawn);
 bool CoopPartySave(const std::filesystem::path &save_directory);
 void CoopPartyLoad(const std::filesystem::path &save_directory);
 void CoopPartyDelete(const std::filesystem::path &save_directory);
+// save6: the file itself (no host check), for the slot's self-test; Read gives each player's pick (index p: player p+1, -1
+// none) and returns the file's layout (-1 no file, 0 not one, 2 an older release's, 3 up this layout and later ones).
+bool CoopPartyFileWrite(const std::filesystem::path &save_directory);
+int  CoopPartyFileRead(const std::filesystem::path &save_directory, int picks[6]);
+int  CoopPartyMorePick(int p);              // player p+1's kept pick (p 2 up; -1 none): nobody plays them yet
+void CoopPartyMorePickSet(int p, int pick); // (the self-test's)
 void CoopPartyNewGame();
 // coop-lobby: the lobby's locked members (member numbers, -1 none) made the game's; a new game's held until its party is made.
 void CoopPartyLobbyPicks(int host, int guest, bool new_game);

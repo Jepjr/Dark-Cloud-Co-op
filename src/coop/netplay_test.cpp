@@ -1,4 +1,5 @@
 #include "coop/game_ns.hpp"
+#include "coop/coop_camera.hpp" // coop-entrwin (EntrancePlanTest)
 #include "coop/netplay_test.hpp"
 
 #include <SDL3/SDL.h>
@@ -19,6 +20,7 @@
 #include "coop/input_anchors.hpp" // coop-gatekey52: hook events
 #include "coop/netplay.hpp"
 #include "coop/netplay_cmd.hpp" // coop-localmenu
+#include "coop/coop_prompt.hpp" // coop-mergeload: PromptChangePlayer
 #include "coop/netplay_hello.hpp"  // coop-joinfix: NetplayTestSettingFlip
 #include "camera.hpp"
 #include "character.hpp"
@@ -51,7 +53,7 @@ bool g_to_gate = false;
 
 // Test hook (DC_NETPLAY_FAKE_KEYS=FROM,TO): real SDL key-down events for D (the left stick's right) from link
 // tick FROM and its key-up at TO, as a hand on a keyboard would, so the link's keyboard filter decides
-// whether they reach the game (game.netplay_keyboard).
+// whether they reach the game (they do: the keyboard plays this copy's pad).
 void PushFakeKeys(std::int64_t tick) {
     static const char *spec = TestEnv("DC_NETPLAY_FAKE_KEYS");
 
@@ -137,12 +139,17 @@ void PushFakeInput(std::int64_t tick) {
 
 // Test hook (DC_NETPLAY_PERTURB=N, on one copy): at tick N this copy alone draws a random number and
 // takes a point of the player.s life, as a desync would, to show the checksum catch it.
+// coop-integrate1118: once, at this copy's first lockstep tick from N on (not tick N alone). A joiner whose link began after
+// tick N (the soak's join area: player 1 plays alone a seeded while first) never stepped tick N, or stepped it only in its
+// catch-up's replay, where the state set taken next overwrote the change: the soak canary of seed 20261121900 passed blind.
 void Perturb(std::int64_t tick) {
     static const char *at = TestEnv("DC_NETPLAY_PERTURB");
+    static bool        done = false;
 
-    if (at == nullptr || tick != std::atoll(at)) {
+    if (at == nullptr || done || tick < std::atoll(at) || NetplayCatchUnderWay()) {
         return;
     }
+    done = true;
 
     rand();
 
@@ -200,7 +207,7 @@ std::vector<std::int64_t> TickList(const char *name) {
 // Whether the next of a test variable's ticks is due: tick has reached it and the player is on the floor
 // under control. Each tick in the list is used once.
 bool TickDue(const std::vector<std::int64_t> &ticks, std::size_t &next, std::int64_t tick) {
-    if (next >= ticks.size() || tick < ticks[next] || gameTask != GAME_TASK_PLAY || UserStatus == nullptr) {
+    if (next >= ticks.size() || tick < ticks[next] || !CoopPlainPlay() || UserStatus == nullptr) {
         return false;
     }
 
@@ -256,7 +263,7 @@ std::vector<HookEntry> HookList(const char *name) {
 // late (DC_NETPLAY_MUTATE=floor_tick's twin on a load's or an event's entry, which has no tick to take early): due a tick after
 // it came, so the copies part as the tick entry's twin parts them.
 bool HookDue(const char *name, const std::vector<HookEntry> &entries, std::size_t &next, std::int64_t tick, bool late = false) {
-    if (next >= entries.size() || gameTask != GAME_TASK_PLAY || UserStatus == nullptr) {
+    if (next >= entries.size() || !CoopPlainPlay() || UserStatus == nullptr) {
         return false;
     }
 
@@ -336,12 +343,12 @@ void FloorHooks(std::int64_t tick) {
     }
 
     // The gate's script done: on the next floor, under control.
-    if (g_driving && !g_to_gate && gameTask == GAME_TASK_PLAY) {
+    if (g_driving && !g_to_gate && CoopPlainPlay()) {
         g_driving = false;
     }
 
     // The key's script done and the party back on the floor: the gate.
-    if (g_to_gate && gameTask == GAME_TASK_PLAY) {
+    if (g_to_gate && CoopPlainPlay()) {
         g_to_gate = false;
 
         if (CDungeonEventData *gate = FindEvent("out")) {
@@ -683,6 +690,28 @@ void TestCommands(std::int64_t tick) {
     }
 }
 
+// coop-mergeload test hook (DC_COOP_TEST_P1_SWAP_IN_CATCHUP=N:M, test_his_swap_while_she_catches_up_stays_in_sync): N link ticks
+// after the catch-up's state set (the host's take, her apply: the same tick), out of any event, player 1 changes to member M as the
+// party menu's change does, on both copies on one link tick (the host in its own ticks, her copy in its replay of them), as a player
+// who switches character while the other is joining him.
+void NetplayTestSwapInCatchup(std::int64_t tick) {
+    static const char *swap = TestEnv("DC_COOP_TEST_P1_SWAP_IN_CATCHUP");
+    static bool        done = false;
+    int                after = 0, member = 0;
+
+    if (swap == nullptr || done || std::sscanf(swap, "%d:%d", &after, &member) != 2 || !NetplayCatchUnderWay()) {
+        return;
+    }
+    const std::int64_t at = NetplayCatchupStateTick();
+
+    if (at >= 0 && tick >= at + after && BtEventMode == 0) {
+        done = true;
+        std::fprintf(stderr, "coop: test: player 1 changes to member %d at link tick %lld, %lld after the catch-up's state set, its catch-up under way\n",
+                     member, (long long) tick, (long long) (tick - at));
+        coop::PromptChangePlayer(member);
+    }
+}
+
 void NetplayTestTick(std::int64_t tick) {
     TestCommands(tick);
     PoisonAt(tick);
@@ -737,7 +766,7 @@ void NetplayUnitTick() {
     static const char *const unit = TestEnv("DC_UNIT");
     static bool              done = false;
 
-    if (done || unit == nullptr || std::strcmp(unit, "checksum") != 0 || gameTask != GAME_TASK_PLAY || NowDngMap == nullptr || BtAllDrawFlag == 0 ||
+    if (done || unit == nullptr || std::strcmp(unit, "checksum") != 0 || !CoopPlainPlay() || NowDngMap == nullptr || BtAllDrawFlag == 0 ||
         SaveData == nullptr || UserStatus == nullptr || (TestEnv("DC_STATE_LOAD_AT") != nullptr && !NetplayStateFileLoaded())) {
         return;
     }
@@ -814,10 +843,24 @@ bool NetplayTestNoDrawUploads() {
     return !skip;
 }
 
+// coop-owed1112 (the no-draw audit): a copy that renders no tick still asks the join's frame hold (NetplayHoldsJoinFrame), as a
+// drawn one does each tick, so its counts, its "held its frame" line and the show_join twin are there for the rows that read
+// them. DC_NETPLAY_MUTATE=skip_nodraw_hold (twin, n-join-partner~nodrawhold): not asked, as before.
+bool NetplayTestNoDrawHold() {
+    return !NetplayMutated("skip_nodraw_hold");
+}
+
 bool NetplayTestNoDraw() {
     static const bool on = TestEnvOn("DC_QA_NO_DRAW");
     static bool       said = false;
 
+    // coop-entrwin test hook (DC_COOP_TEST_ENTRANCE_PLAN=1, x-entrwin-plan): the entrance window's plan table on the first frame,
+    // then the copy ends (no game needed).
+    if (static const bool plan = TestEnvOn("DC_COOP_TEST_ENTRANCE_PLAN"); plan) {
+        coop::EntrancePlanTest();
+        std::fflush(nullptr);
+        std::_Exit(0);
+    }
     if (on && !said) {
         said = true;
         std::fprintf(stderr, "netplay: test: no draw (DC_QA_NO_DRAW): ticks are not rendered; a capture renders its tick\n");

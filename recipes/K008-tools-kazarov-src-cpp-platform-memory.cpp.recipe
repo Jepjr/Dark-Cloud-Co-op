@@ -2,8 +2,13 @@
 target tools/kazarov/src/cpp/platform/memory.cpp
 base tools/kazarov/src/cpp/platform/memory.cpp
 from cdd28a1cd2650fd423c065c9d0856c77f777fb18
-to 7a007217a775a5775a716a0e9b46ffbeac2df9ed
-@@ -51,1 +51,7
+to dc7146833d452bd2ad032ac11069b8e80ff83379
+@@ -29,1 +29,3
+- d1a63e0420d13bac
++    // jointake (Jep): write-watched, so a co-op state set's take tests only the pages written since the block was mapped
++    // (GetWriteWatch; never reset, so the game's writes cost nothing more): the rest still read as zero.
++    return VirtualAlloc(at, size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
+@@ -51,1 +53,7
 - 8fae3cff33297beb
 +namespace {
 +
@@ -12,14 +17,14 @@ to 7a007217a775a5775a716a0e9b46ffbeac2df9ed
 +// however large the block, so two copies that carved one owner at different sizes (the title's MotionData at 500000
 +// quads, a dungeon's at 10000, the larger kept) still hold it at one address and a snapshot of the one fits the other.
 +ArenaMemory Finish(void *map, std::size_t map_size, std::size_t capacity, std::size_t lead, bool at_start = false) {
-@@ -53,6 +58,0
+@@ -53,6 +60,0
 - 3459ec22af468c2a
 - 92af22ed85e1e227
 - e2d5b8f18ec954b7
 - ac846a27500a0210
 - 0e50a3bbadafa202
 - 28d86778615f6af4
-@@ -68,1 +68,31
+@@ -68,1 +70,31
 - 46b6979518f45760
 +    return {bytes_map, map_size, at_start ? bytes_map + lead : bytes_map + map_size - page - capacity, capacity, lead};
 +}

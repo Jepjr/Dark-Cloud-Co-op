@@ -57,5 +57,13 @@ void CamTestView(CCameraFollow *drawn, CCameraFollow *shown);
 enum CoopSound { kCoopSoundThrow, kCoopSoundHit, kCoopSoundHurt };
 void CoopPartnerSound(int se_no, float *position, CoopSound kind);
 
+// coop-camflash: MGEndFrame, each tick's drawn view (the next tick interpolates from it) and whether the renderer cut into it.
+// DC_COOP_TEST_CAMFLASH=1 logs it (x-camflash); otherwise nothing.
+void CamFlashTick(const float *view, bool camera_cut, bool list_cut);
+// coop-camflash2: GameRenderTick, what the window shows of the tick it renders (1 its picture, 0 nothing new, 2 black) and the
+// meshes its list draws, for CamFlashTick's line of that tick (MGEndFrame calls it next). CamFlashOn: DC_COOP_TEST_CAMFLASH.
+bool CamFlashOn();
+void CamFlashShown(int shown, int meshes);
+
 // coop-dungeonp2: CRandomItem::Draw, for each item it draws (the drops check counts its own).
 void CamTestDropDrawn(const float *pos);

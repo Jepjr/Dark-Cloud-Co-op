@@ -1,0 +1,67 @@
+# port/src/options/screen.cpp from Chronicle's port/src/options/screen.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/options/screen.cpp
+base port/src/options/screen.cpp
+from 2f381d6fd3a3a977df51b11e98bf954707cac1ff
+to 9aa526ea451d65eebea82b0b007a62aa8da95f4b
+@@ -3,0 +4,2
++#include <cstdio> // Jep (co-op)
++#include <cstdlib> // coop-settings
+@@ -31,0 +34,8
++#include "ui/menu_pointer.hpp" // Jep (co-op)
++
++// coop-optionspad: the controller this copy's player plays (port/src/coop/netplay.cpp), not the first one opened.
++InputPadState NetplayScreenPad();
++
++// coop-settings (Jep's option C, 11-17): a row the host sets for every player (Time Speed, Message Speed) on another player's copy,
++// linked: refused here, dimmed (draw.cpp), its help line says so (port/src/coop/netplay.cpp).
++bool CoopOptionRowHostSet(const char *key);
+@@ -49,0 +60,1
++constexpr int kHostSetHelp = 994; // coop-settings
+@@ -67,0 +79,1
++constexpr const char *kHostSetText = "Player 1 sets this\nin co-op."; // coop-settings
+@@ -134,0 +147,5
++    if (row.key != nullptr && CoopOptionRowHostSet(row.key)) { // coop-settings: the game's refusal, the value as it is
++        std::fprintf(stderr, "options: %s is player 1's in co-op: refused, kept %d\n", row.key, row.get(config));
+=243 e1c7812b444fc2b3
++        return;
++    }
+@@ -163,0 +181,2
++    } else if (const Row *row = CurrentRow(); row != nullptr && row->key != nullptr && CoopOptionRowHostSet(row->key)) {
++        message = kHostSetHelp; // coop-settings
+@@ -174,0 +194,4
++        static const bool trace = std::getenv("DC_OPTIONS_TRACE") != nullptr; // coop-settings (tests): the help line shown
++        if (trace) {
++            std::fprintf(stderr, "options: help: message %d%s\n", message, message == kHostSetHelp ? " (player 1 sets this in co-op)" : "");
++        }
+@@ -189,2 +212,2
+- b97035b422e439dd
+- 2b26ff1bc6d137a0
++    const InputPadState pad = NetplayScreenPad(); // coop-optionspad: this copy's player's own, not InputGetPad(0)
++    std::uint16_t       held = pad.buttons;
+@@ -309,1 +332,10
+- 47b19364d6698afc
++    // Jep (co-op): with the mouse not captured (one-client copies never capture it) the hand goes under the system
++    // cursor, as the menus' MenuPointer does (2026-10-21); counting the motion from the selected row left it far from the
++    // cursor Jep saw (v0.1.1, 2560x1440 window, 2026-11-12). A captured mouse counts the motion as before.
++    float cursor_x = 0.0f;
++    float cursor_y = 0.0f;
++    if ((moved || clicked != 0) && dc::ui::MenuPointerCursorUnits(cursor_x, cursor_y)) {
+~311 b46a4dbf9e38c465|        |
++        g_screen.pointer_x = std::clamp(cursor_x, 0.0f, 639.0f);
++        g_screen.pointer_y = std::clamp(cursor_y, 0.0f, 479.0f);
++    } else if (moved || clicked != 0) {
+@@ -373,0 +406,3
++            if (over_row != g_screen.row) {
++                std::fprintf(stderr, "options: pointer on row %d of page %d at %.0f,%.0f\n", over_row, g_screen.page, x, y); // Jep (co-op)
++            }
+@@ -439,0 +475,6
+=406 70f6e7390e0a45ac
++        static const bool trace = std::getenv("DC_OPTIONS_TRACE") != nullptr; // coop-optionspad (tests): the cursor, as numbers
++        if (trace) {
++            std::fprintf(stderr, "options: cursor on page %d row %d (pad %04x)\n", g_screen.page, g_screen.row, (unsigned) held);
++        }
++    }
+@@ -501,0 +543,1
++    help.Set(kHostSetHelp, LocalizeText("options.help.host_sets", kHostSetText)); // coop-settings
+@@ -703,0 +746,1
++        {"options.help.host_sets",         kHostSetText      }, // coop-settings

@@ -184,7 +184,7 @@ void Pickup() {
         case 0:
             // In play first: the floor's arrival (coop-arrivalfull: it plays out on the floor) moves both players from where
             // the floor put them, so finds dropped at her feet before it lay ~1800 away from her afterwards.
-            if (gameTask != GAME_TASK_PLAY || FloorIntro()) {
+            if (!CoopPlainPlay() || FloorIntro()) {
                 g_bot.t = 0;
             }
 
@@ -353,7 +353,7 @@ void SendTest() {
             // In free play first (coop-keytab, red on main 879dda87): the floor's opening scene (script 100, BtEventMode on)
             // holds her walk, and with it her pad panel, so a send from it before the scene ends did nothing ("panel page 0").
             // DC_COOP_MUTATE=invsend_scene (twin): the bot starts inside the scene, as before.
-            if ((gameTask != GAME_TASK_PLAY || FloorIntro() || BtEventMode != 0) && !Mutated("invsend_scene")) {
+            if ((!CoopPlainPlay() || FloorIntro() || BtEventMode != 0) && !Mutated("invsend_scene")) {
                 g_bot.t = 0;
             }
 
@@ -729,7 +729,7 @@ void InventoryTestTick() {
                     NetplayLocalPlayer(), test, TestEnvOr("DC_COOP_MUTATE", "none"));
 
         if (!OwnBags()) {
-            Fail("mode: game.coop_own_bags is off");
+            Fail("mode: not in co-op (no bag of her own)");
             return;
         }
     }

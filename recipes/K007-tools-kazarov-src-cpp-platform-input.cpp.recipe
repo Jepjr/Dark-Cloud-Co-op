@@ -2,7 +2,7 @@
 target tools/kazarov/src/cpp/platform/input.cpp
 base tools/kazarov/src/cpp/platform/input.cpp
 from 3562cb805aa1467ddffcc83b4c86ebbeb9f8cf26
-to ed778dc7603940dc997906f3dcfbdf7202e7ac3e
+to 270bf0446b1dfd8c8a471a873776a4eded00b932
 @@ -185,1 +185,2
 - c525849e06ec3311
 +// used, and false again once any open gamepad is (not only the first: a player may play controller 2),
@@ -10,3 +10,42 @@ to ed778dc7603940dc997906f3dcfbdf7202e7ac3e
 @@ -1081,1 +1082,1
 - f62c9d807e951f64
 +        if (g_slots[pad].gamepad != nullptr && (state.buttons != 0 || Deflected(state.left_x) || Deflected(state.left_y) || Deflected(state.right_x) || Deflected(state.right_y))) {
+@@ -1332,0 +1334,34
++// Jep (co-op): InputSetPadsMerged.
++bool g_pads_merged = false;
++
++void InputSetPadsMerged(bool on) { g_pads_merged = on; }
++
++bool InputPadsMerged() { return g_pads_merged; }
++
++namespace {
++
++int Push(std::uint8_t x, std::uint8_t y) {
++    return std::max(std::abs(int(x) - int(kInputAxisCentre)), std::abs(int(y) - int(kInputAxisCentre)));
++}
++
++// Jep (co-op): pad 0's view with the other open controllers added (InputSetPadsMerged).
++void MergeOtherPads(InputPadState &view) {
++    for (int other = 1; other < kInputPadCount; ++other) {
++        if (g_slots[other].gamepad == nullptr || g_override[other]) {
++            continue;
++        }
++        const InputPadState &pad = g_device[other];
++        view.buttons |= pad.buttons;
++        if (Push(pad.left_x, pad.left_y) > Push(view.left_x, view.left_y)) {
++            view.left_x = view.look_left_x = pad.left_x;
++            view.left_y = view.look_left_y = pad.left_y;
++        }
++        if (Push(pad.right_x, pad.right_y) > Push(view.right_x, view.right_y)) {
++            view.right_x = pad.right_x;
++            view.right_y = pad.right_y;
++        }
++    }
++}
++
++} // namespace
++
+@@ -1338,0 +1374,3
++    if (pad == 0 && g_pads_merged) {
++        MergeOtherPads(g_view[0]);
++    }

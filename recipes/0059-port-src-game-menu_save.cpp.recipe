@@ -1,0 +1,139 @@
+# port/src/game/menu_save.cpp from Chronicle's port/src/game/menu_save.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/menu_save.cpp
+base port/src/game/menu_save.cpp
+from 0ad9b3a4b7d2038a06468b503e0e1c2e071c2070
+to f3d3cd8766fb5a2749fbd02713af893e96e7d17c
+@@ -2,0 +3,1
++#include <cstdio>
+@@ -36,0 +38,2
++#include "coop/coop_fullmenu.hpp" // coop-menubuffers: the Use Item window's pak
++#include "coop/coop_itemwindow.hpp" // coop-keylook: a co-op player's own window drawn by EventItemSelectDraw
+@@ -956,0 +960,8
+=1565 5c19ecd9ea55999f
++
++// coop-worldkeys (port/src/coop/coop_inventory.cpp, global scope)
++dc::game::ITEM_PACK *CoopEventItemPack(dc::game::ITEM_PACK *pack);
++void                 CoopEventItemTaken(int slot);
++
+=38 7a2f03f556986854
++
+@@ -957,0 +969,2
++    pack = CoopEventItemPack(pack); // coop-worldkeys: the pack with the world's key ring in it
++
+@@ -1003,1 +1016,1
+- f4fb8970749af1ea
++    auto *buffer = coop::EventItemSelectBuffer(reinterpret_cast<u_long128 *>(read_buffer)); // coop-menubuffers: a block of its own, past the town's reads
+@@ -1038,2 +1051,2
+- cd5930b0bdd0e784
+- 3cfd296637019af1
++// coop-keylook: the still's brightness behind the window, split out (EventItemDrawAs dims a live world by it).
++int EventItemBackdrop() {
+@@ -1056,0 +1070,6
++    return alpha;
++}
++
+=1038 cd5930b0bdd0e784
++    ReadBG();
++    int alpha = EventItemBackdrop();
+@@ -1263,0 +1283,1
++                            CoopEventItemTaken(pack_index); // coop-worldkeys: out of the pack or ring it came from
+@@ -1453,0 +1474,9
++    if (static const bool trace = [] {
++            const char *value = std::getenv("DC_EVENT_ITEM_TRACE");
++            return value != nullptr && value[0] == '1';
++        }();
++        trace) { // coop-keylook: each frame's numbers (a draw-mode test reads them)
++        std::fprintf(stderr, "event item: alpha %d board %d,%d rows %d row_y %d frame %d,%d hand %.2f,%.2f bar %.2f cursor %d scroll %d\n", alpha, (int) left,
++                     (int) top, EventItemPackPt->num / 5, EventItemMoveY, x + 0x10, y - 9, MiniCur[0], MiniCur[1], EventBarY, MiniMenu.cursor,
++                     (int) MiniMenu.scroll_row);
++    }
+@@ -1564,0 +1594,89
++// coop-keylook (Jep: a duplicated menu must look like the original): a co-op player's own Use Item window drawn by the game's own
++// EventItemSelectDraw: the window's globals are hers for the call (MiniMenu, its places, eases, pictures, pack and message window),
++// then back. Drawing only, on the copy that shows it.
++void EventItemDrawStart(EventItemDraw &draw, float x, float y, ITEM_PACK *pack, int event_items, int cursor) {
++    draw.menu = MINI_MENU_INFO{};
++    draw.menu.fish_mode = 0;
++    draw.menu.lang = GetMenuLangFlag();
++    draw.menu.event_item_num = static_cast<s16>(event_items);
++    draw.menu.cursor = cursor;
++    draw.menu.scroll_row = 0;
++    draw.menu.state = MINI_MENU_FADE_IN;
++    draw.menu.state_time = 0;
++    draw.board_pos[0] = x;
++    draw.board_pos[1] = y;
++    draw.pack = pack;
++
++    int rows = pack->num / 5;
++
+=1012 383950cc0e6d95c4
++        rows = 1;
++    }
++    // (InitEventItemSelect's, cursor 0, scroll 0: the rule below scrolls to the cursor as the game's key step does)
++    draw.move_y = static_cast<int>(56.0f + y);
++    draw.bar_y = 60.0f + y + static_cast<int>(68.0f * 0) / rows;
++    draw.cur[0] = 6.0f + x;
++    draw.cur[1] = 60.0f + y;
++}
++
++void EventItemDrawAs(EventItemDraw &draw, int cursor) {
++    // EventItemSelectKey's scroll rule, one row a frame, for the cursor the picker steps
++    draw.menu.cursor = cursor;
++    if (draw.menu.cursor < draw.menu.scroll_row * 5) {
++        draw.menu.scroll_row--;
++    }
++    if ((draw.menu.scroll_row + 2) * 5 - 1 < draw.menu.cursor) {
++        draw.menu.scroll_row++;
++    }
++
++    std::swap(MiniMenu, draw.menu);
++    std::swap(EventBoardPos[0], draw.board_pos[0]);
++    std::swap(EventBoardPos[1], draw.board_pos[1]);
++    std::swap(EventItemMoveY, draw.move_y);
++    std::swap(MiniCur[0], draw.cur[0]);
++    std::swap(MiniCur[1], draw.cur[1]);
++    std::swap(EventBarY, draw.bar_y);
++    std::swap(MiniEventBoard, draw.board);
++    std::swap(ItemIcon, draw.icons);
++    std::swap(EventItemPackPt, draw.pack);
++    std::swap(MiniEventTextureBlock, draw.block);
++    std::swap(CommonMenuMes2, *draw.mes);
++
++    CTexture *stay = StayTex;
++    const int read = MiniEventTexReadFlag;
++
+=960 98aab9a9292f7736
+~1181 f3258aa9328a9b31|    |
++
++    // RetailEventItemSelectLoop's still at the backdrop's brightness; over a world going on, a black fill leaves it at that brightness
++    const int bright = EventItemBackdrop();
++
++    AllFadeForMenu(0x80 - bright);
++    if (static const bool trace = [] {
++            const char *value = std::getenv("DC_EVENT_ITEM_TRACE");
++            return value != nullptr && value[0] == '1';
++        }();
++        trace) {
++        std::fprintf(stderr, "event item: backdrop brightness %d, black fill %d\n", bright, 0x80 - bright);
++    }
+=1058 55d424c7a5147958
+=1060 a9db7f4b158de4ca
+=1062 1add0e9829423f78
+=1063 9f5322bc2beffdd1
++
++    StayTex = stay;
++    MiniEventTexReadFlag = read;
++    std::swap(CommonMenuMes2, *draw.mes);
++    std::swap(MiniEventTextureBlock, draw.block);
++    std::swap(EventItemPackPt, draw.pack);
++    std::swap(ItemIcon, draw.icons);
++    std::swap(MiniEventBoard, draw.board);
++    std::swap(EventBarY, draw.bar_y);
++    std::swap(MiniCur[1], draw.cur[1]);
++    std::swap(MiniCur[0], draw.cur[0]);
++    std::swap(EventItemMoveY, draw.move_y);
++    std::swap(EventBoardPos[1], draw.board_pos[1]);
++    std::swap(EventBoardPos[0], draw.board_pos[0]);
++    std::swap(MiniMenu, draw.menu);
++}
++

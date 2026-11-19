@@ -24,6 +24,9 @@
 
 #include "app/gameloop.hpp" // coop-pt1111m: the twins' stop (GameRequestStop)
 #include "battlemenu.hpp"
+#include "clsmes.hpp"   // coop-menubuffers: CommonMenuMes1
+#include "dataread.hpp" // coop-menubuffers: read_buffer
+#include <cstring>
 #include "editloop.hpp"
 #include "edit.hpp"
 #include "mglib.hpp"
@@ -50,6 +53,8 @@ using namespace coop;
 
 namespace dc::game {
 extern int MenuMapJumpMode;
+s32        NameEnterKey(); // (ps2/src/battle_globals.cpp) coop-storywarp: a watcher's read-only name entry
+void       NameEnterDraw();
 int        EdInitModeFinish(CCamera *camera, CTexture *texture); // (ps2/src/edit.cpp)
 int        EdMenuMode();
 void       EdExitMenu();
@@ -81,6 +86,11 @@ struct ScriptMenu {
     bool          stray_said = false; // coop-small2: a retail step on a copy that never opened it, said once
     bool          carried = false;    // coop-small2: brought by a merge's state set, before the link it came with is up
     bool          apart = false;      // coop-pt1111m: opened apart (this copy alone in its world: its own player's, whatever index it records)
+    bool          watch = false;      // coop-storywarp: a watcher's copy shows the opener's name entry, read-only
+    bool          watch_made = false; // its name screen made on this copy (the scratch names its own)
+    bool          watch_done = false; // its own step finished (it only draws from there till the end command)
+    int           watch_draws = 0;    // the draws it showed (the rows' line)
+    short         watch_names[6][32]{}; // the scratch names its keys write (the save's stay the opener's pokes' alone)
     CGamePad      pad{};          // the opener's copy: the menu's own pad (its menu mode and repeats never in the game's)
     InputPadState before{};
 };
@@ -118,6 +128,18 @@ ScriptMenu &CurrentMenu() {
 
 bool OwnerHere() {
     return g_menu.local && NetplayLocalPlayer() == g_menu.owner;
+}
+
+// coop-storywarp (Jep's rc1 playtest 11-13, the Xiao scene in Toan's house: P2 watched it but not its name entry; the coordinator's
+// option 1): a story scene every player watches together is one show, its name entry too, the one screen excepted from the own-UI
+// rule. Every other player's copy makes the same name screen and steps it from the opener's agreed pad on the opener's ticks
+// (FeedPad, as the opener's copy), so its letters and cursor are the opener's, live; its own pad never reaches it (the menu's own
+// pad, PadIn), its keys write scratch names (swapped into the save around its step and draw, the save's put back), never the save (the opener's pokes write that on every copy), its sounds
+// stay the opener's, and it sends nothing: the script's result is the opener's end command, as before. Not a menu of one player's
+// own event (rule 4: the others walk on). DC_COOP_MUTATE=names_watch_off (twin): the watcher's screen shows none of it, as before.
+bool Watching() {
+    return g_menu.local && !OwnerHere() && g_menu.kind == ED_MENU_NAME_REGISTRY && CoopWorldsLinkedTogether() && CoopTownStorySceneTogether() &&
+           !Mutated("names_watch_off");
 }
 
 // The opener's agreed pad into the menu's own pad.
@@ -166,6 +188,11 @@ void ApplyEnd(int player, const NetCommand &command, std::int64_t tick) {
     }
     menu.landed = true;
     menu.result = (int) (std::int32_t) command.c;
+    if (menu.watch) { // coop-storywarp: the watcher's name screen goes as the opener's does, its world drawn again
+        menu.watch = false;
+        EdDrawOnAll();
+        std::fprintf(stderr, "coop-scriptmenu: player %d's names read-only on player %d's copy over: %d draws\n", player, NetplayLocalPlayer(), menu.watch_draws);
+    }
     std::fprintf(stderr, "coop-scriptmenu: player %d's %s ends with %d on every copy at link tick %lld (%lld ticks open)\n", player, KindName(menu.kind),
                  menu.result, (long long) tick, (long long) (tick - menu.opened));
     if (menu.kind == ED_MENU_FISHING_EXCHANGE && SaveData != nullptr) {
@@ -209,6 +236,24 @@ int CoopScriptMenuInit(CCamera *camera) {
     }
     if (!OwnerHere()) {
         g_menu.made = ++g_menu.init_ticks >= 4;
+        if (Watching() && !g_menu.watch_made) { // coop-storywarp: the opener's name screen made here too (no writes kept, nothing sent)
+            FeedPad();
+            DrawRng rng;
+            PadIn   pad;
+            SoundOwner sound(g_menu.owner);
+            const int finished = EdInitModeFinish(camera, TexManager.GetTexture(const_cast<char *>("frame_image"), -1));
+
+            if (finished != 0 && SaveData != nullptr) {
+                for (int c = 0; c < 6; c++) {
+                    std::memcpy(g_menu.watch_names[c], SaveData->GetCharaName(c), sizeof g_menu.watch_names[c]);
+                }
+                g_menu.watch = true;
+                g_menu.watch_made = true;
+                std::fprintf(stderr, "coop-scriptmenu: player %d's names shown read-only on player %d's copy (the opener's pad, a scratch name) from link tick %lld\n",
+                             g_menu.owner, NetplayLocalPlayer(), (long long) NetplayLinkTick());
+                std::fflush(stderr);
+            }
+        }
         return g_menu.made ? 1 : 0;
     }
     FeedPad();
@@ -232,10 +277,10 @@ int CoopScriptMenuStep() {
             std::fprintf(stderr, "coop-scriptmenu: a script's menu this copy never opened steps here in the lockstep (retail's) at link tick %lld\n", (long long) NetplayLinkTick());
             std::fflush(stderr);
         }
-        // coop-pt1111m: the twins menusoff_menu_out and scriptmenu_apart_index leave this copy with no menu state of the opener's (their checks
+        // coop-pt1111m: the twin scriptmenu_apart_index leaves this copy with no menu state of the opener's (its checks
         // read that at the take and the apply, before this): stepping it would crash here (SearchItemIndexNo(this=nullptr), the bug they bring
         // back), and a crash is never a twin's FAIL. Under them this copy stops instead, as its stop file would: nothing without the switches.
-        if (!g_menu.on && (MenuWorkKeptMutated() || Mutated("scriptmenu_apart_index"))) {
+        if (!g_menu.on && Mutated("scriptmenu_apart_index")) {
             static bool said = false;
 
             if (!said) {
@@ -255,6 +300,34 @@ int CoopScriptMenuStep() {
     if (!OwnerHere()) {
         if (CoopWorldsLinkedTogether()) {
             g_menu.carried = false; // (merged: from here a link down is the opener gone)
+            if (g_menu.watch && Watching()) { // coop-storywarp: the opener's keys, read-only, drawn here
+                FeedPad();
+                DrawRng    rng;
+                PadIn      pad;
+                SoundOwner sound(g_menu.owner);
+
+                // (the names the screen edits are the save's: the scratch ones swapped in around its step and draw, the save's put back,
+                // so this copy's save never changes; the name entry's own CharaName points into it)
+                short saved[6][32];
+
+                for (int c = 0; c < 6 && SaveData != nullptr; c++) {
+                    std::memcpy(saved[c], SaveData->GetCharaName(c), sizeof saved[c]);
+                    std::memcpy(SaveData->GetCharaName(c), g_menu.watch_names[c], sizeof saved[c]);
+                }
+                EdDrawOffAll();
+                if (!g_menu.watch_done) {
+                    g_menu.watch_done = NameEnterKey() != 0; // (its finish is the opener's end command's, not this one's)
+                }
+                NameEnterDraw();
+                for (int c = 0; c < 6 && SaveData != nullptr; c++) {
+                    std::memcpy(g_menu.watch_names[c], SaveData->GetCharaName(c), sizeof saved[c]);
+                    std::memcpy(SaveData->GetCharaName(c), saved[c], sizeof saved[c]);
+                }
+                if (g_menu.watch_draws++ % 120 == 0) { // (the rows' line)
+                    std::fprintf(stderr, "coop-scriptmenu: player %d's names drawn read-only on player %d's copy (link tick %lld, the name's first letter %d)\n", g_menu.owner,
+                                 NetplayLocalPlayer(), (long long) NetplayLinkTick(), (int) g_menu.watch_names[1][0]);
+                }
+            }
             return 0;
         }
         if (CoopTownMenuLinked()) {
@@ -296,6 +369,19 @@ int CoopScriptMenuStep() {
     }
     if (++g_menu.steps % 120 == 1) { // (the rows' line)
         std::fprintf(stderr, "coop-scriptmenu: player %d's %s steps on this copy alone (link tick %lld)\n", g_menu.owner, KindName(g_menu.kind), (long long) NetplayLinkTick());
+        // coop-menubuffers: a Use Item window's message set (eventuse.bin, in the pak its opening read): inside the world's read buffer
+        // or outside it, and a hash of its first 512 bytes, which stay as read for as long as the window is open.
+        if ((g_menu.kind == kKindUseItem || g_menu.kind == kKindBait) && CommonMenuMes1.buff != nullptr) {
+            const auto          *at = reinterpret_cast<const unsigned char *>(CommonMenuMes1.buff);
+            const std::ptrdiff_t past = at - reinterpret_cast<const unsigned char *>(read_buffer);
+            std::uint32_t        hash = 2166136261u;
+
+            for (int i = 0; i < 512; i++) {
+                hash = (hash ^ at[i]) * 16777619u;
+            }
+            std::fprintf(stderr, "coop-scriptmenu: player %d's %s messages %s the world's read buffer, hash %08x (link tick %lld)\n", g_menu.owner,
+                         KindName(g_menu.kind), past >= 0 && past < (std::ptrdiff_t{4} << 20) ? "inside" : "outside", hash, (long long) NetplayLinkTick());
+        }
     }
     if (finished == 0) {
         return 0;

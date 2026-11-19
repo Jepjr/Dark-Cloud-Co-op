@@ -20,8 +20,15 @@
 //             retail's BattleSubWeaponDmg for player 1, coop_combat's PartnerWeaponWear for player 2)
 //   event:<prefix>  the user on the first event whose name starts with prefix
 // DC_COOP_DUNTEST_BOTH=1: the other player is put on the same spot one tick later (two at one chest).
+// coop-chestcam: DC_COOP_DUNTEST_APART=N: instead, N ticks into play apart, the copy of player _WHO puts its own player on the object.
+// coop-pickup: DC_COOP_DUNTEST_DOWN=1 (gold, item, gatekey, steal): the other player is knocked down as the drop falls.
+// coop-stealback: steal  a Bread (or DC_COOP_DUNTEST_ITEM) stolen by the user off a monster 30 units ahead of it (StealSet, the
+//           steal hit's own call, with the user's member as the hitter): it rises and flies home to the user.
 // DC_COOP_DUNTEST_AGAIN=N (coop-actorswap): at press clock N the same player is put at the same kind of object again, the
 // nearest still unused (a second small chest after the first), "duntest: again pN at <object>: placed".
+// coop-farcull2: DC_COOP_DUNTEST_SPARKS=1: as the user is placed, a hit lands on its spot (a monster's hit point, as retail's
+// MonsterDamage marks one): its spark (HitMark[15]), point mark (HitPointMark[15]) and a thunder burst (CWeaponElFx[3]), on both copies
+// on that tick, "duntest: a hit's sparks at (x y z)".
 // coop-chestfix: DC_COOP_DUNTEST_POISON=1: the user is poisoned as it is placed (a bat's bite), so its poison's bites (every 180
 // ticks) fall inside a presentation that lasts longer (Jep's rule: the opener takes no damage until control comes back).
 // coop-fixplace: for an event slot (lock, gate, lockmsg, event:) the user goes where the floor holds them and the game's own
@@ -35,15 +42,17 @@
 // (the test fails). 12 ticks on, once: "...: kept" or "...: FAIL ..." (the user fell, or the game no longer finds the slot).
 // DC_COOP_MUTATE=placeraw: the point, as before: no camera snap, nothing checked.
 // DC_COOP_DUNTEST_ALSO=<object>: coop-chestbeside: the other player is put at an object of its own one tick later (an Atla for
-// him while she is at a chest), its own presses then using it.
+// him while she is at a chest), its own presses then using it. DC_COOP_DUNTEST_ALSO_AT=<press clock> (coop-tripwires2): not before then.
 // Lines, all on stderr: once per floor "duntest: floor ..." (what the floor holds: the suite's catalogue) and
 // "duntest: events: ..."; "duntest: put pN on <object> ..." at the placement; then each link tick on a floor at which any of
 // its values changes (and every 120 ticks) "duntest: tick L clock C task K ...", the values the test compares.
 
 #include "coop/game_ns.hpp"
 #include "coop/coop.hpp"
+#include "coop/coop_zonechara.hpp" // coop-entrance: ZoneTestPending
 #include "coop/netplay.hpp"
 
+#include <algorithm> // coop-tripwires2: std::max
 #include <SDL3/SDL.h>
 #include <libvu0.h>
 
@@ -52,6 +61,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <iterator>
 #include <string>
 
 #include "btactstatus.hpp"
@@ -69,6 +80,7 @@
 #include "frame.hpp"
 #include "itemdata.hpp"
 #include "weaponelement.hpp" // coop-pt1111b: CWeaponElement
+#include "hitmark.hpp"       // coop-farcull2: a hit's spark and point mark
 #include "editmapscript.hpp" // coop-pt1111b: the town's mode (GameMode)
 #include "dataread.hpp"      // coop-chestworld: read_buffer
 #include "mainitemmodel.hpp" // coop-chestworld: activeItem
@@ -154,6 +166,7 @@ void PutAt(int who, const float *at) {
         }
 
         g_partner.chara->frame->SetPosition(g_partner.pos);
+        PartnerCameraClearAtCut(); // coop-dungeonreds: her camera cut there starts clear, as a load's
     }
 }
 
@@ -389,6 +402,44 @@ bool Place() {
             box.trap_no = TestEnvInt("DC_COOP_DUNTEST_TRAP", 1);
         } else if (o == "piero") {
             box.trap_no = 5; // coop-p2prompt: the clown's chest (event script 16)
+            // coop-bagoverflow: DC_COOP_DUNTEST_FULL=1 fills the opener's bag with bread first (player 1's the party's pack by
+            // retail's GetItem, player 2's her own bag), so the clown's pick has no room
+            // DC_COOP_DUNTEST_FULL=2 (a shared overflow): the weapon the test makes the clown's second item (DC_COOP_TEST_PIERO_ITEM)
+            // fills its owner's ten weapon slots (the party's, by retail's GetItem), the party's flag that sets put back
+            const int weapon = TestEnvInt("DC_COOP_TEST_PIERO_ITEM", -1);
+
+            if (TestEnvInt("DC_COOP_DUNTEST_FULL", 0) == 2 && weapon >= ITEM_WEAPON_START) {
+                auto     *status = (CDngStatusData *) UserStatus;
+                const int owner = (s8) WeaponList[weapon - ITEM_WEAPON_START].owner;
+                int       held = 0, put = 0;
+
+                for (; put < 20; put++) {
+                    held = 0;
+                    for (int s = 0; s < 10; s++) {
+                        held += status->chara_weapons[owner][s].item_no >= ITEM_WEAPON_START ? 1 : 0;
+                    }
+                    if (held >= 10) {
+                        break;
+                    }
+                    status->GetItem(weapon, 0);
+                }
+                status->overflow_flag = false;
+                std::fprintf(stderr, "duntest: member %d's weapons filled with weapon %d (%d put): %s\n", owner, weapon, put, held >= 10 ? "full" : "FAIL not full");
+            } else if (TestEnvInt("DC_COOP_DUNTEST_FULL", 0) != 0) {
+                auto *status = (CDngStatusData *) UserStatus;
+                int   put = 0;
+
+                for (; put < 300; put++) {
+                    if (g_test.who == 1 ? status->CheckItemGet(ITEM_BREAD) != 0 : !PartnerGetItem(ITEM_BREAD, -1, false)) {
+                        break;
+                    }
+                    if (g_test.who == 1) {
+                        status->GetItem(ITEM_BREAD, 0);
+                    }
+                }
+                const int refused = g_test.who == 1 ? status->CheckItemGet(ITEM_BREAD) : PartnerCheckItemGet(ITEM_BREAD);
+                std::fprintf(stderr, "duntest: p%d's bag filled with item %d (%d put): %s\n", g_test.who, (int) ITEM_BREAD, put, refused != 0 ? "full" : "FAIL not full");
+            }
         } else if (o == "map") {
             box.item_no = ITEM_MAP;
         } else if (o == "crystal") {
@@ -418,6 +469,29 @@ bool Place() {
         g_test.item = o == "mimic" || o == "map" || o == "crystal" ? -1 : box.item_no;
         sceVu0CopyVector(g_test.spot, event.pos);
         PutAt(g_test.who, event.pos);
+        // coop-revivecross: DC_COOP_DUNTEST_DOWN=1 knocks the other player down where it stands; =<d>:<s> puts it d along x from the
+        // chest first, and the user s along x from the chest (the same way), so the chest and the body are both in the user's reach.
+        // (a distance written r<k> is k times the chest's own reach, event.radius)
+        if (const char *down = TestEnv("DC_COOP_DUNTEST_DOWN"); down != nullptr && *down != '0') {
+            const char *colon = std::strchr(down, ':');
+            const auto  along = [&](const char *text) { return text[0] == 'r' ? (float) std::atof(text + 1) * event.radius : (float) std::atof(text); };
+
+            if (colon != nullptr) {
+                sceVu0FVECTOR body, user_at;
+
+                sceVu0CopyVector(body, event.pos);
+                sceVu0CopyVector(user_at, event.pos);
+                body[0] += along(down);
+                user_at[0] += along(colon + 1);
+                PutAt(3 - g_test.who, body);
+                PutAt(g_test.who, user_at);
+            }
+            const bool knocked = g_test.who == 2 ? PlayerGoesDown() : (PartnerFalls("duntest"), true);
+
+            std::fprintf(stderr, "duntest: p%d knocked down %.0f from the chest, p%d %.0f from it and %.0f from the body: %s\n", 3 - g_test.who,
+                         DistVector(event.pos, UserPos(3 - g_test.who)), g_test.who, DistVector(event.pos, UserPos(g_test.who)),
+                         DistVector(UserPos(3 - g_test.who), UserPos(g_test.who)), knocked ? "down" : "FAIL not down");
+        }
         std::fprintf(stderr, "duntest: put p%d on %s chest event %d (box %d, kind %d, trap %d, item %d, reach %.0f), other %.0f away\n", g_test.who, what,
                      chosen, event.index, box.kind, box.trap_no, box.item_no, event.radius, DistVector(event.pos, UserPos(3 - g_test.who)));
         return true;
@@ -442,8 +516,34 @@ bool Place() {
 
         g_test.box = NowDngMap->events[g_test.event].index;
         sceVu0CopyVector(g_test.spot, NowDngMap->events[g_test.event].pos);
+        // coop-atlafly: DC_COOP_DUNTEST_ATLA_SIDE=<degrees>: the user 11 from the ball's middle at that bearing (0 its +z), as the
+        // rc1 playtest's opener stood, so the effect is turned to her (on the ball itself it is never turned)
+        if (const int side = TestEnvInt("DC_COOP_DUNTEST_ATLA_SIDE", -1000); side > -1000) {
+            const float yaw = (float) side * PI / 180.0f;
+
+            g_test.spot[0] = NowDngMap->atra[g_test.box].pos[0] + 11.0f * sinf(yaw);
+            g_test.spot[2] = NowDngMap->atra[g_test.box].pos[2] + 11.0f * cosf(yaw);
+
+            // ... and the other player 35 out behind her on the same bearing, facing the ball, so the other's camera has both in view
+            const int     other = 3 - g_test.who;
+            const float   side_yaw = yaw;
+            sceVu0FVECTOR there = {NowDngMap->atra[g_test.box].pos[0] + 35.0f * sinf(side_yaw), UserPos(other)[1],
+                                   NowDngMap->atra[g_test.box].pos[2] + 35.0f * cosf(side_yaw), 1.0f};
+            const float   face = side_yaw + PI;
+
+            PutAt(other, there);
+            if (other == 1) {
+                CharaMain.SetRotation(0.0f, face, 0.0f);
+            } else if (g_partner.chara != nullptr) {
+                g_partner.chara->frame->SetRotation(0.0f, face, 0.0f);
+                g_partner.heading[0] = sinf(face);
+                g_partner.heading[1] = 0.0f;
+                g_partner.heading[2] = cosf(face);
+            }
+            std::fprintf(stderr, "duntest: p%d watches from (%.1f %.1f) facing %.3f\n", other, there[0], there[2], face);
+        }
         PutAt(g_test.who, g_test.spot);
-        std::fprintf(stderr, "duntest: put p%d on atla event %d (ball %d)\n", g_test.who, g_test.event, g_test.box);
+        std::fprintf(stderr, "duntest: put p%d on atla event %d (ball %d) at (%.1f %.1f)\n", g_test.who, g_test.event, g_test.box, g_test.spot[0], g_test.spot[2]);
         return true;
     }
 
@@ -465,6 +565,15 @@ bool Place() {
             ahead[2] = cosf(yaw);
         } else {
             sceVu0CopyVector(ahead, g_partner.heading);
+            // Her camera (independent cameras) need not face along her heading: the way she looks is from her camera's eye to her.
+            if (float angle = 0.0f, eye[4] = {0.0f, 0.0f, 0.0f, 1.0f}; CoopPartnerCamera(&angle, eye)) {
+                const float dx = there[0] - eye[0], dz = there[2] - eye[2], len = sqrtf(dx * dx + dz * dz);
+
+                if (len > 1.0f) {
+                    ahead[0] = dx / len;
+                    ahead[2] = dz / len;
+                }
+            }
         }
         g_test.spot[0] = there[0] - 200.0f * ahead[0];
         g_test.spot[1] = there[1] + 10.0f;
@@ -489,10 +598,52 @@ bool Place() {
             std::fprintf(stderr, "duntest: the town's mode was %d on the floor, put at %d\n", (int) ::GameMode, town_mode);
             ::GameMode = town_mode;
         }
+        // coop-pickup (Jep's rc1 B11 playtest): DC_COOP_DUNTEST_DOWN=1 knocks the other player down as the drop falls (his down held
+        // her attachment's message until he got up): player 1 by his co-op down (PlayerGoesDown), the partner by her fall.
+        if (TestEnvInt("DC_COOP_DUNTEST_DOWN", 0) != 0) {
+            const bool down = g_test.who == 2 ? PlayerGoesDown() : (PartnerFalls("duntest"), true);
+            std::fprintf(stderr, "duntest: p%d knocked down as the drop falls: %s\n", 3 - g_test.who, down ? "down" : "FAIL not down");
+        }
+        // coop-stealback: DC_COOP_DUNTEST_FULL=1 fills the getter's bag with the item first (player 1's the party's pack, retail's
+        // GetItem; player 2's own bag), so walking onto the drop is refused ("can't carry")
+        if (TestEnvInt("DC_COOP_DUNTEST_FULL", 0) != 0 && g_test.item >= 0) {
+            auto *status = (CDngStatusData *) UserStatus;
+            int   put = 0;
+
+            for (; put < 300; put++) {
+                if (g_test.who == 1 ? status->CheckItemGet(g_test.item) != 0 : !PartnerGetItem(g_test.item, -1, false)) {
+                    break;
+                }
+                if (g_test.who == 1) {
+                    status->GetItem(g_test.item, 0);
+                }
+            }
+            const int refused = g_test.who == 1 ? status->CheckItemGet(g_test.item) : PartnerCheckItemGet(g_test.item);
+            std::fprintf(stderr, "duntest: p%d's bag filled with item %d (%d put): %s\n", g_test.who, g_test.item, put, refused != 0 ? "full" : "FAIL not full");
+        }
         RandomItem->Set(at, 101, o == "gold" ? 50 : -1, o == "gold" ? -1 : g_test.item);
         sceVu0CopyVector(g_test.spot, at);
         std::fprintf(stderr, "duntest: put p%d on %s: dropped at (%.0f %.0f %.0f), item %d, other %.0f away\n", g_test.who, what, at[0], at[1], at[2],
                      g_test.item, DistVector(at, UserPos(3 - g_test.who)));
+        return true;
+    }
+
+    if (o == "steal") {
+        sceVu0FVECTOR at;
+        const int     hitter = g_test.who == 1 ? (int) UserStatus->cur_chara : g_partner.loaded_chara;
+
+        sceVu0CopyVector(at, user);
+        at[0] += 30.0f;
+        at[1] += 10.0f;
+        g_test.item = TestEnvInt("DC_COOP_DUNTEST_ITEM", (int) ITEM_BREAD);
+        if (TestEnvInt("DC_COOP_DUNTEST_DOWN", 0) != 0) {
+            const bool down = g_test.who == 2 ? PlayerGoesDown() : (PartnerFalls("duntest"), true);
+            std::fprintf(stderr, "duntest: p%d knocked down as the drop falls: %s\n", 3 - g_test.who, down ? "down" : "FAIL not down");
+        }
+        StealSet(at, g_test.item, hitter);
+        sceVu0CopyVector(g_test.spot, at);
+        std::fprintf(stderr, "duntest: put p%d on steal: item %d stolen by member %d at (%.0f %.0f %.0f), other %.0f away\n", g_test.who, g_test.item, hitter,
+                     at[0], at[1], at[2], DistVector(at, UserPos(3 - g_test.who)));
         return true;
     }
 
@@ -538,6 +689,34 @@ bool Place() {
         SlotSpot(spot);
         std::fprintf(stderr, "duntest: put p%d on %s event %s (script %d, hold %d, switch %d), key %d\n", g_test.who, what, spot->event->name,
                      spot->event->script_no, spot->hold, spot->switch_on, g_test.item);
+        return true;
+    }
+
+    // coop-farcull: far: the user on the floor's event farthest (flat) from the other player, where the floor holds them (SlotSpot):
+    // across the floor from the other (DC_COOP_DUNTEST_ALSO=far: him across the floor from her mimic).
+    if (o == "far") {
+        const float       *other = UserPos(3 - g_test.who);
+        CDungeonEventData *spot = nullptr;
+        float              best = -1.0f;
+
+        for (CDungeonEventData &data : NowEventMan->event) {
+            if (data.event == nullptr || !data.enabled) {
+                continue;
+            }
+            const float away = std::hypot(data.pos[0] - other[0], data.pos[2] - other[2]);
+
+            if (away > best) {
+                best = away;
+                spot = &data;
+            }
+        }
+        if (spot == nullptr) {
+            return false;
+        }
+        g_test.event = (int) (spot - NowEventMan->event);
+        sceVu0CopyVector(g_test.spot, spot->pos);
+        SlotSpot(spot);
+        std::fprintf(stderr, "duntest: put p%d far, on event %s, %.0f from p%d\n", g_test.who, spot->event->name, best, 3 - g_test.who);
         return true;
     }
 
@@ -714,7 +893,7 @@ void Descend(int floor) {
         ready_fired = false;
     }
 
-    if (gameTask != GAME_TASK_PLAY) {
+    if (!CoopPlainPlay()) {
         return;
     }
 
@@ -751,23 +930,61 @@ void Descend(int floor) {
     static const bool apart_peer = TestEnvIs("DC_COOP_DUNTEST_APART_WAIT", "peer") || apart_way;
     static int        peer_fired = -1;
 
-    if (apart && apart_peer) {
+    // coop-forcefloor: DC_COOP_DUNTEST_APART_WAIT=heard: apart, this copy's gate once the other copy is heard in a town since the
+    // split (its player's member and whereabouts known: a fenced floor's gate asks by them; heard still on its way out, its call
+    // found it busy leaving), not after a tick count.
+    static const bool apart_heard = TestEnvIs("DC_COOP_DUNTEST_APART_WAIT", "heard");
+    static int        heard_fired = -1;
+
+    if (apart && apart_heard) {
+        if (heard_fired == floor || !CoopWorldsPeerHeardInTown()) {
+            return;
+        }
+        heard_fired = floor;
+        std::fprintf(stderr, "duntest: descend: floor %d, apart: the other copy is heard in a town: this copy takes its gate\n", (int) UserStatus->cur_floor);
+    } else if (apart && apart_peer) {
         // (loud when it never comes: 3600 ticks of play apart on this floor without the other heard deeper)
         if (peer_fired != floor && ticks == 3600) {
             std::fprintf(stderr, "duntest: descend: FAIL floor %d, apart: the other never heard playing a deeper floor in %d ticks\n",
                          (int) UserStatus->cur_floor, ticks);
         }
         const int peer = CoopWorldsPeerFloorIn(selectMapNo);
+        // coop-entrwin: DC_COOP_DUNTEST_APART_DELAY=N: the follower's gate N ticks of play after the other is first heard so, not
+        // at once (the entrance window's rows: arrivals a set time apart, the gate's own script some 44 ticks on top).
+        static const int delay = TestEnvInt("DC_COOP_DUNTEST_APART_DELAY", 0);
+        static int       heard_floor = -1;
+        static int       heard_tick = 0;
 
-        if (peer_fired == floor || (apart_way ? peer != -2 : peer <= (int) UserStatus->cur_floor)) {
+        if (peer_fired != floor && delay > 0 && (heard_floor == floor || (apart_way ? peer == -2 : peer > (int) UserStatus->cur_floor))) {
+            if (heard_floor != floor) {
+                heard_floor = floor;
+                heard_tick = ticks;
+            }
+            if (ticks - heard_tick < delay) {
+                return;
+            }
+        } else if (peer_fired == floor || (apart_way ? peer != -2 : peer <= (int) UserStatus->cur_floor)) {
             return;
+        }
+        // coop-clownchest: DC_COOP_DUNTEST_APART_GO=<file>: and not before the test writes that file (x-clown-apart: once the user's
+        // clown prompt is open, or its pick given), so the merge comes at that point of the user's play, not after a tick count.
+        if (static const char *go = TestEnv("DC_COOP_DUNTEST_APART_GO"); go != nullptr) {
+            std::error_code missing;
+
+            if (!std::filesystem::exists(go, missing)) {
+                return;
+            }
         }
         peer_fired = floor;
         std::fprintf(stderr, "duntest: descend: floor %d, apart: the other is heard %s (%d): this copy follows\n", (int) UserStatus->cur_floor,
                      apart_way ? "on its way onto the next floor" : "playing a deeper floor", peer);
     } else if (!apart && wait_ready) {
+        // (coop-entrance: and past the zone test hook's picks, a trade before the gate)
+        // coop-dungeonreds (x-dungeon-descent-together-p2, menu-p2: floors 0 1 only): and past every arrival walk-in (a merge's
+        // walker plays its own entrance in arrival order, 600+ ticks for the second): put on the gate while hers still played, she was
+        // walked back to its way in and her Crosses there opened no gate.
         if (ready_fired || FloorIntro() || g_partner.chara == nullptr || !g_partner.visible || NetplayStateLoadPending() ||
-            (fixture && !NetplayStateFileLoaded())) {
+            (fixture && !NetplayStateFileLoaded()) || ZoneTestPending() || ArrivalWalkPlayer() != 0) {
             return;
         }
         ready_fired = true;
@@ -836,7 +1053,7 @@ void ApartAtla(int floor, std::int64_t tick) {
         return;
     }
 
-    if (event < 0 && gameTask == GAME_TASK_PLAY && ++ticks == at) {
+    if (event < 0 && CoopPlainPlay() && ++ticks == at) {
         float best = 1.0e9f;
 
         for (int i = 0; i < 48; i++) {
@@ -869,6 +1086,121 @@ void ApartAtla(int floor, std::int64_t tick) {
 
     if (line != last || tick - last_tick >= 60) {
         std::fprintf(stderr, "duntest: apart atla: tick %lld %s\n", (long long) tick, line);
+        last = line;
+        last_tick = tick;
+    }
+}
+
+// coop-clownchest (rc4 owed: a clown chest opened apart reaching the other copy at the merge): DC_COOP_DUNTEST_APART_PIERO=N (with
+// descend): on every floor past the first, each copy marks the floor's first chest (the lowest box slot in use, the
+// same on every copy: the layout is the floor's shared seed). After N ticks of play apart there, the user's copy alone (its own
+// player, -Who) makes it a clown's chest (large, trap 5) and puts its player on it; its own Crosses (the test's pads) open it.
+// Every copy, from the floor's first tick: "duntest: apart piero: ..." on each change of that chest (and every 60 ticks), so a
+// test reads the chest on the other copy after the merge.
+void ApartPiero(int floor, std::int64_t tick) {
+    static const int at = TestEnvInt("DC_COOP_DUNTEST_APART_PIERO", -1);
+    static int       on_floor = -1;
+    static int       ticks = 0;
+    static int       index = -1;
+    static bool      put = false;
+    static std::string last;
+    static std::int64_t last_tick = 0;
+
+    if (at < 0 || UserStatus->cur_floor < 1) {
+        return;
+    }
+
+    if (floor != on_floor) {
+        if (!CoopPlainPlay()) {
+            return;
+        }
+        on_floor = floor;
+        ticks = 0;
+        put = false;
+        index = -1;
+
+        // (the lowest box slot in use, shut or not: a follower that took the user's state at its arrival sees it opened)
+        for (int b = 0; b < (int) std::size(NowDngMap->boxes) && index < 0; b++) {
+            if (NowDngMap->boxes[b].used != 0) {
+                index = b;
+            }
+        }
+
+        std::fprintf(stderr, "duntest: apart piero: floor %d: the first chest is box %d, player %d's copy\n", (int) UserStatus->cur_floor, index,
+                     NetplayRole());
+    }
+
+    if (index < 0) {
+        return;
+    }
+
+    // Its map event (gone once it is opened: -1)
+    int event = -1;
+
+    for (int i = 0; i < 48 && event < 0; i++) {
+        if (NowDngMap->events[i].kind == DNG_EVENT_TREASURE_BOX && NowDngMap->events[i].index == index) {
+            event = i;
+        }
+    }
+
+    TREASURE_BOX &box = NowDngMap->boxes[index];
+
+    if (!put && CoopWorldsApart() && NetplayRole() == g_test.who && CoopPlainPlay() && ++ticks == at && event >= 0 && box.closed != 0) {
+        // coop-bigchestp2: DC_COOP_DUNTEST_APART_TRAP=0 makes it a plain large chest instead (retail's BOX_BIG task, no prompt), and
+        // DC_COOP_DUNTEST_APART_ITEM=N puts item N in it (x-bigchest-apart: Jep's 11-15 Baselard, 259).
+        static const int trap = TestEnvInt("DC_COOP_DUNTEST_APART_TRAP", 5);
+        static const int item = TestEnvInt("DC_COOP_DUNTEST_APART_ITEM", -1);
+
+        put = true;
+        box.kind = TREASURE_BOX_LARGE;
+        box.trap_no = (decltype(box.trap_no)) trap;
+        if (item > 0) {
+            box.item_no = (decltype(box.item_no)) item;
+        }
+        // (a plain chest: the first spot round its point with ground under it, half its reach out (Divine Beast Cave floor 2's first
+        // chest stands where its own point has no floor: put there the player fell, the floor's script 5 over and over); the
+        // clown's on its point, as x-clown-apart had it)
+        const DUNGEON_EVENT &chest = NowDngMap->events[event];
+        float                spot[4] = {chest.pos[0], chest.pos[1], chest.pos[2], 1.0f};
+        int                  ring = -1;
+
+        for (int k = 0; trap == 0 && k < 16 && ring < 0; k++) {
+            const float angle = (float) (k % 8) * 0.785398f;
+            const float far = (k < 8 ? 0.5f : 0.8f) * chest.radius;
+            float       ground;
+
+            if (GroundAt(chest.pos[0] + std::cos(angle) * far, chest.pos[1], chest.pos[2] + std::sin(angle) * far, &ground)) {
+                spot[0] = chest.pos[0] + std::cos(angle) * far;
+                spot[1] = ground;
+                spot[2] = chest.pos[2] + std::sin(angle) * far;
+                ring = k;
+            }
+        }
+        PutAt(1, spot);
+        std::fprintf(stderr, "duntest: apart piero: put player %d on %s chest event %d (box %d), floor %d, item %d (spot %d, reach %.0f)\n", NetplayRole(),
+                     trap == 5 ? "clown" : trap == 0 ? "large" : "trapped", event, index, (int) UserStatus->cur_floor, (int) box.item_no, ring,
+                     chest.radius);
+        // coop-bagoverflow (x-clown-apart -Full): DC_COOP_DUNTEST_FULL=1 fills its player's bag (the game's pack on its own copy
+        // apart: her bag there, SwapBags) with bread first
+        if (TestEnvInt("DC_COOP_DUNTEST_FULL", 0) != 0) {
+            auto *status = (CDngStatusData *) UserStatus;
+            int   filled = 0;
+
+            for (; filled < 300 && status->CheckItemGet(ITEM_BREAD) == 0; filled++) {
+                status->GetItem(ITEM_BREAD, 0);
+            }
+            std::fprintf(stderr, "duntest: apart piero: player %d's bag filled with item %d (%d put): %s\n", NetplayRole(), (int) ITEM_BREAD, filled,
+                         status->CheckItemGet(ITEM_BREAD) != 0 ? "full" : "FAIL not full");
+        }
+    }
+
+    char line[200];
+
+    std::snprintf(line, sizeof line, "event %d box %d used %d closed %d kind %d trap %d event kind %d apart %d", event, index, (int) box.used,
+                  (int) box.closed, (int) box.kind, (int) box.trap_no, event >= 0 ? (int) NowDngMap->events[event].kind : -1, CoopWorldsApart() ? 1 : 0);
+
+    if (line != last || tick - last_tick >= 60) {
+        std::fprintf(stderr, "duntest: apart piero: tick %lld floor %d %s\n", (long long) tick, (int) UserStatus->cur_floor, line);
         last = line;
         last_tick = tick;
     }
@@ -974,7 +1306,7 @@ static void PlayerOneItems(std::int64_t tick, std::int64_t clock, bool placed) {
         std::fprintf(stderr, "duntest: p1 act %d at tick %lld clock %lld life %d\n", last_act, (long long) tick, (long long) clock,
                      (int) UserStatus->hp[UserStatus->cur_chara]);
     }
-    if (revive_at >= 0 && !revived && clock >= revive_at && gameTask == GAME_TASK_PLAY) {
+    if (revive_at >= 0 && !revived && clock >= revive_at && CoopPlainPlay()) {
         revived = true;
         QuickSlot(ITEM_REVIVAL_POWDER, 1);
         UserStatus->hp[UserStatus->cur_chara] = 0;
@@ -1023,7 +1355,7 @@ void DunTestAloneFrame() {
     const char       *object = TestEnv("DC_COOP_DUNTEST");
 
     if (!alone || done || object == nullptr || NetplayPartnerLinked() || !NetplayStateFileLoaded() || mode != GAME_MODE_DUNGEON ||
-        gameTask != GAME_TASK_PLAY || NowDngMap == nullptr || NowEventMan == nullptr || UserStatus == nullptr || RandomItem == nullptr) {
+        !CoopPlainPlay() || NowDngMap == nullptr || NowEventMan == nullptr || UserStatus == nullptr || RandomItem == nullptr) {
         return;
     }
     done = true;
@@ -1045,6 +1377,50 @@ void DunTestAloneFrame() {
     const bool placed = Place();
 
     std::fprintf(stderr, "duntest: alone: p1 on %s: %s\n", object, placed ? "placed" : "FAIL not placed");
+}
+
+// coop-desync1116: DC_COOP_TEST_FRAME_CACHE=1: each tick, the world matrices the player's draw left cached on his body's and his
+// weapon's frames (CFrame::GetLWMatrix's cache, which the tick reads: Xiao's shot start, a weapon's hit points), summed: each valid
+// frame's matrix and how many are valid ("duntest: frame cache tick T body S/N weapon S/N"). Read as cached, never made: a read
+// that made one would pose the frame itself. Alike on every copy, whether or not its screen draws him.
+static std::uint32_t FrameCacheSum(CFrame *frame, int *valid) {
+    std::uint32_t sum = 2166136261u;
+
+    for (CFrame *at = frame; at != nullptr;) {
+        if (at->world_valid) {
+            const auto *bytes = reinterpret_cast<const unsigned char *>(at->world);
+
+            for (std::size_t b = 0; b < sizeof at->world; b++) {
+                sum = (sum ^ bytes[b]) * 16777619u;
+            }
+            (*valid)++;
+        }
+        // (depth first: the child, else the next brother up the tree)
+        if (at->child != nullptr) {
+            at = at->child;
+            continue;
+        }
+        while (at != nullptr && at != frame && at->brother == nullptr) {
+            at = at->parent;
+        }
+        at = at == nullptr || at == frame ? nullptr : at->brother;
+    }
+    return sum;
+}
+
+static void FrameCacheLine(std::int64_t tick) {
+    static const bool on = TestEnvOn("DC_COOP_TEST_FRAME_CACHE");
+
+    if (!on || !g_test.put || CharaMain.frame == nullptr) {
+        return;
+    }
+
+    int                 body_valid = 0;
+    int                 weapon_valid = 0;
+    const std::uint32_t body = FrameCacheSum(CharaMain.frame, &body_valid);
+    const std::uint32_t weapon = NowWeapon != nullptr ? FrameCacheSum(NowWeapon->frame, &weapon_valid) : 0;
+
+    std::fprintf(stderr, "duntest: frame cache tick %lld body %08x/%d weapon %08x/%d\n", (long long) tick, body, body_valid, weapon, weapon_valid);
 }
 
 void DunTestTick(std::int64_t tick) {
@@ -1072,7 +1448,7 @@ void DunTestTick(std::int64_t tick) {
 
     const int floor = selectMapNo * 256 + UserStatus->cur_floor;
 
-    if (floor != g_test.floor && gameTask == GAME_TASK_PLAY) {
+    if (floor != g_test.floor && CoopPlainPlay()) {
         g_test.floor = floor;
         g_test.put = false;
         g_test.event = g_test.box = -1;
@@ -1081,12 +1457,49 @@ void DunTestTick(std::int64_t tick) {
         FloorLines();
     }
 
+    // coop-resyncblack (x-gate-flow -Returns): DC_COOP_DUNTEST_EACH_EPOCH=N: the user is placed again at each new press clock (a
+    // catch-up's lockstep after a merge), on both copies alike, so its presses use the object again (the gate after each return),
+    // N placements in all.
+    if (static const int each_epoch = TestEnvInt("DC_COOP_DUNTEST_EACH_EPOCH", 0); each_epoch > 0) {
+        static int seen_epoch = -1;
+        static int again = 0;
+
+        if (NetplayTestEpoch() != seen_epoch) {
+            if (seen_epoch >= 0 && again < each_epoch - 1) {
+                again++;
+                g_test.put = false;
+                std::fprintf(stderr, "duntest: a new press clock (epoch %d): the user is placed again (%d of %d)\n", NetplayTestEpoch(), again + 1, each_epoch);
+            }
+            seen_epoch = NetplayTestEpoch();
+        }
+    }
+
     const std::int64_t clock = NetplayTestPressClock();
+
+    // coop-chestcam: DC_COOP_DUNTEST_APART=N (with a chest or atla object): after N ticks of play apart on a floor, the copy of
+    // player DC_COOP_DUNTEST_WHO puts its own player (the game's player there: the link is down apart) on the object, once; that
+    // copy's own Crosses (the test's pads) use it. Nothing before the pair is apart (no linked placement). "duntest: apart: ...".
+    if (static const int apart_at = TestEnvInt("DC_COOP_DUNTEST_APART", -1); apart_at >= 0 && g_test.object != "descend") {
+        static int apart_ticks = 0;
+
+        if (!g_test.put && CoopWorldsApart() && NetplayRole() == g_test.who && CoopPlainPlay() && ++apart_ticks == apart_at) {
+            const int role = NetplayRole();
+
+            g_test.put = true;
+            g_test.who = 1; // (the game's player on this copy)
+            const bool placed = Place();
+
+            std::fprintf(stderr, "duntest: apart: player %d's copy puts its own player (chara %d) on %s, floor %d: %s\n", role,
+                         (int) UserStatus->cur_chara, g_test.object.c_str(), (int) UserStatus->cur_floor, placed ? "placed" : "FAIL not placed");
+        }
+        return;
+    }
 
     if (g_test.object == "descend") {
         Descend(floor);
         ApartAtla(floor, tick);
-    } else if (!g_test.put && !g_test.swapped && TestEnvOn("DC_COOP_DUNTEST_SWAP") && clock >= g_test.at && gameTask == GAME_TASK_PLAY &&
+        ApartPiero(floor, tick);
+    } else if (!g_test.put && !g_test.swapped && TestEnvOn("DC_COOP_DUNTEST_SWAP") && clock >= g_test.at && CoopPlainPlay() &&
                g_partner.chara != nullptr && g_test.floor == floor) {
         // coop-atlaswap (Jep's 2026-11-02 playtest, Atla after a character swap): the pair swaps members first, as her Characters
         // pick and his yes do (Trade), on both copies at the same tick; the user is placed once both members are in.
@@ -1097,7 +1510,7 @@ void DunTestTick(std::int64_t tick) {
 
         std::fprintf(stderr, "duntest: swap at tick %lld: player %d, partner %d (%s)\n", (long long) tick, g_test.swap_player, g_test.swap_partner,
                      traded ? "traded" : "refused");
-    } else if (!g_test.put && clock >= g_test.at && gameTask == GAME_TASK_PLAY && g_partner.chara != nullptr && g_test.floor == floor &&
+    } else if (!g_test.put && clock >= g_test.at && CoopPlainPlay() && g_partner.chara != nullptr && g_test.floor == floor &&
                (!TestEnvOn("DC_COOP_DUNTEST_SWAP") ||
                 (g_test.swapped && UserStatus->cur_chara == g_test.swap_player && g_partner.loaded_chara == g_test.swap_partner))) {
         g_test.put = true;
@@ -1112,7 +1525,7 @@ void DunTestTick(std::int64_t tick) {
             g_test.second = (int) clock + 1;
         }
         if (placed && TestEnv("DC_COOP_DUNTEST_ALSO") != nullptr) {
-            g_test.other_at = (int) clock + 1;
+            g_test.other_at = std::max((int) clock + 1, (int) TestEnvInt("DC_COOP_DUNTEST_ALSO_AT", -1)); // coop-tripwires2
         }
 
         // coop-b4story: DC_COOP_DUNTEST_BOX_BESIDE=1: a small box with a Bread dropped 20 beside the other player as the user is
@@ -1137,6 +1550,20 @@ void DunTestTick(std::int64_t tick) {
 
             UserStatus->ailments[chara] |= AILMENT_POISON;
             std::fprintf(stderr, "duntest: p%d poisoned at tick %lld (member %d)\n", g_test.who, (long long) tick, chara);
+        }
+        if (placed && TestEnvOn("DC_COOP_DUNTEST_SPARKS")) {
+            static sceVu0FVECTOR hit; // (the burst draws round it while it lasts)
+            sceVu0FVECTOR        way = {0.0f, 1.0f, 1.0f, 0.0f};
+            const float         *at = UserPos(g_test.who);
+
+            hit[0] = at[0];
+            hit[1] = at[1] + 10.0f;
+            hit[2] = at[2];
+            hit[3] = 1.0f;
+            HitMark[15].Set(hit, way, HIT_MARK_HIT, 0.5f, 0.01f, 0.02f, 1.0f, 32, at[1]);
+            HitPointMark[15].Set(hit);
+            CWeaponElFx[3].Set(&hit, hit, 60.0f, WEAPON_ELEMENT_THUNDER, 12.0f);
+            std::fprintf(stderr, "duntest: a hit's sparks at (%.0f %.0f %.0f), tick %lld\n", hit[0], hit[1], hit[2], (long long) tick);
         }
     }
 
@@ -1175,10 +1602,11 @@ void DunTestTick(std::int64_t tick) {
 
     Kept(clock);
     MonsterLines(tick, clock); // coop-chestworld
+    FrameCacheLine(tick); // coop-desync1116
     if (g_test.put) {
         PlayerOneItems(tick, clock, false); // coop-chestworld
     }
-    if (g_test.other_at >= 0 && clock >= g_test.other_at && gameTask == GAME_TASK_PLAY) {
+    if (g_test.other_at >= 0 && clock >= g_test.other_at && CoopPlainPlay()) {
         const DunTest kept = g_test;
 
         g_test.object = TestEnv("DC_COOP_DUNTEST_ALSO");
@@ -1190,7 +1618,7 @@ void DunTestTick(std::int64_t tick) {
         g_test.other_at = -1;
     }
 
-    if (static int again = TestEnvInt("DC_COOP_DUNTEST_AGAIN", -1); again >= 0 && clock >= again && gameTask == GAME_TASK_PLAY) {
+    if (static int again = TestEnvInt("DC_COOP_DUNTEST_AGAIN", -1); again >= 0 && clock >= again && CoopPlainPlay()) {
         again = -1;
         const bool placed = Place();
 

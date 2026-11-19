@@ -1,0 +1,20 @@
+# port/src/data/data_read.hpp from Chronicle's port/src/data/data_read.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/data/data_read.hpp
+base port/src/data/data_read.hpp
+from 384cc5b321eb75ec44e6d528c68f0640e202ecd5
+to 3940a92b5cb676c2eb1d711b8adc139d430d360f
+@@ -25,0 +26,4
++// coop: whether the data came from an NTSC disc (languages.json's "release" names NTSC), whose floor
++// title pictures are laid out as NTSC retail drew them (floor_title.cpp).
++bool DataNtscRelease();
++
+@@ -157,0 +162,9
++/**
++ * Jep (co-op), coop-wepmenu: reads the named data files on a thread of their own, ahead of a DataReadLoadFile of each that
++ * then copies the same bytes from memory (a file read twice is read once). Files already asked for are skipped.
++ */
++void DataReadPrefetch(const std::vector<std::string> &paths);
++
++/** Jep (co-op), coop-wepmenu: every DataReadLoadFile so far, and how many of them copied a prefetched file. */
++void DataReadLoadCounts(std::uint64_t *loads, std::uint64_t *from_prefetch);
++

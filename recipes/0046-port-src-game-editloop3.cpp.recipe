@@ -1,0 +1,551 @@
+# port/src/game/editloop3.cpp from Chronicle's port/src/game/editloop3.cpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/src/game/editloop3.cpp
+base port/src/game/editloop3.cpp
+from f0d923fc37435cf55550ee702eb6b9d93e5168a4
+to 3a174669edc91e4c09d23862546cb48baeb5f022
+@@ -10,0 +11,1
++#include <limits>
+@@ -42,0 +44,1
+=42 9504d6e19d884f4b
+@@ -71,0 +74,33
++#include "coop/netplay_test.hpp" // coop-localfix: NetplayMutated
++
++// coop hooks (src/coop defines them at global scope)
++int  CoopWorldsScriptGameFlag(int flag, int value); // coop-mayorhouse (port/src/coop/coop_worlds.cpp)
++int  CoopTownEventMotion(dc::game::CCharacter *character, int motion, bool *over); // coop-xiaopose (port/src/coop/coop_town.cpp)
++bool CoopWorldsScriptWritesHeld();                  // coop-mayorhouse
++bool CoopTownRoomKeepsPeople(const void *program, int event_no); // coop-mayorhide (port/src/coop/coop_town.cpp)
++int  CoopEventTexBlock(int block);    // coop-eventslots: the running own event's player's texture block for one of the event's
++bool CoopEventKeepsVillagers();       // coop-eventslots: an own event together keeps the town's villagers (never displaced)
++bool CoopEventClipPoint(const float *point, float radius); // coop-dayhouses: a scene's clip point kept as its own (port/src/coop/coop_eventslots.cpp)
++bool CoopEventLoadMainChara(char *model, char *info, dc::game::CDataAlloc2<1> *arena); // coop-eventslots: another player's body
++void CoopFishingSpot(dc::game::CCharacter *body); // coop-fishing3: _GOTO_FISHING keeps its fisher where they stood and faced
++bool CoopPondLoadFish(int spot, int slot); // coop-pondfish: _LOAD_FISHING_DATA's fish: the board's pond (true: loaded or joined)
++void CoopEventStartsAt(dc::game::CCharacter *main); // coop-fishing3: where an event's main character stands and faces at its start
++float CoopTownNearestPlayer(const float *villager, float from_game_player); // opt8 (port/src/coop/coop_town.cpp)
++void  CoopTownFootHeardBegin(int villager); // coop-herscreen: each screen's own footsteps (port/src/coop/coop_town.cpp)
++void  CoopTownFootHeardEnd();
++bool  CoopTownVillagersKeptAll(); // coop-drawwrite: linked, every villager kept whatever the detail setting (port/src/coop/coop_town.cpp)
++void CoopScriptMenuOpens(int kind); // coop-scriptmenus: the script's menus on the opener's copy alone (port/src/coop/coop_scriptmenu.cpp)
++int  CoopScriptMenuInit(dc::game::CCamera *camera);
++int  CoopScriptMenuStep();
++int  CoopScriptMenuResult(int here);
++void CoopScriptMenuExit();
++void CoopScriptMenuOver();
++void CoopWorldsSceneChrFile(int index, const char *path);                       // coop-tutimages (port/src/coop/coop_worlds.cpp)
++void CoopWorldsSceneTexture(int block, int file, const char *entry, int order); // coop-tutimages
++void CoopWorldsSceneNpcLoaded(int index, int file, const char *cfg); // coop-sceneactors: each NPC's pack entry, for the other's scene view
++bool CoopTownFadeStepped(); // coop-daytrans: the town's event fade steps once a tick on every copy, not in the draw (port/src/coop/coop_town.cpp)
++bool CoopDayTransStepping();         // coop-daytrans: the time of day's event steps in its world slot now (port/src/coop/coop_eventslots.cpp)
++bool CoopVillagerLeftAsIs(int index); // coop-daytrans: a villager this load or placing leaves as it is (one in a talk)
++int  CoopVillagerLoadFrom();          // coop-daytrans: where the villagers' load starts in their buffer (past the kept ones' data)
++void CoopVillagerLoaded(int index, const dc::game::CDataAlloc2<1> *arena, int from); // coop-daytrans: a villager's data's place
++
+@@ -423,0 +459,12
++// coop: netplay
++// EdEventPointDraw's spin and the event points' sparkle timer, retail's function statics, here so a resync can
++// start them over: a copy that was in a town before keeps them where they were, and the sparkle draws rand when it
++// restarts. The villagers' ground smoothing is put back alike.
++namespace {
++
++float roty = 0.0f;
++float sys_eff_sc = 0.0f;
++int   sys_eff_cnt = 0;
++
++} // namespace
++
+@@ -433,1 +479,0
+- 6358ccb6d8e9f25e
+@@ -440,3 +485,0
+- e4377253d5bfe162
+- ad00479740350882
+- e3b0c44298fc1c14
+@@ -445,1 +488,8
+- 22229b48a0c188df
++        // coop-localfix (Jep's 2026-10-26 Local playtest: OUT OF SYNC 150 ticks after a town join, then the town reloaded):
++        // a draw function, so a copy that draws fewer frames than it ticks (a catch-up's replay) drew the game's rand
++        // fewer times than the host. The sparkle is only drawn: its own generator. DC_NETPLAY_MUTATE=sparkle_game_rand
++        // (twin): the game's rand, as before.
++        static unsigned int sparkle_rand = 1;
++
++        sparkle_rand = sparkle_rand * 1103515245u + 12345u;
++        sys_eff_cnt = (NetplayMutated("sparkle_game_rand") ? rand() : static_cast<int>((sparkle_rand >> 16) & 0x7FFF)) % 20 + 10;
+@@ -1022,0 +1073,3
++        if (CoopVillagerLeftAsIs(i)) { // coop-daytrans: in a talk, kept as it is (its new period's comes as the talk ends)
++            continue;
++        }
+@@ -1043,0 +1097,1
++    const int   used_from = arena->used; // coop-daytrans
+@@ -1044,0 +1099,1
++    CoopVillagerLoaded(static_cast<int>(villager - EdVillager), arena, used_from); // coop-daytrans
+@@ -1122,0 +1178,2
++void PlaceVillagerEntry(CNPCharacter *villagers, VILLAGER_INFO *info, CEditGround *ground, int i); // coop-daytrans (below)
++
+@@ -1277,0 +1335,12
++        if (CoopVillagerLeftAsIs(i)) { // coop-daytrans: in a talk, left where it is (placed as its talk ends: EdVillagerPlaceOne)
++            continue;
++        }
++        PlaceVillagerEntry(villagers, info, ground, i);
++    }
++
+=1334 032b602e1873cc5c
++}
++
++// coop-daytrans: one entry's placing, as EdInitVilagerPosition's last loop does it for each (split out for a villager placed late).
++void PlaceVillagerEntry(CNPCharacter *villagers, VILLAGER_INFO *info, CEditGround *ground, int i) {
++    {
+@@ -1332,0 +1402,1
++}
+@@ -1334,1 +1404,11
+- 032b602e1873cc5c
++// coop-daytrans: villager i loaded alone (EdInitVilager's step for one), from the info the last selection made, into arena.
++int EdVillagerLoadOne(int i, CDataAlloc2<1> *arena) {
+~1023 53c95675e671ecd9|    |
+~1024 aafd204809aad861|    |
++    CopyString(EdVillager[i].resource_name, EdVillagerInfo[i].name);
++    return EdLoadVillager(EdVillagerInfo[i].name, &EdVillager[i], arena);
++}
++
++// coop-daytrans: villager i placed alone, as the last selection placed it (its entry).
++void EdVillagerPlaceOne(int i, CEditGround *ground) {
++    PlaceVillagerEntry(EdVillager, EdVillagerInfo, ground, i);
+@@ -1416,0 +1497,6
++// coop-drawwrite (localaudit 3.8; Jep's 5.3: detail distance is each player's own): which villagers stay flagged is simulation
++// (a flagged one steps its motion, fades in and stands on the ground: CNPCharacter::Step, CheckDraw), so the setting had to be the
++// host's for both, and a short one froze and faded the villagers by player 2 that were far from player 1. Linked, every villager
++// stays flagged on every copy, as the default setting (0 = all) keeps them; each copy then fades out on its own screen alone the
++// ones past its own setting of its own player (CoopTownVillagerDrawBegin, coop_town.cpp). DC_COOP_MUTATE=detail_step_own (twin):
++// this copy's setting, from the game's player, as before.
+@@ -1425,1 +1511,1
+- 0d769a36a189b275
++    float         detail = CoopTownVillagersKeptAll() ? std::numeric_limits<float>::infinity() : ConfigDetailDistance();
+@@ -1516,1 +1602,2
+- 2f39d6c079a888a3
++            // opt8: it stops for the nearest player, not the game's alone (a villager another player talks to stood on as it walked).
++            float distance = CoopTownNearestPlayer(villager_position, DistVector(player_position, villager_position));
+@@ -1532,0 +1620,1
++        CoopTownFootHeardBegin(i); // coop-herscreen: its footsteps sound on this copy only if this screen's player would hear them
+@@ -1533,0 +1622,1
++        CoopTownFootHeardEnd();
+@@ -1547,1 +1636,3
+- ca09b3b1eef6cbb6
++                // coop-herscreen: linked, every kept villager's foot clock runs alike on every copy (CoopTownVillagersKeptAll);
++                // which of them this copy plays is its own player's two nearest (CoopTownFootHeardBegin), as retail's two.
++                EdVillager[i].FootSoundEnable(CoopTownVillagersKeptAll() ? 1 : g_villager_retail_near[i]);
+@@ -2448,0 +2540,27
++// coop-daytrans (cause found under eventslots' dayhold): the fade is the event's state (a script waits on its end, _CHECK_FADE), and retail steps
++// it as it draws. Linked, a copy whose player has a menu of their own open draws that menu, not the town, and its fade stood while the other
++// copy's ran: an event's fade ended on different ticks and the copies parted. In the linked town the fade steps once a tick on every copy
++// (EdFadeStep, from the town's frame and each event slot's step) and the draw only draws it (CoopTownFadeStepped).
++void EdFadeStep() {
+=2458 dd4bd87380e7c0d2
++        return;
++    }
++
+=2467 c5ad9c221d3a7436
+=2468 2ef5ee8980534029
++
+=2470 0b9c361bc15452aa
+=2471 889e6e3b64f87288
+=2472 03757646dca6d1f2
++            fade_end = 1;
++        }
++    } else {
+=2476 6a7740428e0ede7b
++
+=2478 4b933efa3cb377ea
+=2479 868ff451a4f06ef0
++            fade_end = 1;
++        }
++    }
++}
++
+@@ -2467,1 +2585,2
+- c5ad9c221d3a7436
++    if (CoopTownFadeStepped()) { // coop-daytrans: stepped once a tick (EdFadeStep); drawn here
++    } else if (fade_in_out > 0) {
+@@ -3640,0 +3760,11
++    // coop-mayorhide: a co-op room event with both players in the room keeps the room's people (their buffer, animations)
++    if (CoopTownRoomKeepsPeople(EdEventScript.prog, EdEventInfo.event_no)) {
+~8536 d62367edbfbf1b41|        |
++
+~8562 5a056036f88d8bff|        |
+~8563 0c72423b7a6ce5e6|            |
++        }
++
++        return 1;
++    }
++
+@@ -3822,0 +3953,1
++        CoopWorldsSceneChrFile(i, nullptr); // coop-tutimages
+@@ -3829,0 +3961,1
++            CoopWorldsSceneChrFile(i, path.c_str()); // coop-tutimages: which file each pack is, for the other copy's scene view
+@@ -3896,0 +4029,1
++    CoopWorldsSceneNpcLoaded(index, actv_file, name); // coop-sceneactors
+@@ -3970,1 +4103,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(45, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -3975,1 +4110,1
+- 6cdf7e8a3326a766
++            textures[i].block_no = CoopEventTexBlock(45);
+@@ -3982,1 +4117,1
+- 8ff0d741eef017f3
++    TexManager.DeleteTextureBlock(CoopEventTexBlock(45));
+@@ -3984,1 +4119,1
+- 2144f6f5984947d1
++    TexManager.LoadTextureBlockEX(CoopEventTexBlock(45), textures);
+@@ -3999,1 +4134,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(46, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -4004,1 +4141,1
+- 2c0129c756349cf1
++            textures[i].block_no = CoopEventTexBlock(46);
+@@ -4011,1 +4148,1
+- 96279503e90dac86
++    TexManager.DeleteTextureBlock(CoopEventTexBlock(46));
+@@ -4013,1 +4150,1
+- e404cf05d500bcdb
++    TexManager.LoadTextureBlockEX(CoopEventTexBlock(46), textures);
+@@ -4024,0 +4162,1
++    block = CoopEventTexBlock(block); // coop-eventslots
+@@ -4034,1 +4172,3
+- 55e28609a95fac58
++        char  *entry = GetStackString(stack++); // coop-tutimages
++        u_int *file = GetPackFile(pack, entry, &size);
++        CoopWorldsSceneTexture(block, actv_file, entry, i); // coop-tutimages: what the block is made of, for the other copy
+@@ -4156,1 +4296,4
+- 7206690ba09b3327
++    if (CoopEventKeepsVillagers()) { // coop-eventslots
++        return 1;
++    }
++    EdVillagerBuffer.used = CoopVillagerLoadFrom(); // coop-daytrans: 0, or past a villager kept in a talk
+@@ -4439,1 +4582,1
+- 214a994063200182
++    textures[0].block_no = CoopEventTexBlock(40); // coop-eventslots
+@@ -4443,2 +4586,2
+- d524612903f98ff9
+- c9977ee8fcd2a029
++    TexManager.DeleteTextureBlock(CoopEventTexBlock(40));
++    TexManager.LoadTextureBlockEX(CoopEventTexBlock(40), textures);
+@@ -4490,1 +4633,1
+- d524612903f98ff9
++    TexManager.DeleteTextureBlock(CoopEventTexBlock(40)); // coop-eventslots
+@@ -4839,0 +4983,3
++    if (index == -1 && CoopDayTransStepping()) { // coop-daytrans: the world's event moves nobody's body (its watchers stand, held)
++        return 1;
++    }
+@@ -4850,1 +4996,2
+- c1b302bde470a2cc
++    bool  over = false; // coop-xiaopose: player 2's body in her room event plays its own motion for Toan's
++    int   motion = CoopTownEventMotion(character, GetStackInt(stack++), &over);
+@@ -6654,0 +6802,3
++        if (CoopEventClipPoint(plane, distance)) { // coop-dayhouses: together, the running scene's own, the town's ground left as it is
++            return 1;
++        }
+@@ -7359,1 +7509,4
+- 8a3e82fb580bfb86
++    // coop-mayorhouse: not in a room's arrival run as seen on player 2's copy (CoopWorldsScriptWritesHeld)
++    if (!CoopWorldsScriptWritesHeld()) {
+~7359 8a3e82fb580bfb86|        |
++    }
+@@ -7370,1 +7523,1
+- 921b8f7bb761e752
++    SetStack(result, CoopWorldsScriptGameFlag(flag, SaveData->GetGameFlag(flag))); // coop-mayorhouse
+@@ -7381,1 +7534,3
+- a35fe2d1e95f4642
++    if (!CoopWorldsScriptWritesHeld()) { // coop-mayorhouse
+~7381 a35fe2d1e95f4642|        |
++    }
+@@ -7411,1 +7566,3
+- 7a7795b56d0fa58f
++    if (!CoopWorldsScriptWritesHeld()) { // coop-mayorhouse
+~7411 7a7795b56d0fa58f|        |
++    }
+@@ -7973,0 +8131,3
++    if (CoopEventLoadMainChara(model, motion, arena)) { // coop-eventslots: another player's own event: into that player's body
++        return 1;
++    }
+@@ -7981,2 +8141,4
+- b08c0ba6e25b4a91
+- f2d4ad513eaf2cf7
++    FishingLoad(&EdVillagerBuffer, CoopEventTexBlock(8)); // coop-eventslots: the fisher's own blocks
++    if (!CoopPondLoadFish(fish_set, CoopEventTexBlock(54))) { // coop-pondfish: the board's pond, one for all its fishers
++        FishingLoadFish(fish_set, &EdVillagerBuffer, CoopEventTexBlock(54));
++    }
+@@ -8030,0 +8193,2
++    CoopFishingSpot(character); // coop-fishing3: where they stood, facing where they faced; before the line is set at the rod
++
+@@ -8072,1 +8236,1
+- c21de884dbc56ef9
++    FishingLoadEsa(item, EdEventInfo.item_frame[0], CoopEventTexBlock(40)); // coop-eventslots
+@@ -8506,1 +8670,1
+- 266c3fd661a5ff0a
++        TexManager.DeleteTextureBlock(CoopEventTexBlock(i)); // coop-eventslots
+@@ -8577,0 +8742,1
++    CoopEventStartsAt(GetChara(-1)); // coop-fishing3: kept for _GOTO_FISHING (CoopFishingSpot)
+@@ -8768,2 +8933,6
+- 91d52f1810bcc510
+- 4d1420f086134eee
++ * Publishes the world-map or bait choice of the event menu that just finished
++ * to the waiting script.
++ *
++ * Jep (co-op): was PortEdEventMenuMode, which also stepped the menu (EdMenuMode). coop-scriptmenus steps it
++ * in CoopScriptMenuStep (linked, on the opener's copy alone) and the choice is the one every copy has
++ * (CoopScriptMenuResult), so the step and the publishing are apart.
+@@ -8771,5 +8940,8
+- 3861d3a308119496
+- e8530f7e3adf3119
+- 5cf826ed37e3e843
+- 8f33ea31772c343c
+- b5bdcb708c15cb15
++void PortEdEventMenuPublish() {
++    if (menu_mode == ED_MENU_WORLD_MAP) {
++        MenuMapJumpMode = CoopScriptMenuResult(MenuMapJumpMode); // coop-scriptmenus
++
++        if (world_map_result != nullptr) {
+~8774 8f33ea31772c343c|            |
+~8775 b5bdcb708c15cb15|            |
++        }
+@@ -8777,1 +8949,1
+- 36cd40af0a516dec
++    if (menu_mode == ED_MENU_CHANGE_ESA && p_use_item != nullptr) {
+@@ -8779,1 +8951,1
+- f68abe63378970ce
++        ListBaitForScript(reinterpret_cast<RS_STACKDATA *>(p_use_item), CoopScriptMenuResult(EdGetUseItem()));
+@@ -8781,1 +8952,0
+- 47ad9b03c24ea793
+@@ -9012,0 +9184,1
++            CoopScriptMenuOpens(menu_mode); // coop-scriptmenus: whose it is, on every copy
+@@ -9015,0 +9188,1
++                CoopScriptMenuOver();
+@@ -9025,1 +9198,1
+- dbc01d40f7f4e978
++                if (CoopScriptMenuInit(EdEventInfo.camera) != 0) { // coop-scriptmenus: EdInitModeFinish on the opener's copy alone
+@@ -9034,3 +9207,4
+- 1f256d088d4bba0f
+- e3b0c44298fc1c14
+- ada817b0d68159af
++                // coop-scriptmenus: EdDrawOffAll and EdMenuMode on the opener's copy alone; it ends on every copy on its command's tick,
++                // where the choice goes to the script as PortEdEventMenuMode has it (the world map's, a bait's).
++                if (CoopScriptMenuStep() != 0) {
++                    PortEdEventMenuPublish();
+@@ -9040,1 +9214,1
+- 3ebcb3235730056f
++                            int item = CoopScriptMenuResult(EdGetUseItem());
+@@ -9055,1 +9229,1
+- 05814781d6ba1965
++                    CoopScriptMenuExit(); // coop-scriptmenus: retail's EdExitMenu
+@@ -9334,0 +9509,14
++
++// coop-wave2: EdTalkMode runs its world half alone (EdTalkWorldOnly); a copy's own, never state (set and cleared around one step).
++bool g_talk_world_only = false;
++
++// coop-talkcam: EdTalkMode's endings leave the camera to EdTalkEnd (EdTalkEndDefer); a copy's own, never state (set and cleared around one
++// step).  The talker's copy's window ends some ticks before the agreed end; the camera following again there was stepped and drawn
++// for one frame, then put back on the talk's view by the next tick's world half (the developer's rc4 playtest: the camera jumps for one frame).
++bool g_talk_end_deferred = false;
++
++void TalkEndFollowOn(CCameraFollow *camera) {
++    if (camera != nullptr && !g_talk_end_deferred) {
+~6202 5db9529fa0e3d7b2|        |
++    }
++}
+@@ -9376,0 +9565,84
++// coop-talks2: a second talk beside the room's own (player 2's, port/src/coop/coop_town.cpp): this file's talk statics and
++// EdEventInfo's talk fields, swapped with a saved set of them around her talk's start, step and draw. The talk's message
++// window (EditMes1) is swapped by its caller.
++namespace {
++struct EdTalkSaved {
++    CNPCharacter *villager;
++    int           chara_info_id;
++    int           camera;
++    TalkModeState mode;
++    int           select;
++    int           mes_make;
++    int           mes_no;
++    TalkDialog    dialog;
++    s32           npc_id;
++    s32           messages[16];
++    s32           select_message;
++    s32           select_prompt;
++};
++
++void EdCloseTalkMes();
++} // namespace
++
++int EdTalkStateBytes() {
++    return static_cast<int>(sizeof(EdTalkSaved));
++}
++
++void EdTalkStateSwap(void *saved) {
++    auto *other = static_cast<EdTalkSaved *>(saved);
++
++    std::swap(other->villager, talk_villager__2);
++    std::swap(other->chara_info_id, talk_chara_info_id);
++    std::swap(other->camera, talk_camera);
++    std::swap(other->mode, talk_mode);
++    std::swap(other->select, talk_select);
++    std::swap(other->mes_make, TalkMesMake);
++    std::swap(other->mes_no, TalkMesNo);
++    std::swap(other->dialog, talk_dialog);
++    std::swap(other->npc_id, EdEventInfo.talk_npc_id);
+~9168 425efa0d7386c89d|    |
++        std::swap(other->messages[i], EdEventInfo.talk_messages[i]);
++    }
++    std::swap(other->select_message, EdEventInfo.talk_select_message);
++    std::swap(other->select_prompt, EdEventInfo.talk_select_prompt);
++}
++
++// coop-talks2: the talk window closed and ready for a talk's first message (EdCloseTalkMes), for her window as her talk starts.
++void EdTalkWindowReset() {
+~9552 8dcf065308589797|    |
++}
++
++// coop-wave2 (localaudit 3.5: talks local; port/src/coop/coop_town.cpp CoopTalkStep): EdTalkMode's world half alone, on a copy that
++// is not the talker's while the talk is in retail's own window: the window, its pages and answers run on the talker's copy alone.
++void EdTalkWorldOnly(bool on) {
++    g_talk_world_only = on;
++}
++
++// coop-talkcam: the talker's own window step, its end to be agreed (kCmdTalkEnd): EdTalkMode's endings close the window but leave the
++// camera holding the talk's view; EdTalkEnd turns its follow on, on every copy, on the end command's tick.
++void EdTalkEndDefer(bool on) {
++    g_talk_end_deferred = on;
++}
++
++// coop-wave2: the talk is in retail's window (not the dialog framework's, nor yet offered to it): the one a talker's copy may run alone.
++bool EdTalkInRetailWindow() {
++    return talk_dialog == TalkDialog::Retail;
++}
++
++// coop-wave2: what EdTalkMode does as the talk ends (any of its endings into retail's result), done on every copy on the tick the talker's
++// end command applies: its window closed, the camera following again, the villager standing, the pad's menu mode off.
++void EdTalkEnd(CCameraFollow *camera) {
+~9552 8dcf065308589797|    |
++
+=5979 578ac61228560597
+~6202 5db9529fa0e3d7b2|        |
++    }
++
++    if (talk_villager__2 != nullptr) {
++        talk_villager__2->SetMotion(0, 0);
++    }
++
+~8657 a66b866f0151b266|    |
+~8658 01212904f57b44e1|    |
++}
++
+@@ -9446,1 +9718,5
+- 9a0046a34f8e06d5
++    // coop-wave2 (localaudit 3.5: talks local): a copy that is not the talker's runs only the talk's world half (the two turning to
++    // each other, the talk camera and its view); the window, its pages and its answers are the talker's copy's alone (EdTalkWorldOnly).
++    if (!g_talk_world_only) {
+~9446 9a0046a34f8e06d5|        |
++    }
+@@ -9498,0 +9775,4
++    if (g_talk_world_only) { // coop-wave2: the world half done
++        return 0;
++    }
++
+@@ -9559,3 +9839,1
+- bc96be0613558214
+- 01d759cc518e7036
+- 0bf0a088a649c22d
++                TalkEndFollowOn(camera); // coop-talkcam
+@@ -9605,3 +9883,1
+- 225a2031fa522178
+- ae2e7e2650bd7985
+- b8d1918176757f79
++                    TalkEndFollowOn(camera); // coop-talkcam
+@@ -9659,3 +9935,1
+- eac2b69b32fece8c
+- a2bfe96fd2780b99
+- aab81fdfa3632011
++                        TalkEndFollowOn(camera); // coop-talkcam
+@@ -9717,3 +9991,1
+- bc96be0613558214
+- 01d759cc518e7036
+- 0bf0a088a649c22d
++                TalkEndFollowOn(camera); // coop-talkcam
+@@ -9779,0 +10052,77
++
++// coop-tutimages: the event's sprites and sprite tables, for the other copy's view of this copy's scene (port/src/coop/coop_worlds.cpp).
++ED_SPRITE *EdEventSpriteAt(int index) {
++    return GetSprite(index);
++}
++
++CSpriteTable *EdEventSpriteTable(int back) {
++    return back != 0 ? &SpriteTableBack : &SpriteTable;
++}
++
++// coop: netplay: EdEventPointDraw's spin and sparkle and the villagers' ground smoothing started over for a resync.
++void PortEditLoop3ResetForResync() {
++    roty = 0.0f;
+~444 da57c93fece83087|    |
+~450 31b31b49fa61d1a5|    |
++    g_villager_ground_height_map = -1;
++}
++
++// coop-eventslots (Jep's 11-11 playtest item 1: both players use the fishing board at once): every static of the town's one event
++// engine, as (address, bytes, name) ranges, for a player's parked event slot (port/src/coop/coop_eventslots.cpp) to exchange with
++// the live ones around that player's own event's start, steps and draw. The town-wide parts (the villagers' appear and restore
++// tables, the talk statics: EdTalkStateSwap) are left out.
++void EdEventStateRanges(void (*add)(void *at, std::size_t bytes, const char *name, void *context), void *context) {
++#define ED_EVENT_RANGE(x) add(static_cast<void *>(&(x)), sizeof(x), #x, context)
++    ED_EVENT_RANGE(fade_col);
++    ED_EVENT_RANGE(fade_in_out);
++    ED_EVENT_RANGE(fade_end);
++    ED_EVENT_RANGE(fade_step);
++    ED_EVENT_RANGE(EdEventInfo);
++    ED_EVENT_RANGE(ObjHandle);
++    ED_EVENT_RANGE(Sprite);
++    ED_EVENT_RANGE(obj_anime);
++    ED_EVENT_RANGE(simple_event);
++    ED_EVENT_RANGE(event_enable);
++    ED_EVENT_RANGE(run_system_event);
++    ED_EVENT_RANGE(not_wait_load);
++    ED_EVENT_RANGE(motion_stop_flag);
++    ED_EVENT_RANGE(menu_mode);
++    ED_EVENT_RANGE(menu_mode_status);
++    ED_EVENT_RANGE(p_use_item);
++    ED_EVENT_RANGE(event_stop);
++    ED_EVENT_RANGE(event_pause);
++    ED_EVENT_RANGE(skip_enable);
++    ED_EVENT_RANGE(set_wl_matrix);
++    ED_EVENT_RANGE(follow_chara);
++    ED_EVENT_RANGE(sync_camera_ref_chara);
++    ED_EVENT_RANGE(sync_camera_ref_obj);
++    ED_EVENT_RANGE(sync_camera_pos_obj);
++    ED_EVENT_RANGE(BaseBuffer);
++    ED_EVENT_RANGE(actv_file);
++    ED_EVENT_RANGE(actv_buffer);
++    ED_EVENT_RANGE(CurrentDir);
++    ED_EVENT_RANGE(world_pos);
++    ED_EVENT_RANGE(world_rot);
++    ED_EVENT_RANGE(world_local);
++    ED_EVENT_RANGE(local_world);
++    ED_EVENT_RANGE(sync_camera_ref_offset);
++    ED_EVENT_RANGE(work_flag);
++    ED_EVENT_RANGE(asq_table);
++    ED_EVENT_RANGE(ActSeq);
++    ED_EVENT_RANGE(anime_data);
++    ED_EVENT_RANGE(sprite_table);
++    ED_EVENT_RANGE(SpriteTable);
++    ED_EVENT_RANGE(SpriteTableBack);
++    ED_EVENT_RANGE(SceneData);
++    ED_EVENT_RANGE(EdEventScript);
++    ED_EVENT_RANGE(chr_file);
++    ED_EVENT_RANGE(save_l);
++    ED_EVENT_RANGE(save_c);
++    ED_EVENT_RANGE(save_a);
++    ED_EVENT_RANGE(world_map_result);
++    ED_EVENT_RANGE(EdEventBuffer);
++    ED_EVENT_RANGE(EdEventExBuffer);
++    ED_EVENT_RANGE(EdVillagerBuffer);
++#undef ED_EVENT_RANGE
++}
++

@@ -9,8 +9,12 @@
 #include "coop/coop_combat.hpp" // coop: combat (the player lying down)
 #include "coop/coop_core.hpp"
 #include "coop/coop_pause.hpp" // coop-chestworld
+#include "coop/coop_interact.hpp" // coop-atlafly (AtlaFlyToOpener)
+#include "coop/coop_opener.hpp" // coop-atlafly (PresentLitPlayer)
+#include "coop/coop_audio.hpp" // coop-farcull: MonsterSounds
 #include <libvu0.h>
 #include <cmath>
+#include <optional> // coop-tripwires3
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -187,6 +191,7 @@ void motionDrive() {
     }
 
     if (BtEventMode == 0) {
+        coop::MonsterSounds monster_sounds; // coop-farcull: a far monster's own sounds from where it stands
         NowMonstorUnit->Step(driveStepHold | CMonUnitHold);
     }
 
@@ -277,6 +282,7 @@ void motionDrive() {
             CharaMain.motion_type.state.look_at = false;
         }
 
+        coop::SpotJumpPoseFor(1, &CharaMain); // coop-xiaogap2: his jump at a Xiao gap, its real motion (every copy)
         CharaMain.Step();
 
         if (chara == CHARA_XIAO) {
@@ -645,8 +651,13 @@ void motionDrive() {
         }
     }
 
+    // coop-tripwires3: the presentation's effects by the opener's engine's own screen state (on its copy alone; none elsewhere)
+    std::optional<coop::PresentScreenIn> screen;
+
+    screen.emplace();
     if (atraShortGetType != 0 && atraGetStatus != 0) {
         shortAtraEffect.Step();
+        coop::AtlaFlyToOpener(&shortAtraEffect, coop::PresentLitPlayer()); // coop-atlafly: its light balls come down to whoever opened it
     }
 
     if (itemOpenSmallFlag == 1) {
@@ -658,6 +669,7 @@ void motionDrive() {
         itemOpenBig.Step();
         itemOpenBigFx.Step();
     }
+    screen.reset();
 
     if (CEffectHold != 0 || BtEventMode != 0) {
         return;

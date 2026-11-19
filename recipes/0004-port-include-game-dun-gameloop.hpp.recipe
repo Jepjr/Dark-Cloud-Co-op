@@ -1,0 +1,33 @@
+# port/include/game/dun/gameloop.hpp from Chronicle's port/include/game/dun/gameloop.hpp (build\sync-from-coop.ps1). Chronicle's lines appear only as hashes.
+target port/include/game/dun/gameloop.hpp
+base port/include/game/dun/gameloop.hpp
+from 91b8bba00f6a63733c031877af1c358c5fcb598f
+to 9fa39d936f8ce9058696c2541dbb7d2038cd7da9
+@@ -501,0 +502,27
++/**
++ * coop-p2controls3: SetNearLockOnTarget's choice for any body: the lockable monsters in reach (rate) and in front of yaw, nearest
++ * first, into order (16); inner (or null) takes each one's facing product. Returns how many.
++ */
++int NearLockOnOrder(const float *stood, float yaw, float rate, int *order, float *inner);
++
++/**
++ * coop-p2controls3: the target SetNearLockOnTarget takes of that order (the nearest, or the from-th past current).
++ */
++int NearLockOnPick(const int *order, int count, int from, int nearest_only, int current);
++
++/**
++ * coop-p2controls3: CharaRangeRate for member chara (the lock-on's reach).
++ */
++float LockRangeRateOf(int chara);
++
++/**
++ * coop-lockon1118: setTargetCursor's keep for any body: whether the lock on monster no holds for one stood at stood with reach rate;
++ * target (4) takes where the monster stands.
++ */
++int LockOnKeep(const float *stood, int no, float rate, float *target);
++
++/**
++ * coop-lockon1118: setTargetCursor's countdown: steps count (the cursor's) and returns 1 when the lock lets go.
++ */
++int LockOnCountdown(int keep, float *count);
++

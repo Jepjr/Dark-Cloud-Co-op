@@ -19,8 +19,11 @@
 
 #include "coop/coop.hpp"
 #include "coop/coop_inventory.hpp" // coop-lobbyslots: each bag is its profile's
+#include "coop/coop_actor.hpp" // (kMaxPlayers)
+#include "coop/coop_members.hpp" // coop-tram: a seat back plays the member its player holds
 #include "coop/coop_party.hpp"
 #include "coop/netplay.hpp"
+#include "coop/netplay_hello.hpp" // version-scheme: NetplayHelloRelease
 #include "coop/netplay_local.hpp"
 #include "coop/netplay_socket.hpp"
 #include "coop/netplay_steam.hpp"
@@ -228,6 +231,10 @@ struct State {
     std::chrono::steady_clock::time_point friend_at{};
     // DC_LOBBY_TEST_PRESS: the scripted presses done so far.
     std::size_t                           pressed = 0;
+    // DC_LOBBY_TEST_PAD_PRESS: the controller presses done so far and the frame of the last (coop-rehost: per lobby, so a
+    // lobby hosted again after a quit runs the script again, as its other player on this PC takes a seat again).
+    std::size_t                           pad_pressed = 0;
+    int                                   pad_pressed_frame = -100;
     std::chrono::steady_clock::time_point shown_at{};
     // Per seat input (Jep's playtest): the keyboard's keys last frame (KeyboardTyping); the locking Cross let go (a swing
     // only after it); a guest picking its profile again (its card asks though the host's table says it is named).
@@ -2059,8 +2066,8 @@ int SeatOfPad(int pad) {
 // a frame at most, three frames apart, so a stall delays the presses and never merges them. Logged "lobby: test pad press".
 std::uint16_t TestPadPress(int pad) {
     static const char *const spec = TestEnv("DC_LOBBY_TEST_PAD_PRESS");
-    static std::size_t       done = 0;
-    static int               last_frame = -100;
+    std::size_t             &done = g.pad_pressed;
+    int                     &last_frame = g.pad_pressed_frame;
 
     if (spec == nullptr || g.phase != Phase::Run || g.frames - last_frame < 3) {
         return 0;
@@ -2496,8 +2503,21 @@ void MessageWindow(int x, int y, int w, int h, int alpha) {
     MenuHelpWinDraw(x, y, std::max(0.0f, (w - 48) / 16.0f), std::max(0.0f, (h - 44) / 16.0f), alpha);
 }
 
+// version-scheme (Jep 11-14: one numbering): the version, small and dim at the header's top right, on every lobby (host, guest,
+// local), inside the lobby's own plate; said in the log once.
+void DrawVersion(int alpha) {
+    static bool said = false;
+
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "lobby: version shown %s\n", NetplayHelloRelease());
+    }
+    TextRgb(NetplayHelloRelease(), kLeft + kSeats * kPitch - 18, kHeaderY + 6, kDim, alpha, kSmallSize, dc::ui::Alignment::Right);
+}
+
 void DrawHeader(int alpha) {
     Plate(kLeft, kHeaderY, kSeats * kPitch - 4, kHeaderH, alpha);
+    DrawVersion(alpha);
     if (g.guest) {
         // A guest's header: whose game, linked and its round trip; never how it got in (Jep).
         TextColour(SeatName(0) + "'s game", kLeft + 18, kHeaderY + 8, dc::ui::ColorGold, alpha, kTitleSize);
@@ -3191,7 +3211,7 @@ Result Step() {
                     for (int s = 1; s < kSeats && guest_name.empty(); s++) {
                         guest_name = g.seats[s].present ? SeatName(s) : std::string();
                     }
-                    coop::ProfileBagsStart(SeatName(0), guest_name, g.new_game);
+                    coop::ProfileBagsStart({SeatName(0), guest_name}, g.new_game);
                     // Test hook (DC_LOBBY_TEST_RELOAD_SLOT=N): slot N read again right after the start, as a load made then (Jep's
                     // pack 7 session, 2026-11-03: his load after the start put the slot's old bags back).
                     if (const int reload = TestEnvInt("DC_LOBBY_TEST_RELOAD_SLOT", -1); reload >= 0 && !g.new_game) {
@@ -3205,7 +3225,18 @@ Result Step() {
                     }
                     HandOffLocalSeats();
                 }
-                if (result != Result::Start && !g.guest) {
+                // coop-padpick (Jep, 2026-11-12): a start where no other seat is a player on this PC hands no controller to
+                // anyone, so the host is a lone player again and plays every controller (netplay.cpp PadsLone); with
+                // one, each keeps its own. DC_LOBBY_MUTATE=lone_pin_kept (the twin): the host's pin kept, as before.
+                bool local_seat = false;
+
+                for (int s = 1; s < kSeats; s++) {
+                    local_seat = local_seat || (g.seats[s].present && g.seats[s].local);
+                }
+                if (result == Result::Start && !g.guest && !local_seat && !Mutated("lone_pin_kept")) {
+                    std::fprintf(stderr, "lobby: no other seat on this PC: the host plays every controller\n");
+                    NetplayLobbyPinPad(-1);
+                } else if (result != Result::Start && !g.guest) {
                     NetplayLobbyPinPad(-1);
                 }
                 std::fprintf(stderr, "lobby: %s\n", result == Result::Start ? "faded out: the game starts" : "faded out: back to the menu");
@@ -3300,7 +3331,25 @@ int LateJoin(std::uint64_t identity) {
     const int was = had ? g.seats[seat].pick : -1;
     int       member = -1;
 
-    if (was >= 0 && Free(was, seat) && (UserStatus == nullptr || was != UserStatus->cur_chara)) {
+    // coop-tram (Jep's 0.1.6 playtest: P2 became Toan when P1 took the back floor's tram): a seat coming back (every merge of the
+    // copies links again) plays the member its player holds now, the members' own record (coop_members), not its lobby pick again
+    // (Jep's member rules: the lobby is the start only; a trade, a swap or a forced member sticks). Before, the pick came back
+    // whenever it was free of the lobby's seats and was not the game's player (in a town always Toan): P1 had traded for her Xiao,
+    // the merge gave her Xiao again, both held Xiao, and her copy's change to her member was refused at the tram's split
+    // (MemberFree): her copy played on as Toan. DC_LOBBY_MUTATE=back_lobby_pick (twin): the lobby pick again, as before.
+    if (const int holds = had && !Mutated("back_lobby_pick") ? coop::Member(seat) : -1; holds >= 0) {
+        bool other = false;
+
+        for (int p = 0; p < coop::kMaxPlayers; p++) {
+            other = other || (p != seat && coop::Member(p) == holds);
+        }
+        if (!other) {
+            member = holds;
+            std::fprintf(stderr, "lobby: late join: seat %d plays its member %d (%s) again, as its player holds it (its lobby pick %d)\n", seat + 1, holds,
+                         kMembers[holds], was);
+        }
+    }
+    if (member < 0 && was >= 0 && Free(was, seat) && (UserStatus == nullptr || was != UserStatus->cur_chara)) {
         member = was;
     }
     for (int m = 0; m < Usable() && member < 0; m++) {
@@ -3363,6 +3412,32 @@ bool JoinPickTake(int &member, std::string &name) {
     name = g_join_pick_name;
     g_join_pick_set = false;
     return set;
+}
+
+std::string OwnName() {
+    // Test hook (coop-areanotice; DC_LOBBY_TEST_OWN_NAME=Name): a copy started from a saved moment, with no lobby or profile file,
+    // plays as profile Name (its Hello carries it, so the other copy names it so too).
+    if (static const char *const test_name = TestEnv("DC_LOBBY_TEST_OWN_NAME"); test_name != nullptr && test_name[0] != '\0') {
+        return test_name;
+    }
+    const Seat &mine = g.seats[g.me];
+
+    if (mine.present && mine.identity == Identity() && !mine.naming && !mine.name.empty()) {
+        return mine.name;
+    }
+    ReadProfiles();
+    const Profile *profile = ProfileOf(Identity());
+
+    return profile != nullptr ? profile->name : std::string();
+}
+
+std::string NameFor(std::uint64_t identity) {
+    for (int s = 0; s < kSeats && identity != 0; s++) {
+        if (g.seats[s].present && g.seats[s].identity == identity && !g.seats[s].naming && !g.seats[s].name.empty()) {
+            return g.seats[s].name;
+        }
+    }
+    return std::string();
 }
 
 bool WasGuest() {
@@ -3473,9 +3548,9 @@ void NetTick() {
         return;
     }
     if (g.guest && Active()) {
-        if (NetplayLinkUp()) {
+        if (NetplayLinkUp() || NetplayJoinLoaded()) { // (coop-joinload: or loaded in from the host's game, no link)
             // Linked (the host's game is up and the catch-up began): the lobby is done on this copy.
-            std::fprintf(stderr, "lobby: linked: the guest's lobby closes\n");
+            std::fprintf(stderr, "lobby: %s: the guest's lobby closes\n", NetplayLinkUp() ? "linked" : "loaded in");
 #if DC_LOBBY_MODELS
             lobbymodels::Close();
 #endif
@@ -3504,6 +3579,22 @@ int PickOf(int seat) {
 
 bool NewGame() {
     return g.new_game;
+}
+
+int SeatOfPad(int pad) {
+    if (!Active()) {
+        return -1;
+    }
+
+    for (int k = 0; k < kSeats; k++) {
+        const Seat &seat = g.seats[k];
+
+        if (seat.present && seat.local && (seat.pad >= 0 ? seat.pad : 0) == pad) {
+            return k;
+        }
+    }
+
+    return -1;
 }
 
 } // namespace lobby

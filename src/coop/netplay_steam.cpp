@@ -504,6 +504,25 @@ bool NetSteamQueue(std::uint64_t to, int &pending_bytes, int &rate) {
 #endif
 }
 
+// coop-hostquit: netplay_steam.hpp.
+int NetSteamSessionState(std::uint64_t to) {
+    if (InProcess()) {
+        return SteamCoreSessionState(to);
+    }
+#if defined(_WIN32)
+    if (g_helper.session != to) {
+        g_helper.session = to;
+        TellId('Z', to);
+        return -1;
+    }
+    const std::string state = Get("qstate");
+
+    return state.empty() ? -1 : std::atoi(state.c_str());
+#else
+    return -1;
+#endif
+}
+
 bool NetSteamPaced() {
     if (InProcess()) {
         return SteamCorePaced();

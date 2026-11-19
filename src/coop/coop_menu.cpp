@@ -1,9 +1,10 @@
-// Per-player menu overlays (game.coop_menus); see coop_menu.hpp.
+// The co-op menus' glue (each player's own menu beside the world, the town walk, the prompt); see coop_menu.hpp.
 
 #include "coop/game_ns.hpp"
 #include "coop/coop_opener.hpp" // coop-opt7
 #include "coop/coop_menu.hpp"
 #include "coop/coop_audio.hpp" // coop-menuse
+#include "coop/coop_combat.hpp" // coop-comboaudio: CombatTestP1Buttons
 #include "coop/coop_georama.hpp" // coop-town: her own Georama
 #include "coop/coop_worlds.hpp" // coop-bagapart: CoopWorldsTestPadButtons
 #include "coop/coop_town.hpp"  // coop-doorfix: CoopTownCaveHoldsGamePad
@@ -48,12 +49,14 @@
 #include "coop/coop_combat.hpp"
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
+#include "coop/coop_actor.hpp" // coop-bagoverflow: PlayerInMenu
 #include "coop/coop_inventory.hpp"
 #include "coop/coop_interact.hpp" // coop-keypick
 #include "coop/coop_worlds.hpp"   // coop-p2prompt: CoopWorldsVoteAsks
 #include "coop/coop_prompt.hpp"   // coop-townwheel: StepSwapQuestion
 #include "coop/coop_party.hpp"
 #include "coop/coop_pause.hpp"
+#include "coop/coop_wheel.hpp" // coop-p2controls3: StepElementRings
 #include "coop/copies.hpp"
 #include "coop/coop_town.hpp" // coop-townmenus: TownPartnerShown
 #include "coop/netplay.hpp"
@@ -74,33 +77,18 @@ constexpr int kWalkMode = 1;    // ED_MODE_WALK (editmapscript.hpp)
 
 const char *const kNames[6] = {"Toan", "Xiao", "Goro", "Ruby", "Ungaga", "Osmond"};
 
-enum Page { kItems, kEquip, kStatus, kSend, kSystem };
-
-const char *const kPageNames[5] = {"Items", "Equip", "Status", "Send", "System"};
-
-enum SystemRow { kPauseRow, kLeaveRow };
-
-struct Panel {
-    bool          open = false;
-    int           page = 0; // index into the player's page list
-    int           row = 0;
-    std::uint16_t prev = 0;
-    int           notice_ticks = 0;
-    char          notice[64] = "";
-    int           opened = 0; // times opened, for the tests' logs
-};
-
 struct State {
-    Panel panel[2];
     bool  away = false;   // player 2 has left the floor
     int   away_key = -1;  // the floor she left (selectMapNo * 256 + floor)
     bool  rejoin = false; // put her back beside player 1 on the next step
-    bool  pause = false;  // the System page asked for the plain pause
 
-    // A script or chest player 2 started (her Cross on a door, gate or chest): its prompts are hers.
-    // held: the buttons pad 2 still held as it took port 1, kept released until let go.
+    // A script player 2 started that runs as the game's one task (a shared story scene: the world holds for everyone): its
+    // windows are hers, so port 1 reads her pad. coop-choosing (Jep 11-12): nothing is drawn for it on any copy (the black
+    // "<name> is choosing..." cover is gone); every copy shows the scene as the game draws it. Doors, chests, keys and the floor
+    // menu never take it (they run beside the game, each player's own). held: the buttons pad 2 still held as it took port 1.
     bool          prompt = false;
     std::uint16_t prompt_held = 0;
+    int           prompt_key = -1000; // coop-entrance2: the floor her prompt began on (selectMapNo * 256 + floor)
 
     // In a town: who walks Toan and so talks to the shopkeepers (1 or 2; player 2's Start takes it, either
     // Start gives it back, a shop closing gives it back), the buttons the new driver still held as it
@@ -113,8 +101,7 @@ struct State {
 
 State g_state;
 
-// The draw counts the tests read (DC_COOP_MENUDEBUG): this copy's overlay draws per player, the cover.
-int g_drawn[2] = {};
+// The draw count the tests read (DC_COOP_MENUDEBUG): the game menu's cover.
 int g_cover_drawn = 0;
 
 // The party status: UserStatus on a floor; in a town (UserStatus is only set by a dungeon) the same
@@ -166,7 +153,7 @@ int FloorKey() {
 
 // The two play together on a dungeon floor, under control.
 bool OnFloor() {
-    return MenusOn() && mode == kDungeonMode && gameTask == GAME_TASK_PLAY && BtEventMode == 0 && Status() != nullptr &&
+    return MenusOn() && mode == kDungeonMode && CoopPlainPlay() && BtEventMode == 0 && Status() != nullptr &&
            NowDngMap != nullptr && !FullMenuLive(); // coop-fullmenu: not while the game's menu is open beside it
 }
 
@@ -193,107 +180,6 @@ int PartnerChara() {
 
 int CharaOf(int player) {
     return player == 0 ? (Status() != nullptr ? (int) Status()->cur_chara : -1) : PartnerChara();
-}
-
-ITEM_PACK &PackOf(int player) {
-    return player == 0 ? Status()->item_pack : PartnerPack();
-}
-
-int Pages(int player, Page *out) {
-    int count = 0;
-
-    out[count++] = kItems;
-    out[count++] = kEquip;
-    out[count++] = kStatus;
-
-    if (OwnBags()) {
-        out[count++] = kSend;
-    }
-
-    if (mode == kDungeonMode) {
-        out[count++] = kSystem;
-    }
-
-    return count;
-}
-
-Page PageOf(int player) {
-    Page pages[5];
-    int  count = Pages(player, pages);
-
-    return pages[std::clamp(g_state.panel[player].page, 0, count - 1)];
-}
-
-// Each item the player carries once, in pack order (quick-use slots first).
-int Items(int player, int *out, int max) {
-    if (player == 1 && OwnBags()) {
-        return BagItems(out, max);
-    }
-
-    const ITEM_PACK &pack = PackOf(player);
-    int              count = 0;
-    auto             add = [&](int item) {
-        if (item > 0 && count < max && std::find(out, out + count, item) == out + count) {
-            out[count++] = item;
-        }
-    };
-
-    for (int k = 0; k < 3; k++) {
-        if (pack.quick_item_qty[k] > 0) {
-            add(pack.quick_item_slot[k]);
-        }
-    }
-
-    for (int i = 0; i < pack.num && i < 103; i++) {
-        add(pack.item[i]);
-    }
-
-    return count;
-}
-
-int Count(int player, int item) {
-    return player == 1 && OwnBags() ? BagCount(item) : GetNowItemNum((short) item, &PackOf(player));
-}
-
-int Weapons(int player, int *out, int max) {
-    int chara = CharaOf(player);
-    int count = 0;
-
-    for (int slot = 0; chara >= 0 && slot < 11 && count < max; slot++) {
-        if (Status()->chara_weapons[chara][slot].item_no > 0) {
-            out[count++] = slot;
-        }
-    }
-
-    return count;
-}
-
-int Rows(int player, int *out, int max) {
-    switch (PageOf(player)) {
-        case kItems:
-        case kSend:
-            return Items(player, out, max);
-        case kEquip:
-            return Weapons(player, out, max);
-        case kSystem:
-            out[0] = kPauseRow;
-            out[1] = kLeaveRow;
-            return player == 1 ? 2 : 1;
-        default:
-            return 0;
-    }
-}
-
-void Notice(int player, const char *text) {
-    Panel &panel = g_state.panel[player];
-
-    std::snprintf(panel.notice, sizeof panel.notice, "%s", text);
-    panel.notice_ticks = 150;
-    std::printf("coop-menu: P%d %s\n", player + 1, text);
-}
-
-std::string ItemName(int item) {
-    return item > 0 ? dc::battlemenu::detail::DecodeItemNamePort(item, "?") : std::string("-");
 }
 
 WEAPON_HAVE *EquippedOf(int player) {
@@ -373,206 +259,6 @@ bool ReloadPlayerWeapon(int chara) {
     return true;
 }
 
-void Equip(int player, int slot) {
-    SoundOwner sound(player + 1); // coop-menuse: a player's overlay's sounds are theirs
-    int chara = CharaOf(player);
-
-    if (chara < 0 || Status()->equipped_weapon_slot[chara] == slot) {
-        return;
-    }
-
-    if (player == 1) {
-        if (mode == kDungeonMode && g_partner.loaded_chara == chara) {
-            MenuPartnerEquip(slot); // reloads the partner's hand
-        } else {
-            Status()->equipped_weapon_slot[chara] = (s8) slot;
-            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
-        }
-    } else {
-        // Not in the middle of a swing: the hand is reloaded under it.
-        if (mode != kDungeonMode || BtActStatus.action_on != 0 || Mutated("menuequip")) {
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            return;
-        }
-
-        Status()->equipped_weapon_slot[chara] = (s8) slot;
-
-        if (!ReloadPlayerWeapon(chara)) {
-            Notice(player, "weapon kept: its model did not load");
-        }
-
-        SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
-    }
-
-    char line[64];
-    std::snprintf(line, sizeof line, "equips %s (slot %d)", ItemName(Status()->chara_weapons[chara][slot].item_no).c_str(), slot);
-    Notice(player, line);
-}
-
-// Spends one of item from the player's own bag, its quick-use slot first.
-void Spend(int player, int item) {
-    if (player == 1 && SpendFromSlot(item)) {
-        return;
-    }
-
-    DeleteItemAfterUseItem((short) item, &PackOf(player));
-}
-
-void Use(int player, int item) {
-    SoundOwner sound(player + 1); // coop-menuse
-    int chara = CharaOf(player);
-
-    if (chara < 0 || Count(player, item) <= 0) {
-        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-        return;
-    }
-
-    char line[64];
-
-    // The powders work on the user's own equipped weapon.
-    if (item == ITEM_REPAIR_POWDER || item == ITEM_POWERUP_POWDER) {
-        WEAPON_HAVE *weapon = EquippedOf(player);
-        int          used = weapon != nullptr && !Mutated("menupowder") ? ItemUseFunc(Status(), item, chara, ITEM_USE_ON_EQUIP_WEAPON, weapon) : 0;
-
-        if (used == 0) {
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            std::snprintf(line, sizeof line, "%s: no effect", ItemName(item).c_str());
-            Notice(player, line);
-            return;
-        }
-
-        Spend(player, item);
-        SndSePlay(item == ITEM_REPAIR_POWDER ? (int) SE_WEAPON_REPAIR : (int) MENU_SOUND_CONFIRM, -1, 0);
-
-        if (player == 1 && mode == kDungeonMode && g_partner.loaded_chara == chara) {
-            ReloadWeapon(); // a repaired starting weapon is another model
-        } else if (player == 0 && mode == kDungeonMode) {
-            // The game swings with its copy of the weapon (NowWeaponHave), as its menu leaves it.
-            if (weapon->item_no != NowWeaponHave->item_no) {
-                ReloadPlayerWeapon(chara);
-            } else {
-                SetWeaponAttachStatus(NowWeaponHave);
-            }
-        }
-
-        std::snprintf(line, sizeof line, "%s on %s: durability %.0f/%d level %d", ItemName(item).c_str(),
-                      ItemName(weapon->item_no).c_str(), weapon->durability_f, weapon->durability, weapon->level);
-        Notice(player, line);
-        return;
-    }
-
-    if (player == 1) {
-        // Food and drink heal the partner, bombs are thrown: as Square uses them.
-        if (mode == kDungeonMode && g_partner.visible && MenuPartnerUseItem(item)) {
-            std::snprintf(line, sizeof line, "uses %s", ItemName(item).c_str());
-            Notice(player, line);
-            return;
-        }
-
-        // A member who has joined keeps her own life, water and ailments in the party status, so the
-        // rest of the game's own item effects (water, antidotes, Fruit of Eden, the gourd, doughnuts,
-        // stamina) work on her as on player 1. A stand-in's life is co-op's own: those are refused.
-        if (!(chara < Status()->party_size && Status()->max_hp[chara] > 0) || ItemUseFunc(Status(), item, chara, ITEM_USE_ON_CHARA, nullptr) == 0) {
-            SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-            std::snprintf(line, sizeof line, "%s: no effect", ItemName(item).c_str());
-            Notice(player, line);
-            return;
-        }
-
-        Spend(player, item);
-        SndSePlay(SE_CHARA_RECOVER, -1, 0);
-        std::snprintf(line, sizeof line, "uses %s", ItemName(item).c_str());
-        Notice(player, line);
-        return;
-    }
-
-    if (ItemUseFunc(Status(), item, chara, ITEM_USE_ON_CHARA, nullptr) == 0) {
-        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-        return;
-    }
-
-    Spend(player, item);
-    SndSePlay(SE_CHARA_RECOVER, -1, 0);
-    std::snprintf(line, sizeof line, "uses %s", ItemName(item).c_str());
-    Notice(player, line);
-}
-
-void Act(int player, std::uint16_t pressed) {
-    SoundOwner sound(player + 1); // coop-menuse
-    Panel &panel = g_state.panel[player];
-    Page   pages[5];
-    int    page_count = Pages(player, pages);
-    int    rows[128];
-    int    count = Rows(player, rows, 128);
-
-    if ((pressed & (kInputTriangle | kInputCircle)) != 0) {
-        panel.open = false;
-        SndSePlay(MENU_SOUND_REFUSE, -1, 0);
-        std::printf("coop-menu: P%d overlay closed\n", player + 1);
-        return;
-    }
-
-    if ((pressed & (kInputLeft | kInputRight)) != 0) {
-        panel.page = (panel.page + ((pressed & kInputRight) != 0 ? 1 : page_count - 1)) % page_count;
-        panel.row = 0;
-        SndSePlay(MENU_SOUND_CURSOR, -1, 0);
-        return;
-    }
-
-    if (count > 0 && (pressed & (kInputUp | kInputDown)) != 0) {
-        panel.row = (panel.row + ((pressed & kInputDown) != 0 ? 1 : count - 1)) % count;
-        SndSePlay(MENU_SOUND_CURSOR, -1, 0);
-    }
-
-    panel.row = count > 0 ? std::clamp(panel.row, 0, count - 1) : 0;
-
-    if (count == 0) {
-        return;
-    }
-
-    int  at = rows[panel.row];
-    Page page = PageOf(player);
-
-    if (page == kItems && player == 1 && OwnBags() && (pressed & kInputSquare) != 0) {
-        PartnerSlotAssign(at);
-        return;
-    }
-
-    if ((pressed & kInputCross) == 0) {
-        return;
-    }
-
-    switch (page) {
-        case kItems:
-            Use(player, at);
-            break;
-        case kEquip:
-            Equip(player, at);
-            break;
-        case kSend: {
-            Send sent = Mutated("menusend") ? Send::kNone : SendItem(player + 1, at);
-            char line[64];
-
-            std::snprintf(line, sizeof line, "%s %s to P%d", sent == Send::kSent ? "sends" : "cannot send", ItemName(at).c_str(), 2 - player);
-            Notice(player, line);
-            SndSePlay(sent == Send::kSent ? MENU_SOUND_CONFIRM : MENU_SOUND_REFUSE, -1, 0);
-            break;
-        }
-        case kSystem:
-            if (at == kPauseRow) {
-                panel.open = false;
-                g_state.pause = true;
-                std::printf("coop-menu: P%d asks for the pause\n", player + 1);
-            } else {
-                MenuLeaveFloor(!g_state.away);
-                panel.open = false;
-            }
-            break;
-        default:
-            break;
-    }
-}
-
 // Player 2's Start in a town hands her the walk (and the shops); either Start gives it back.
 void StepTownDriver(const InputPadState &one, const InputPadState &two) {
     bool start[2] = {(one.buttons & kInputStart) != 0, (two.buttons & kInputStart) != 0};
@@ -591,7 +277,7 @@ void StepTownDriver(const InputPadState &one, const InputPadState &two) {
         return;
     }
 
-    if (GameMode == kWalkMode && !g_state.panel[1].open && !Mutated("menutown") && !CoopP2Building()) { // coop-town: her Georama
+    if (GameMode == kWalkMode && !Mutated("menutown") && !CoopP2Building()) { // coop-town: her Georama
         // coop-townmenus: linked, her Start is her own pause (coop_townmenu), not Toan's walk (Jep, 2026-10-24: Start is
         // each player's pause). DC_COOP_MUTATE=townstart_handover: the walk handed over, as before (twin).
         const bool own_pause = NetplayLocalPlayer() != 0 && TownPartnerShown(nullptr, nullptr) && !Mutated("townstart_handover");
@@ -616,7 +302,7 @@ void StepTownDriver(const InputPadState &one, const InputPadState &two) {
     g_state.driver_held &= (g_state.driver == 1 ? one : two).buttons;
 }
 
-// With the overlay off (game.coop_menu_panel), player 2's Triangle in a town's walk is her menu: it hands her the
+// Player 2's Triangle in a town's walk is her menu: it hands her the
 // walk, as her Start does, and goes on to the game, whose walk opens the town's menu on Triangle (editloop's
 // EdPadDown(0x10)) from the walker's pad (Jep's 2026-10-20 "pressing y on p2 doesnt open the menu", in Norune).
 // Not on a tick player 1 presses Triangle or Start. DC_COOP_MUTATE=towntriangle (t-triangle-menu town's twin): not.
@@ -640,7 +326,7 @@ void StepTownTriangle(const InputPadState &one, const InputPadState &two) {
     }
     // coop-town (2026-10-21): her Triangle opens her own menu now (coop_townmenu) and Toan stays player 1's; the walk
     // handover on her Triangle stays only as the twin DC_COOP_MUTATE=townwalktriangle.
-    if (!Mutated("townwalktriangle") || MenuPanelOn() || GameMode != kWalkMode || g_state.driver != 1 || !pressed[1] || pressed[0] ||
+    if (!Mutated("townwalktriangle") || GameMode != kWalkMode || g_state.driver != 1 || !pressed[1] || pressed[0] ||
         (one.buttons & kInputStart) != 0) {
         return;
     }
@@ -682,57 +368,6 @@ void TestGold() {
     std::printf("coop-menu: test gives P2 %d gilda: P2 %d, P1 %d\n", std::atoi(gold), PartnerGilda(), (int) Status()->money);
 }
 
-void StepPanel(int player, const InputPadState &pad) {
-    SoundOwner sound(player + 1); // coop-menuse
-    Panel        &panel = g_state.panel[player];
-    std::uint16_t pressed = pad.buttons & ~panel.prev;
-
-    panel.prev = pad.buttons;
-
-    if (panel.notice_ticks > 0) {
-        panel.notice_ticks--;
-    }
-
-    // Player 1's on a floor; player 2's on a floor (down or away too) and in a town.
-    bool allowed = OnFloor() || (player == 1 && InTown());
-
-    // Player 1 cannot open it lying knocked out (the game's own Triangle menu refuses too).
-    if (allowed && player == 0 && Status()->hp[Status()->cur_chara] <= 0) {
-        allowed = false;
-    }
-
-    if (!allowed) {
-        if (panel.open) {
-            panel.open = false;
-            std::printf("coop-menu: P%d overlay closed (no longer free play)\n", player + 1);
-        }
-
-        return;
-    }
-
-    if (!panel.open) {
-        if ((pressed & kInputTriangle) != 0 && MenuPanelOn()) {
-            panel.open = true;
-            panel.row = 0;
-            panel.page += Mutated("menudesync") ? 1 : 0; // the soak's twin (copy B only): a page only the checksum sees
-            panel.opened++;
-            SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
-            std::printf("coop-menu: P%d overlay open (%s)\n", player + 1, mode == kTownMode ? "town" : "floor");
-            if (player != 0) {
-                // coop-pt1111p: what its Items and Status pages read, beside the party's (player 1's: the same pack and purse when
-                // the bags are shared)
-                int mine[128], party[128];
-                std::printf("coop-menu: P%d overlay's bag %d items, %d G; the party's %d items, %d G (bags %s)\n", player + 1,
-                            Items(player, mine, 128), PartnerGilda(), Items(0, party, 128), (int) Status()->money, OwnBags() ? "own" : "shared");
-            }
-        }
-
-        return;
-    }
-
-    Act(player, pressed);
-}
-
 const InputPadState &Neutral() {
     static InputPadState pad = [] {
         InputPadState p;
@@ -742,7 +377,7 @@ const InputPadState &Neutral() {
     return pad;
 }
 
-// DC_COOP_MENUDEBUG: both players' positions, the task and the overlays every 30 ticks, for the tests.
+// DC_COOP_MENUDEBUG: both players' positions and the task every 30 ticks, for the tests.
 void DebugLog() {
     static int ticks = 0;
 
@@ -756,11 +391,11 @@ void DebugLog() {
         MainChara.GetPosition(town);
     }
 
-    std::printf("coop-menu: tick %d mode %d task %d p1 (%.1f %.1f %.1f) p2 (%.1f %.1f %.1f) open %d %d away %d drawn %d %d cover %d "
+    std::printf("coop-menu: tick %d mode %d task %d p1 (%.1f %.1f %.1f) p2 (%.1f %.1f %.1f) away %d cover %d "
                 "owner %d local %d hash %08x floor %d prompt %d vis %d town (%.1f %.1f)\n",
                 ticks, (int) mode, (int) gameTask, CharaMain.pos[0], CharaMain.pos[1], CharaMain.pos[2], g_partner.pos[0], g_partner.pos[1],
-                g_partner.pos[2], (int) g_state.panel[0].open, (int) g_state.panel[1].open, (int) g_state.away, g_drawn[0], g_drawn[1],
-                g_cover_drawn, MenuGameMenuOwner(), NetplayLocalPlayer(), MenuHash(), (int) Status()->cur_floor,
+                g_partner.pos[2], (int) g_state.away,
+                g_cover_drawn, 1, NetplayLocalPlayer(), MenuHash(), (int) Status()->cur_floor,
                 (int) g_state.prompt, (int) g_partner.visible, town[0], town[2]);
 }
 
@@ -775,7 +410,8 @@ void TestSetup() {
     const char *wear = TestEnv("DC_COOP_MENUWEAR");
     const char *wear1 = TestEnv("DC_COOP_MENUWEAR_P1");
 
-    if (done || (give == nullptr && wear == nullptr && wear1 == nullptr) || !OnFloor() || g_partner.loaded_chara < 0) {
+    if (done || (give == nullptr && wear == nullptr && wear1 == nullptr && TestEnv("DC_COOP_TEST_P1_WEAPONS") == nullptr) || !OnFloor() ||
+        g_partner.loaded_chara < 0) {
         return;
     }
 
@@ -808,6 +444,19 @@ void TestSetup() {
                     weapon->durability, weapon->level);
     }
 
+    // coop-wepmenu: DC_COOP_TEST_P1_WEAPONS=N: the player's own member holds N more weapons (its next N after its starting one, in
+    // slots 1..N), a bag of weapons as a player's some floors in, for the weapons page's first open (its models built from each).
+    if (const int more = std::clamp(TestEnvInt("DC_COOP_TEST_P1_WEAPONS", 0), 0, 9); more > 0) {
+        CUserStatus *status = Status();
+        const int    chara = status->cur_chara;
+
+        for (int i = 1; i <= more; i++) {
+            WepDataListToHaveCopy(StarterWeapon(chara) + i, &status->chara_weapons[chara][i]);
+        }
+        std::printf("coop-menu: test P1 member %d holds %d more weapons (items %d to %d)\n", chara, more, StarterWeapon(chara) + 1,
+                    StarterWeapon(chara) + more);
+    }
+
     if (wear1 != nullptr) {
         CUserStatus *status = Status();
         WEAPON_HAVE *weapon = &status->chara_weapons[status->cur_chara][(int) status->equipped_weapon_slot[status->cur_chara]];
@@ -819,47 +468,15 @@ void TestSetup() {
 
 } // namespace
 
-// coop-pt1111o (pt1111m's find: two players with different game.coop_menus desynced every tick on MenuHash): one setting per game,
-// the host's. A joiner takes the host's (the Hello's, netplay_hello.cpp) for this run only: config.json is not written. Same for
-// game.coop_menu_panel, which moves Triangle/Start and the pauses. DC_COOP_MUTATE=menus_own (twin): the joiner keeps its own.
-namespace {
-std::optional<bool> g_host_menus, g_host_panel;
-} // namespace
-
-bool MenusSetting() {
-    return g_host_menus.value_or(dc::platform::ConfigGet().coop_menus);
-}
-
-bool MenuPanelSetting() {
-    return g_host_panel.value_or(dc::platform::ConfigGet().coop_menu_panel);
-}
-
-void MenusAdopt(bool menus, bool panel) {
-    if (Mutated("menus_own")) {
-        return;
-    }
-    g_host_menus = menus;
-    g_host_panel = panel;
-    std::printf("coop-menus: this run plays by the host's settings: game.coop_menus %s, game.coop_menu_panel %s (this copy's own: %s, %s; config.json unchanged)\n",
-                menus ? "on" : "off", panel ? "on" : "off", dc::platform::ConfigGet().coop_menus ? "on" : "off",
-                dc::platform::ConfigGet().coop_menu_panel ? "on" : "off");
-}
-
-void MenusAdoptEnd() {
-    g_host_menus.reset();
-    g_host_panel.reset();
-}
-
+// coopoptions (Jep 11-17): the co-op menus are always on in co-op (game.coop_menus and game.coop_menu_panel retired: the menus
+// open beside the running world, each player's own; the old per-player overlay is gone).
 bool MenusOn() {
-    return Enabled() && MenusSetting();
-}
-
-bool MenuOpen(int player) {
-    return player >= 1 && player <= 2 && g_state.panel[player - 1].open;
+    return Enabled();
 }
 
 void MenuTick() {
     if (!MenusOn()) {
+        StepElementRings(Pad(0), Pad(1)); // coop-p2controls3: each player's element ring (no pause rule without the co-op menus)
         VpadTick(); // the test's virtual gamepads also drive a copy without the co-op menus (mp-menu-pointer-pad)
         return;
     }
@@ -871,18 +488,27 @@ void MenuTick() {
     TestShop();
 
     // Player 2's prompt lasts until play is back under control (or the floor is left).
+    // coop-entrance2 (Jep 11-12: "the 'Toan is choosing...' overlay stays up through the whole walk-in when P2 picked the floor"): a
+    // floor left by her pick stays in the dungeon's mode, and the next floor's walk-in (script 100) is an event, so play was not
+    // "back under control" till that walk-in ended: his screen kept the cover over the floor's opening. The floor changing ends it
+    // too (her pick made). (At the candidate cand1112c, with coop-choosing: no cover is drawn any more and the floor menu is never
+    // hers for him, so the prompt routes only a shared scene's windows; its twin prompt_outlives_floor is retired, the end kept.)
+    const int floor_key = Status() != nullptr ? selectMapNo * 256 + Status()->cur_floor : -1000;
+
     if (g_state.prompt) {
-        if (mode != kDungeonMode || (gameTask == GAME_TASK_PLAY && BtEventMode == 0)) {
+        const bool floor_left = g_state.prompt_key != floor_key;
+
+        if (mode != kDungeonMode || (CoopPlainPlay() && BtEventMode == 0) || floor_left) {
             g_state.prompt = false;
-            std::printf("coop-menu: P2's prompt over (mode %d task %d floor %d)\n", (int) mode, (int) gameTask,
-                        Status() != nullptr ? (int) Status()->cur_floor : -1);
+            std::printf("coop-menu: P2's prompt over (mode %d task %d floor %d)%s\n", (int) mode, (int) gameTask,
+                        Status() != nullptr ? (int) Status()->cur_floor : -1, floor_left ? ": the floor left (her pick made)" : "");
+            std::fprintf(stderr, "coop-menu: P2's prompt over (task %d event %d floor %d)%s\n", (int) gameTask, (int) BtEventMode,
+                         Status() != nullptr ? (int) Status()->cur_floor : -1, floor_left ? ": the floor left (her pick made)" : "");
         } else {
             g_state.prompt_held &= Pad(1).buttons;
         }
     }
 
-    StepPanel(0, Pad(0));
-    StepPanel(1, Pad(1));
     StepKeyPickFor(1, KeyPickPad(1)); // coop-keypick: player 1's own picker at a lock, the game plays on
     if (mode == kDungeonMode) {
         StepUsePrompt(1, Pad(0)); // coop-hischest: his own prompt at a trapped or clown chest, the game plays on
@@ -891,18 +517,16 @@ void MenuTick() {
         StepKeyPickFor(2, KeyPickPad(2)); // coop-doorprompt: hers at the town's cave door (on a floor her walk steps it)
     }
 
-    if (mode == kDungeonMode) {
+    if (mode == kDungeonMode || mode == kTownMode) { // (coop-townally: in a town too, its Allies page's trade)
         StepSwapQuestion(); // coop-townwheel: the swap question, also while the world holds for it
     }
+    // coop-p2controls3: each player's element ring, a pause state of theirs (before the pauses read the zone's hold), stepped here
+    // where the world's hold does not stop it, as the pauses are.
+    StepElementRings(Pad(0), Pad(1));
     // coop-pause: each player's own pause (Start) and the zone's hold.
     PauseTick(Pad(0), Pad(1));
     VpadTick();  // the test's virtual gamepads (DC_TEST_VPAD)
     SlotTrace(); // coop-inventory: the slots' test trace (DC_COOP_SLOTTRACE)
-
-    // The non-pause test's twin: an open overlay holds the game, as a pause would.
-    if (Mutated("menupause") && (g_state.panel[0].open || g_state.panel[1].open)) {
-        driveStepHold = 1;
-    }
 
     DebugLog();
 }
@@ -910,6 +534,8 @@ void MenuTick() {
 void MenuFilterPort(int port, PAD_STATUS *status) {
     if (port == 0) {
         status->button |= CoopWorldsTestPadButtons(); // coop-bagapart: her presses apart (a test hook; 0 otherwise)
+        status->button |= BoneDoorTestButtons();     // coop-choosing: x-back-half -Later's presses (a test hook; 0 otherwise)
+        status->button |= CombatTestP1Buttons();     // coop-comboaudio: the combo rows' P1 attack (a test hook; 0 otherwise)
     }
     if (port == 0) {
         CoopWorldsGamePad0(&status->button); // coop-gatepopup3: the game's own pad, for an apart call's keys
@@ -976,6 +602,9 @@ void MenuFilterPort(int port, PAD_STATUS *status) {
     // game's DunMoveChara takes it on the closing tick: the chest disarmed by it opens at once).
     if (mode == kDungeonMode) {
         status->button &= ~UsePromptHeldAfter(1) & 0xFFFF;
+        // coop-p2actions: and the press that closed his key picker (the Cross that used the key swung his weapon: MenuTick
+        // closes the picker before this tick's pad is read, so it was a new press to DunMoveChara).
+        status->button &= ~KeyPickHeldAfter(1) & 0xFFFF;
     }
     // coop-skeldoor: and his wrong item's refusal at a key door (retail's script holds its player through it).
     // coop-doorfix: in a town apart, the picker of this copy's player (the game's walker).
@@ -987,20 +616,16 @@ void MenuFilterPort(int port, PAD_STATUS *status) {
     }
 
     // In a town player 2 may walk Toan (and talk to the shopkeepers): port 1 reads her pad, less what she
-    // held as she took it, and her Triangle is her overlay's (which, open, holds her). The driver's
-    // Start that changed hands is held back from the town's own menu.
+    // held as she took it. The driver's Start that changed hands is held back from the town's own menu.
     if (mode == kTownMode) {
         if (g_state.driver == 2) {
             InputPadState two = Pad(1);
 
-            // Her Triangle is the overlay's only with game.coop_menu_panel on; else the town's menu (StepTownTriangle).
-            const std::uint16_t overlay = MenuPanelOn() ? kInputTriangle : 0;
-
-            status->button = g_state.panel[1].open ? 0 : two.buttons & ~g_state.driver_held & ~overlay & 0xFFFF;
-            status->left_x = g_state.panel[1].open ? 0x80 : two.left_x;
-            status->left_y = g_state.panel[1].open ? 0x80 : two.left_y;
-            status->right_x = g_state.panel[1].open ? 0x80 : two.right_x;
-            status->right_y = g_state.panel[1].open ? 0x80 : two.right_y;
+            status->button = two.buttons & ~g_state.driver_held & 0xFFFF;
+            status->left_x = two.left_x;
+            status->left_y = two.left_y;
+            status->right_x = two.right_x;
+            status->right_y = two.right_y;
         } else {
             status->button &= ~g_state.driver_held;
         }
@@ -1008,19 +633,11 @@ void MenuFilterPort(int port, PAD_STATUS *status) {
         return;
     }
 
-    // Player 1's overlay has his pad: his character stands and nothing else sees the buttons.
-    if (g_state.panel[0].open && !Mutated("menuhold")) {
-        status->button = 0;
-        status->left_x = status->left_y = status->right_x = status->right_y = 0x80;
-        return;
-    }
-
     // coop-pause: Start is each player's own pause on a floor; player 1's pad reaches nothing while he is in it.
     PauseFilterPort(status);
 
-    // On a floor Triangle is the overlay's, not the game's menu (with the overlay on; and in the trianglemenu
-    // twin, as before game.coop_menu_panel).
-    if ((MenuPanelOn() || Mutated("trianglemenu")) && mode == kDungeonMode && gameTask == GAME_TASK_PLAY && !Mutated("menutriangle")) {
+    // The trianglemenu twin: Triangle taken off the floor's pad, as before Triangle opened the game's menu.
+    if (Mutated("trianglemenu") && mode == kDungeonMode && CoopPlainPlay() && !Mutated("menutriangle")) {
         status->button &= ~kInputTriangle;
     }
 }
@@ -1072,6 +689,9 @@ bool MenuSwapP2Bag() {
 
     std::swap(status->item_pack, PartnerPack());
     std::swap(status->active_item_vol, g_bag.active_item_vol);
+    // coop-bagoverflow: her overflow flag with her bag: retail's menu sets and clears the status's own on its throw-away page
+    // (BattleMenuInit, Btl_InitItemMode, the throw), which with her bag in is hers; the party's waits beside it.
+    std::swap(status->overflow_flag, g_bag.overflow);
     status->money = g_bag.gilda;
     g_bag.gilda = money;
     g_p2_bag_in_pack = !g_p2_bag_in_pack;
@@ -1080,6 +700,10 @@ bool MenuSwapP2Bag() {
 
 bool MenuP2BagInPack() {
     return g_p2_bag_in_pack;
+}
+
+InputPadState MenuOwnPad() {
+    return Pad(0);
 }
 
 void MenuShopEnd() {
@@ -1111,47 +735,20 @@ int MenuTaskNow() {
 bool MenuNotePrompt(bool started, int task_before) {
     // coop-p2atla: only what started a task asks anything (a script, a trapped chest). What her Cross
     // did at once (an Atla taken, a chest she opened herself, a refusal, a swap question) leaves play under control, and
-    // owning the prompt for that tick drew the cover on his copy for a frame (Jep: "the screen flashes Xiao is
-    // choosing on a black screen for a frame"). DC_COOP_MUTATE=atlaprompt is the twin.
+    // owning the prompt for that tick held his pad for a tick (and, before coop-choosing, drew a cover on his copy for a frame).
+    // DC_COOP_MUTATE=atlaprompt is the twin.
     // coop-pt1109c (Jep's 11-09 playtest 1h: she took an Atla during his chest and "Xiao is choosing..." blacked his screen): the task that was running
     // already (his chest's) is not hers. Her Cross's own acts beside his presentation start no task. DC_COOP_MUTATE=prompt_his_task (twin): any task, as before.
-    const bool task_started = gameTask != GAME_TASK_PLAY && (task_before < 0 || (int) gameTask != task_before || Mutated("prompt_his_task"));
+    const bool task_started = !CoopPlainPlay() && (task_before < 0 || (int) gameTask != task_before || Mutated("prompt_his_task"));
 
     if (started && MenusOn() && (task_started || Mutated("atlaprompt"))) {
         g_state.prompt = true;
         g_state.prompt_held = Pad(1).buttons;
-        g_state.panel[1].open = false;
+        g_state.prompt_key = Status() != nullptr ? selectMapNo * 256 + Status()->cur_floor : -1000;
         std::printf("coop-menu: P2 owns the prompt (task %d)\n", (int) gameTask);
     }
 
     return started;
-}
-
-void MenuDrawPromptCover() {
-    int local = NetplayLocalPlayer();
-
-    if (!MenusOn() || !g_state.prompt || local != 1 || mode != kDungeonMode || Mutated("menupromptcover")) {
-        return;
-    }
-
-    static const spRGBA kCover = {0x00, 0x00, 0x00, 0x80};
-    static int          said = 0;
-
-    set2DSpriteC4(Vif1Packet, CRect_i_(0, 0, 640, 448), (spRGBA *) &kCover, (spRGBA *) &kCover, (spRGBA *) &kCover, (spRGBA *) &kCover);
-
-    int         chara = PartnerChara();
-    std::string line = std::string(chara >= 0 ? kNames[chara] : "Your partner") + " is choosing...";
-
-    dc::text::caption::LineStyle style;
-
-    style.status_font = true;
-    style.edge_width = 1.5f;
-    dc::text::caption::DrawLine(line, 320.0f, 210.0f, 12.0f, 1.0f, 400.0f, style, 1.0f, 1.0f, nullptr);
-    g_cover_drawn++;
-
-    if (said++ == 0 && Debug()) {
-        std::printf("coop-menu: prompt cover: %s\n", line.c_str());
-    }
 }
 
 bool MenuHoldsPartner(InputPadState &pad) {
@@ -1159,9 +756,8 @@ bool MenuHoldsPartner(InputPadState &pad) {
         return false;
     }
 
-    // DC_COOP_MUTATE=menupartnerhold (menu-p2-drift's twin): her open overlay leaves her pad to her character.
-    // coop-pause: in her own pause she stands too.
-    if ((g_state.panel[1].open && !Mutated("menupartnerhold")) || PausePlayer(2) || CoopWorldsQuestionHolds(1)) { // (coop-gatepopup: and in a gate's question)
+    // coop-pause: in her own pause she stands.
+    if (PausePlayer(2) || CoopWorldsQuestionHolds(1)) { // (coop-gatepopup: and in a gate's question)
         CombatCancel(pad.buttons);
         pad = Neutral();
         return true;
@@ -1179,7 +775,7 @@ void MenuLeaveFloor(bool leave) {
     g_state.away = leave;
     g_state.away_key = FloorKey();
     g_state.rejoin = !leave;
-    SoundOwner sound(2); // coop-menuse: her overlay's Leave floor / Rejoin
+    SoundOwner sound(2); // coop-menuse: her Leave floor / Rejoin (coop_zonechara)
     SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
     std::printf("coop-menu: P2 %s the floor\n", leave ? "leaves" : "rejoins");
 }
@@ -1208,33 +804,63 @@ bool MenuTownWalk() {
     return InTown();
 }
 
-bool MenuPanelOn() {
-    return MenusOn() && MenuPanelSetting();
-}
-
 bool MenuOpensGameMenu() {
-    // Triangle (the overlay off) or Start (the overlay on). DC_COOP_MUTATE=trianglemenu (t-triangle-menu's twin):
-    // Start again with the overlay off, and Triangle taken off the floor's pad (MenuFilterPort), as before. Not while the game's menu is already open beside the world: the world's
+    // Triangle. DC_COOP_MUTATE=trianglemenu (t-triangle-menu's twin): Start, and Triangle taken off the floor's pad
+    // (MenuFilterPort), as before. Not while the game's menu is already open beside the world: the world's
     // step reads the other player's pad on port 1 then (coop_fullmenu.cpp), and the game has one menu.
-    int button = MenuPanelOn() || Mutated("trianglemenu") ? PAD_START : PAD_TRIANGLE;
+    int button = Mutated("trianglemenu") ? PAD_START : PAD_TRIANGLE;
 
-    const bool opens = MenusOn() && !FullMenuLive() && GamePad.Down(button) != 0 && Status()->hp[Status()->cur_chara] > 0;
+    const bool pressed = MenusOn() && !FullMenuLive() && GamePad.Down(button) != 0;
+    // coop-downmenu: lying down, his Triangle opens his own menu for the dungeon's way out alone (FullMenuDownOpens).
+    const bool opens = pressed && (Status()->hp[Status()->cur_chara] > 0 || FullMenuDownOpens(1));
+
+    // coop-soakfloor (release soak seed 1244, dun1-f1: OUT OF SYNC at tick 1020, the melt timer and the stages apart): down
+    // (life 0, lying in his knockout) his Triangle opens no menu here, but retail's standing Triangle below opens one for a
+    // player whose movement is locked whatever his life, so retail's menu started (FullMenuBegin, every copy) and closed at once
+    // (down). Beside her local menu, on her copy alone, her copy's loop ran hers and not that menu's opening tick: the copies
+    // parted (as coop-soakmenu's first-person opening did, MenuEyeOpensLocal). Linked, where every menu is a local one, that
+    // Triangle is no one's. DC_COOP_MUTATE=down_menu_retail (twin): retail's opening, as before.
+    if (pressed && !opens && button == PAD_TRIANGLE && FullMenuLocalOn() && !Mutated("down_menu_retail")) {
+        FullMenuDropPortOne(PAD_TRIANGLE);
+    }
 
     // coop-localmenu stage 3a: linked, the menu opens on its player's copy alone beside the world, and no menu task starts.
     return opens && !FullMenuOpenLocal();
 }
 
-bool MenuTakePause() {
-    if (!g_state.pause) {
-        return false;
-    }
-
-    g_state.pause = false;
-    return true;
+// coop-soakmenu (release soak seed 1625, floor menus: OUT OF SYNC at tick 360, task 0 on his copy and 0xA on hers, view and
+// stages apart): linked, his Triangle in play opens his local menu (MenuOpensGameMenu), but in the first-person view retail's
+// own check opened the menu task, and with it the menu beside the running world (FullMenuBegin, g_full), which every copy steps
+// in FullMenuGameLoop. Her local menu was open already, so her copy ran her menu's engine (LocalGameLoop) instead and never
+// stepped his: its retail close task put the view back (task 0xA) while his copy's g_full set play (task 0) and stepped his menu.
+// Now his first-person Triangle opens his local menu too, the view held under it (his pad reaches the world as nothing), and its
+// close command runs retail's close task, which goes back to the view (FullMenuClosedByCommand).
+// DC_COOP_MUTATE=eye_menu_lockstep (twin): retail's opening, the menu beside the world, as before.
+bool MenuEyeOpensLocal() {
+    return MenusOn() && !FullMenuLive() && !Mutated("eye_menu_lockstep") && FullMenuOpenLocal();
 }
 
-int MenuGameMenuOwner() {
-    return NetplayMenuOwner();
+// DC_COOP_MUTATE=overflow_retail_open (twin): the game's own opening whatever is open, as before (the menu opened again
+// under itself every few ticks).
+int MenuOverflowOpens() {
+    CUserStatus *status = Status();
+
+    if (!MenusOn() || status == nullptr || Mutated("overflow_retail_open")) {
+        return 0;
+    }
+    if (FullMenuLive() || PlayerInMenu(1)) {
+        return 1;
+    }
+
+    const int flag = status->overflow_flag;
+
+    status->overflow_flag = false;
+    if (FullMenuOpenLocal()) {
+        std::printf("coop-localmenu: player 1's bag is past its room: his menu opens for the throw-away at link tick %lld\n", (long long) NetplayLinkTick());
+        return 2;
+    }
+    status->overflow_flag = flag;
+    return 0;
 }
 
 void MenuDraw() {
@@ -1260,133 +886,11 @@ void MenuDraw() {
 
         dc::text::caption::DrawLine(text, 320.0f, 30.0f, 9.0f, 1.0f, 300.0f, banner, 1.0f, 1.0f, nullptr);
     }
-
-    for (int player = 0; player < 2; player++) {
-        Panel &panel = g_state.panel[player];
-
-        // Linked: only this copy's own player's. Couch: both, each in its corner.
-        if (local != 0 && local != player + 1) {
-            continue;
-        }
-
-        if (!panel.open && panel.notice_ticks == 0) {
-            continue;
-        }
-
-        dc::text::caption::LineStyle style;
-
-        style.status_font = true;
-        style.edge_width = 1.5f;
-
-        int   left = player == 0 ? 0x18 : 0x158;
-        float centre = (float) left + 100.0f;
-        int   top = 0xA8; // under both status panels and the day banner
-
-        if (!panel.open) {
-            dc::text::caption::DrawLine(panel.notice, centre, (float) top, 8.0f, 1.0f, 200.0f, style, 1.0f, 1.0f, nullptr);
-            continue;
-        }
-
-        g_drawn[player]++;
-
-        Page pages[5];
-        int  page_count = Pages(player, pages);
-        Page page = PageOf(player);
-        int  rows[128];
-        int  count = Rows(player, rows, 128);
-        int  chara = CharaOf(player);
-
-        std::vector<std::string> lines;
-
-        switch (page) {
-            case kItems:
-            case kSend:
-                for (int i = 0; i < count; i++) {
-                    lines.push_back(ItemName(rows[i]) + "  x" + std::to_string(Count(player, rows[i])));
-                }
-                break;
-            case kEquip:
-                for (int i = 0; i < count; i++) {
-                    const WEAPON_HAVE &have = Status()->chara_weapons[chara][rows[i]];
-                    std::string        text = ItemName(have.item_no) + "  " + std::to_string(have.attack);
-
-                    if (rows[i] == Status()->equipped_weapon_slot[chara]) {
-                        text += "  (E)";
-                    }
-
-                    lines.push_back(text);
-                }
-                break;
-            case kStatus: {
-                int life = player == 0 ? Status()->hp[chara] : (mode == kDungeonMode && chara >= 0 && chara == g_partner.loaded_chara ? Life() : Status()->hp[std::max(0, chara)]);
-                int most = player == 0 ? Status()->max_hp[chara] : (mode == kDungeonMode && chara >= 0 && chara == g_partner.loaded_chara ? MaxLife() : Status()->max_hp[std::max(0, chara)]);
-                const WEAPON_HAVE *weapon = EquippedOf(player);
-                int gilda = player == 0 ? Status()->money : PartnerGilda();
-
-                lines.push_back(std::string(chara >= 0 ? kNames[chara] : "-") + "  life " + std::to_string(life) + "/" + std::to_string(most));
-                if (chara >= 0) {
-                    lines.push_back("water " + std::to_string((int) Status()->water_now[chara]) + "/" + std::to_string((int) Status()->water_max[chara]) +
-                                    "  defence " + std::to_string((int) Status()->defense[chara]));
-                }
-                if (weapon != nullptr) {
-                    lines.push_back(ItemName(weapon->item_no) + " lv " + std::to_string(weapon->level) + "  atk " + std::to_string(weapon->attack));
-                    lines.push_back("durability " + std::to_string((int) weapon->durability_f) + "/" + std::to_string(weapon->durability) +
-                                    "  abs " + std::to_string(weapon->experience));
-                }
-                lines.push_back(std::to_string(gilda) + " G");
-                break;
-            }
-            case kSystem:
-                lines.push_back("Pause game");
-                if (player == 1) {
-                    lines.push_back(g_state.away ? "Rejoin" : "Leave floor");
-                }
-                break;
-        }
-
-        int first = std::max(0, std::min(panel.row - 4, (int) lines.size() - 9));
-        int shown = std::min((int) lines.size() - first, 9);
-
-        static const spRGBA kBack = {0x08, 0x10, 0x48, 0x70};
-
-        set2DSpriteC4(Vif1Packet, CRect_i_(left, top - 4, 200, 30 + 11 * std::max(1, shown)), (spRGBA *) &kBack, (spRGBA *) &kBack,
-                      (spRGBA *) &kBack, (spRGBA *) &kBack);
-
-        std::string title = std::string(player == 0 ? "1P " : "2P ") + (chara >= 0 ? kNames[chara] : "") + "  < " + kPageNames[page] + " >";
-
-        dc::text::caption::DrawLine(title, centre, (float) top, 8.0f, 1.0f, 190.0f, style, 1.0f, 1.0f, nullptr);
-
-        if (lines.empty()) {
-            dc::text::caption::DrawLine("(none)", centre, (float) top + 12.0f, 8.0f, 1.0f, 190.0f, style, 0.7f, 1.0f, nullptr);
-        }
-
-        for (int i = 0; i < shown; i++) {
-            int                at = first + i;
-            bool               current = page != kStatus && at == panel.row;
-            dc::text::caption::LineStyle row_style = style;
-            std::string        text = lines[at];
-
-            if (current) {
-                row_style.fill[2] = 120;
-                text = "> " + text;
-            }
-
-            dc::text::caption::DrawLine(text, centre, (float) top + 12.0f + 11.0f * i, 8.0f, 1.0f, 190.0f, row_style, current ? 1.0f : 0.75f, 1.0f,
-                              nullptr);
-        }
-
-        const char *hint = page == kItems ? (player == 1 && OwnBags() ? "X use  [] slot" : "X use")
-                           : page == kEquip ? "X equip" : page == kSend ? "X send" : page == kSystem ? "X choose" : "";
-        std::string foot = panel.notice_ticks > 0 ? std::string(panel.notice) : std::string(hint) + "   /\\ close";
-
-        dc::text::caption::DrawLine(foot, centre, (float) top + 14.0f + 11.0f * std::max(1, shown), 7.0f, 1.0f, 190.0f, style, 0.8f, 1.0f, nullptr);
-        (void) page_count;
-    }
 }
 
 void MenuDrawGameMenuCover() {
     int local = NetplayLocalPlayer();
-    int owner = MenuGameMenuOwner();
+    int owner = 1; // (coop-wave2: retail's menu is player 1's; menu_owner retired)
 
     if (!MenusOn() || local == 0 || local == owner || Status() == nullptr || Mutated("menucover")) {
         return;
@@ -1430,19 +934,12 @@ std::uint32_t MenuHash() {
     std::uint32_t hash = 2166136261u;
     auto          add = [&](int value) { hash = (hash ^ (std::uint32_t) value) * 16777619u; };
 
-    for (const Panel &panel : g_state.panel) {
-        add(panel.open);
-        add(panel.page);
-        add(panel.row);
-        add(panel.prev);
-    }
-
     add(g_state.away);
     add(g_state.away_key);
     add(g_state.rejoin);
-    add(g_state.pause);
     add(g_state.prompt);
     add(g_state.prompt_held);
+    add(g_state.prompt_key);
     add(g_state.driver);
     add(g_state.driver_held);
     add(g_state.start_prev[0]);

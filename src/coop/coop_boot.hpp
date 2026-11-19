@@ -29,7 +29,7 @@ void CoopBootKeepScript(const InputScript &script);
 //   area_card_start      ticks before the card shows (retail 20)        area_card_fade_in   ticks fading in (retail 128)
 //   area_card_hold       ticks held (retail 120)                         area_card_fade_out  ticks fading out (retail 128)
 //   area_card_speed      "custom" only: every segment divided by it (2 = twice as fast; 1 by default)
-//   area_card_coop_only  true (default): a single-player game keeps retail's card; false: every game
+//   a single-player game always keeps retail's card (coopoptions retired game.area_card_coop_only)
 // --fast-load and a resync's load keep their short card whatever is set. The card runs between a mode's ticks, inside its
 // load (no netplay tick, no game clock: retail's play-time count is off while it shows), so its length is drawing and wall
 // time only: the copies may differ; a linked copy whose card ends first waits at its first tick for the other's pads.
