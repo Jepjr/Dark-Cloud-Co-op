@@ -2064,6 +2064,15 @@ void CoopP2GeoramaTick() {
     PlacePartTestTick();
     HoverTestTick();
 
+    // coop-georamasplit: the worlds split under her Georama (any way out of his: a door, the cave's walk-in, a menu warp): on her copy,
+    // staying, it goes on as the game's (CoopGeoramaOwnToGame); on his it closes below as before (no player 2).
+    if (g_own.on && !g_own.merge_hold && CoopWorldsApart() && NetplayRole() == 2) { // (her copy: its local player reads 0 apart)
+        CoopGeoramaOwnToGame();
+        if (!g_own.on) {
+            return;
+        }
+    }
+
     // coop-stage4 r4: her Georama carried into the merge holds where it is (no step, no close) until the copies are together and
     // she is shown in the linked town, on both copies alike (the set carried the hold); a link that drops meanwhile closes it.
     if (g_own.on && g_own.merge_hold) {
@@ -2549,6 +2558,40 @@ void CoopGeoramaHerToOwn() {
     EditMenuStatus.parts = -1;
     GameMode = ED_MODE_WALK;
     EdInitVillagerOnOff(EdVillager, EdVillagerInfo, pEditGround);
+}
+
+// coop-georamasplit (the developer's playtest 3: player 1 went into the dungeon and player 2 was put out of her Georama): linked, her Georama is
+// her own editor (g_own), stepped on every copy beside the town's mode. At a split her copy stays in town as the game's player
+// (CoopWorldsStayInTown), but nothing handed her editor to the game: its mode went on walking where she stood and, apart, her own is
+// never stepped (Allowed), so it stood frozen and unseen until the merge closed it. The mirror of CoopGeoramaHerToOwn: on the
+// staying copy her own editor becomes the game's (retail's Georama): its cursor, camera, part in hand and pad as they are (her parts
+// menu shuts, as at the merge). Separate worlds: one player's move never changes the other's play.
+// DC_COOP_MUTATE=georama_split_drops (twin): it is left behind, as before.
+void CoopGeoramaOwnToGame() {
+    if (!g_own.on || NetplayRole() != 2 || Mutated("georama_split_drops")) {
+        return;
+    }
+    if (g_own.menu == 2) {
+        EdExitMenu(); // (her parts menu was made on her copy alone: the town's menu engine)
+    }
+    if (g_own.swapped) {
+        g_own.swapped = false; // (her editor is in the globals already)
+    } else {
+        LoadEditor(g_own.editor);
+    }
+    GamePad = g_own.pad;
+    GamePad.AutoRepeatOff();
+    GamePad.MenuModeOff();
+    g_own.menu = 0;
+    g_own.menu_ticks = 0;
+    g_own.paused = false;
+    g_own.merge_hold = false;
+    g_own.on = false;
+    NowSelectParts = EditMenuStatus.mode == EDIT_MENU_MODE_PLACE ? EditMenuStatus.parts : -1;
+    EditMenuStatus.mode = EDIT_MENU_MODE_CLOSED;
+    GameMode = ED_MODE_GEORAMA;
+    std::printf("coop-georama: player 2's Georama goes on apart as her game's: cursor (%.0f %.0f), part in hand %d, link tick %lld\n",
+                ECursorFrame->position[0], ECursorFrame->position[2], NowSelectParts, (long long) NetplayLinkTick());
 }
 
 // Test hook (DC_WORLDS_TEST_MERGE_IN_MENU_P2=buildpart, her copy apart): once in retail's Georama, the first part of the map's catalogue

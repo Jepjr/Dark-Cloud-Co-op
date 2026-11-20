@@ -11,6 +11,7 @@
 #include "coop/coop_core.hpp"
 #include "coop/coop_actor.hpp"  // coop-downmenu: kMaxPlayers
 #include "coop/coop_combat.hpp" // coop-downmenu: PlayerDown
+#include "coop/netplay.hpp"     // coop-downtarget: NetplayLinkTick
 #include "dun/gameloop.hpp"
 #include "mathutil.hpp"
 #include "monstorunit.hpp"
@@ -150,6 +151,57 @@ void CoopTargetReset() {
     for (int &target : g_target) {
         target = 0;
     }
+}
+
+// coop-downtarget (the developer's playtest 3: "if a monster is targeting a player that dies, that monster will switch to another player and try to
+// attack them no matter how far away they are instead of following normal distance rules"): retail ends a chase by the monster's sleep
+// past its wake distance + 10 of its player (CheckViewLevel below). A downed player's body keeps the monsters round it awake
+// (coop-dungeonp2, OLD-50: they froze and vanished), and an awake monster's script goes after the player it reads (TargetOf: a standing
+// one) however far: the downtrace showed it come from 658 to 353 of her across the floor. A monster kept up only by a downed body (no
+// standing player within its wake distance + 10) now idles: its think waits (CMonstorUnit's step, recipe 0061) and its body stands in
+// its first motion; once a standing player is within reach its think starts again from its own beginning, as from a sleep.
+// DC_COOP_MUTATE=downtarget_keeps_chase (twin): its think goes on, after the far player.
+bool CoopMonsterIdles(int monster_no) {
+    static bool idle[16] = {};
+
+    if (!coop::Enabled() || NowMonstorUnit == nullptr || monster_no < 0 || monster_no >= 16 || coop::Mutated("downtarget_keeps_chase")) {
+        return false;
+    }
+    MONSTOR &monster = NowMonstorUnit->monster[monster_no];
+    bool     now = false;
+
+    if (monster.state == 2 && monster.hp > 0) {
+        float at[4];
+
+        NowMonstorUnit->chara[monster_no][0].GetPosition(at);
+        bool near = false;
+
+        for (int i = 0; i < coop::kMaxPlayers && !near; i++) {
+            Target player;
+
+            near = TargetFor(i, player) && DistVector(at, player.position) <= 10.0f + monster.clip_distance;
+        }
+        now = !near;
+    }
+    // (stateless, so a copy that joined by the state set does as the others: idle, its think kept at its beginning and its body in its
+    // first motion; the edges only logged)
+    if (now) {
+        NowMonstorUnit->script_state[monster_no] = 0;
+        for (int j = 0; j <= monster.attachment_count; j++) {
+            if (NowMonstorUnit->chara[monster_no][j].motion_no != 0) {
+                NowMonstorUnit->chara[monster_no][j].SetMotion(0, 1);
+            }
+        }
+    }
+    if (now != idle[monster_no]) {
+        idle[monster_no] = now;
+        if (CoopDebug()) {
+            std::printf("coop-target: monster %d %s, link tick %lld\n", monster_no,
+                        now ? "idles: no standing player within its reach (a downed one keeps it up)" : "thinks again: a standing player within its reach",
+                        (long long) NetplayLinkTick());
+        }
+    }
+    return now;
 }
 
 int CoopMonsterTarget(int monster_no) {

@@ -5612,6 +5612,8 @@ struct VillagerFade {
     float shared[10] = {};  // the step's alpha, put back after the draw
     bool  swapped = false;
     long long stepped = -1; // the link tick the fades last stepped on
+    int   models[10] = {};  // (DC_COOP_TEST_VILLAGER_DRAWS: this draw's count of each villager's model and shadow)
+    int   shadows[10] = {};
 };
 VillagerFade g_villager_fade; // (this copy's own, never the step's: not in the state set, never read by the step)
 
@@ -5868,6 +5870,10 @@ void TalkPoseEnd() {
 }
 } // namespace
 
+namespace {
+bool InGeorama(int mode); // (below)
+} // namespace
+
 void CoopTownVillagerDrawBegin(CNPCharacter *npcs, int count) {
     VillagerFade &f = g_villager_fade;
 
@@ -5996,8 +6002,49 @@ void VillagerMeshTrace() {
 }
 } // namespace
 
+void CoopTownVillagerDrew(CNPCharacter *npcs, int i, int what) {
+    VillagerFade &f = g_villager_fade;
+    if (npcs == EdVillager && i >= 0 && i < 10) {
+        (what == 1 ? f.models : f.shadows)[i]++;
+    }
+}
+
 void CoopTownVillagerDrawEnd(CNPCharacter *npcs, int count) {
     VillagerFade &f = g_villager_fade;
+
+    // coop-georamashadow test hook (DC_COOP_TEST_VILLAGER_DRAWS=1): every 15th villagers' draw, what this screen drew of each villager on show:
+    // "coop-villagers: pN's <georama|walk> frame drew villager I model M shadow S, ..., link tick T".
+    if (static const bool count_on = TestEnvOn("DC_COOP_TEST_VILLAGER_DRAWS"); count_on && npcs == EdVillager) {
+        static int draws = 0;
+        if (++draws % 15 == 1) {
+            std::string said;
+            for (int i = 0; i < count && i < 10; i++) {
+                if (npcs[i].initialized != 0 && npcs[i].draw_enabled != 0) {
+                    said += " villager " + std::to_string(i) + " model " + std::to_string(f.models[i]) + " shadow " + std::to_string(f.shadows[i]) + ",";
+                }
+            }
+            std::fprintf(stderr, "coop-villagers: p%d's %s frame drew%s link tick %lld\n", NetplayLocalPlayer(), InGeorama(GameMode) ? "georama" : "walk",
+                         said.c_str(), (long long) NetplayLinkTick());
+        }
+    }
+    // coop-georamashadow (the developer's playtest 3, not reproduced here: in her Georama the villagers' shadows alone): any frame of this copy that
+    // drew a villager's shadow without its body says so, once a villager a minute, with what decides each (CNPCharacter::CheckDraw: the
+    // alpha drawn, the town's own and this screen's fade; DrawShadow: near_camera), so the next playtest's log names the cause.
+    static long long alone_said[10] = {-1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30, -1 << 30};
+    for (int i = 0; i < count && i < 10 && npcs == EdVillager; i++) {
+        const long long tick = NetplayLinkTick();
+
+        if (f.shadows[i] > 0 && f.models[i] == 0 && tick - alone_said[i] >= 3600) {
+            alone_said[i] = tick;
+            std::fprintf(stderr,
+                         "coop-villagers: p%d's %s frame drew villager %d's shadow without its body (alpha %.0f: the town's %.0f, this screen's %.0f; "
+                         "near %d, step %d, frame %d), link tick %lld\n",
+                         NetplayLocalPlayer(), InGeorama(GameMode) ? "georama" : "walk", i, npcs[i].ambient_offset[3], f.swapped ? f.shared[i] : npcs[i].ambient_offset[3],
+                         f.swapped ? f.alpha[i] : -1.0f, (int) npcs[i].near_camera, npcs[i].alpha_step, npcs[i].frame != nullptr ? 1 : 0, tick);
+        }
+    }
+    std::fill(std::begin(f.models), std::end(f.models), 0);
+    std::fill(std::begin(f.shadows), std::end(f.shadows), 0);
 
     TalkPoseEnd(); // coop-wave2
     if (npcs == EdVillager) {

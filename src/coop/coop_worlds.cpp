@@ -5721,6 +5721,17 @@ static bool CoopWorldsTakeExitDecide(int next_map) {
         return true;
     }
 
+    // coop-gameover (the developer's playtest 3: "when all players die, it shows the Toan-and-allies-are-dead message on P1's screen and then P1
+    // gets warped out, but after that it shows it on P2's screen and then warps them out"): the game over's way out (every player down:
+    // GAME_TASK_DEAD_GAMEOVER's exit) is everyone's, not player 1's exit: it split, he left and her copy, alone on the floor and down,
+    // ran a second game over of its own (its message, its fade, a second SetDead). Every copy goes, together, on this tick (the
+    // condition reads lockstep state only: the same answer on every copy). DC_WORLDS_MUTATE=gameover_splits (twin): it splits, as before.
+    if (mode == GAME_MODE_DUNGEON && UserStatus != nullptr && UserStatus->hp[UserStatus->cur_chara] <= 0 && coop::BothDown() && !Mutated("gameover_splits")) {
+        std::fprintf(stderr, "worlds: the game over leaves the floor for map %d at link tick %lld: every copy goes\n", next_map, (long long) g_state.tick);
+        std::fflush(stderr);
+        return true;
+    }
+
     // The exit's player leaves (player 1's, or player 2's when her partner took the town's exit), the other copy stays
     // (both copies are here on the same tick).
     const int leaver = g_town_starter;

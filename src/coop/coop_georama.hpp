@@ -99,6 +99,7 @@ void CoopGeoramaPark(int player);
 bool CoopGeoramaParkedPress(int player);
 // coop-stage4 r4: her Georama as the stayer goes on through the merge as her own (her copy, as the link starts), carried with the set.
 void           CoopGeoramaHerToOwn();
+void           CoopGeoramaOwnToGame(); // coop-georamasplit: at a split, on her staying copy, her own Georama becomes the game's
 unsigned char *CoopGeoramaSyncBytes(std::size_t *size);
 void           CoopGeoramaSyncTake();
 void           CoopGeoramaSyncClear();

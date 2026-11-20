@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+
+#include "mainselect.hpp" // coop-gameover: DebugMode (the test hook)
 #include <cstdlib>
 #include <tuple>
 
@@ -4479,7 +4481,17 @@ void DownTestTick() {
     int                who = 0;
     long               when = -1;
 
-    if (spec != nullptr && std::sscanf(spec, "%d:%ld", &who, &when) == 2 && now == when && UserStatus != nullptr) {
+    // coop-gameover test hook (DC_COOP_TEST_GAMEOVER=1): debug mode off on every copy at press clock 1 (a test's --jump start turns it on, and
+    // with it on the game over gets the party up again: GAME_TASK_DEAD_GAMEOVER's PAL debug branch), so the game over leaves as a player's does.
+    if (static const bool gameover = TestEnvOn("DC_COOP_TEST_GAMEOVER"); gameover && now == 1 && DebugMode != 0) {
+        DebugMode = 0;
+        std::printf("coop-downmenu: test: debug mode off at press clock 1 (the game over leaves the floor)\n");
+    }
+    // (coop-gameover: P:T,P:T,... downs each player at its own clock)
+    for (const char *at = spec; at != nullptr && UserStatus != nullptr; at = std::strchr(at, ','), at = at != nullptr ? at + 1 : nullptr) {
+        if (std::sscanf(at, "%d:%ld", &who, &when) != 2 || now != when) {
+            continue;
+        }
         if (who == 1 && !PlayerDown(1)) {
             UserStatus->hp[(int) UserStatus->cur_chara] = 0;
             BtActStatus.invincible_frames = 0;
@@ -4507,6 +4519,18 @@ void DownTestTick() {
         }
         std::printf("coop-downmenu: clock %ld player %d down %d lock %d ready %d monsters after it %d\n", now, player, (int) PlayerDown(player), lock,
                     ready, after);
+    }
+    // coop-downtarget: and each awake monster, whom it goes after and how far it stands from each player.
+    for (int i = 0; i < 16; i++) {
+        if (NowMonstorUnit->monster[i].state != 2 || NowMonstorUnit->monster[i].hp <= 0) {
+            continue;
+        }
+        float at[4];
+
+        NowMonstorUnit->chara[i][0].GetPosition(at);
+        std::printf("coop-downmenu: clock %ld monster %d after player %d, %.0f from player 1, %.0f from player 2 (wakes at %.0f)\n", now, i,
+                    CoopMonsterTarget(i) + 1, DistVector(at, CharaMain.pos), g_partner.visible ? DistVector(at, g_partner.pos) : -1.0f,
+                    NowMonstorUnit->monster[i].clip_distance);
     }
 }
 

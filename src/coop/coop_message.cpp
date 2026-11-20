@@ -14,6 +14,7 @@
 #include "sysmes.hpp"
 #include "dun/gameloop.hpp" // coop-pt1111h: UserStatus
 #include "userstatus.hpp" // coop-pt1111h: the floor's zone
+#include "coop/coop_combat.hpp" // coop-gameover: BothDown
 
 #include "coop/coop.hpp"
 #include "coop/coop_core.hpp"
@@ -360,6 +361,12 @@ void SystemMesSet(int message_no) {
         }
     }
 
+    // coop-gameover (the developer's playtest 3): the game over's message (every player down: 61, "Toan and his allies are dead"; 60 with a party of
+    // one) is everyone's, shown on every player's screen at once, not as player 1's. DC_COOP_MUTATE=gameover_mes_his (twin): his.
+    if ((message_no == 61 || (message_no == 60 && coop::BothDown() && UserStatus != nullptr && UserStatus->hp[UserStatus->cur_chara] <= 0)) &&
+        coop::Enabled() && !coop::Mutated("gameover_mes_his")) {
+        owner = 0;
+    }
     g_sys.message = message_no;
     g_sys.item = g_next_item;
     g_sys.owner = KeyMessage(g_next_item) ? 0 : owner;

@@ -4238,6 +4238,13 @@ static void CoopViewChoose() {
 
     g_view_active = IndependentCameras() || scene || arrival || gap != nullptr || kept_body || engine;
     g_view_swapped = false;
+    // coop-splitscreen (the developer's playtest 2 crash, player 1's chest in the cave apart): whose frame the floor is drawn round is decided
+    // each frame too: this copy's own player's, unless this copy is player 2's with her body loaded (her view round her). Before,
+    // only a scene or an arrival set it and nothing put it back: player 1's own chest drew round the partner's frame (null apart:
+    // the crash). DC_COOP_MUTATE=viewframe_stale (the twin): kept from the last frame that set it, as before.
+    if (!CoopMutate("viewframe_stale")) {
+        g_view_own_frame = NetplayLocalPlayer() != 2 || g_partner.chara == nullptr || g_partner.chara->frame == nullptr;
+    }
     g_view_private = false;
     g_view_eye_on = false;
 
@@ -4703,7 +4710,15 @@ static void DrawTwiceCheck() {
 }
 
 CFrameVu1 *CoopViewFrame() {
-    return g_view_swapped && !g_view_own_frame ? (CFrameVu1 *) g_partner.chara->frame : CharaFrame;
+    const bool partner = g_view_swapped && !g_view_own_frame;
+    // (each change logged: whose frame this copy's floor is drawn round now)
+    static int said = -1;
+    if (const int now = partner ? 2 : 1; now != said) {
+        said = now;
+        std::fprintf(stderr, "coop-view: player %d's copy draws the floor round %s frame (link tick %lld)\n", NetplayLocalPlayer(),
+                     partner ? "the partner's" : "its own player's", (long long) NetplayLinkTick());
+    }
+    return partner ? (CFrameVu1 *) g_partner.chara->frame : CharaFrame;
 }
 
 // coop-p2actions: this copy's draw is from her first-person view: her body is left out of it (retail's player_visible 0).

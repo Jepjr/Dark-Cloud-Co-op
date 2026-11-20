@@ -651,6 +651,31 @@ void PartnerVoiceSound(int se_no) {
     PartnerSound(se_no);
 }
 
+// coop-gapvoice (the developer's playtest 3: "xiao jumping over the xiao-only jumping pits plays toan's attacking noise"): a sound of player 2's
+// own (a SoundOwner's: her gap jump's program, which runs beside the game in her name, its _PLAY_SE) that is a voice (400-499) came
+// through retail's SndSePlay, which takes every voice from the game's voice set: player 1's member's on every copy, Toan's for Xiao.
+// Retail never met it (only the controlled member jumps a gap, so the game's set was the jumper's). Now from her member's own set,
+// where she stands, as her other voices (PartnerSound), on her copy alone (another player's own sound: OthersSound).
+// DC_COOP_AUDIO_MUTATE=ownvoice_gameset (twin): the game's voice set, as before.
+bool HerOwnVoiceSound(int se_no) {
+    if (se_no < 400 || se_no >= 500 || g_owner.player != 2 || !Enabled() || AudioMutated("gamevoice")) {
+        return false;
+    }
+    if (OthersSound(se_no)) {
+        return true; // (hers: not played on another player's copy)
+    }
+    const bool game = AudioMutated("ownvoice_gameset");
+
+    std::fprintf(stderr, "coop-audio: player 2's own voice sound %d from voice set %d (her member %d, the game's set %d) on player %d's copy at link tick %lld\n",
+                 se_no, game ? now_voice_set : g_voice.loaded ? g_voice.chara : -1, g_partner.loaded_chara, now_voice_set, NetplayLocalPlayer(),
+                 (long long) NetplayLinkTick());
+    if (game) {
+        return false;
+    }
+    PartnerSound(se_no);
+    return true;
+}
+
 void AudioSnapshotBefore() {
     g_bgm_driver_no = now_bgm_no;
     g_bgm_driver_play = static_cast<int>(now_bgm_play);
@@ -898,6 +923,9 @@ void CoopAudioStep() {
 // retail's, and on the partner's copy the player's fighting sounds are placed where he stands.
 namespace dc::game { // repin: was PORT_OVERRIDE; a recipe removes the game's own definition
 void SndSePlay(int se_no, int vol, int voice) {
+    if (coop::HerOwnVoiceSound(se_no)) { // coop-gapvoice: her own voice from her member's set
+        return;
+    }
     coop::KeySoundRecord(1, se_no); // coop-comboaudio (the tests'): the player's own key sounds
     // coop-soundpt: the game's one SE_WARNING is motionDrive's beep for player 1's weapon about to break: his alone (Jep's
     // playtest, 2026-10-30: player 2 heard it). Player 2's own (PartnerWeaponWarning) comes owned by her.

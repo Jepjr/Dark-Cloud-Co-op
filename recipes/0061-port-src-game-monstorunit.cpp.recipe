@@ -2,14 +2,15 @@
 target port/src/game/monstorunit.cpp
 base port/src/game/monstorunit.cpp
 from d645aa5a3f8a6b7a547c7c3edf20c0a8c18bd589
-to efb3085ea4255cbe3d657be610d8cfafcdc6c917
-@@ -45,0 +46,5
+to 0bebd06d8bf694208f55e5aa145af7343da56ea2
+@@ -45,0 +46,6
 +namespace coop { bool Mutated(const char *feature); } // coop: deathwall (port/src/coop/coop_party.cpp)
 +bool CoopDormantDrawn(int i); // coop-drawwrite: each player's own detail distance (port/src/coop/coop_party.cpp)
 +int  NetplayLocalPlayer(); // (port/src/coop/netplay.cpp)
++bool CoopMonsterIdles(int monster_no); // coop-downtarget: kept up only by a downed player, its think waits (port/src/coop/coop_target.cpp)
 +int CoopMonsterCulled(int i); // coop-farcull2: 0 drawn, 1 hidden (posed, not drawn), 2 skipped whole (twin) (port/src/coop/coop_party.cpp)
 +
-@@ -774,0 +780,11
+@@ -774,0 +781,11
 +            // coop-farcull2: what this draws that the tick reads runs for every monster taking part, drawn or not: current_monster, the
 +            // motion's hold while paused (SetMotion) and step (CCharacter::Step: motion time and state, fade, events), the frame's place
 +            // (CCharacter::Draw's first lines), the parts' steps, the effects' and events' points and the events' timers. Only the
@@ -21,14 +22,14 @@ to efb3085ea4255cbe3d657be610d8cfafcdc6c917
 +            }
 +            const bool shown = cull == 0;
 +
-@@ -777,2 +793,4
+@@ -777,2 +794,4
 - 336b7b3eca98aa25
 - 93c3e78a44952122
 +            if (shown) {
 ~777 336b7b3eca98aa25|                |
 +                PalletSet();
 +            }
-@@ -791,1 +809,7
+@@ -791,1 +810,7
 - 3215d908b52be8ba
 +            if (shown) {
 ~791 3215d908b52be8ba|                |
@@ -37,20 +38,20 @@ to efb3085ea4255cbe3d657be610d8cfafcdc6c917
 +                character->frame->SetRotation(character->rotation.x, character->rotation.y, character->rotation.z);
 +                character->frame->SetScale(character->scale[0], character->scale[1], character->scale[2]);
 +            }
-@@ -799,1 +823,1
+@@ -799,1 +824,1
 - 25acc6456b941624
 +            if (shown && UserStatus->cur_georama == 3 && UserStatus->cur_floor == 17 && i == 1) {
-@@ -924,1 +948,2
+@@ -924,1 +949,2
 - ba84d601b5447034
 +        // coop-drawwrite: linked, within this copy's own setting of this copy's own player (CoopDormantDrawn), as its model.
 +        const bool     drawn = mon.state == 2 || (mon.state == 1 && (NetplayLocalPlayer() != 0 ? CoopDormantDrawn(i) : mon.player_distance < detail_distance));
-@@ -928,0 +954,5
+@@ -928,0 +955,5
 +        // coop-farcull2: a monster past this copy's floor draw casts none (CoopMonsterCulled; ShadowStep poses the shadow's own frame,
 +        // which only this draws). The twin that skips the whole draw leaves its shadow as drawn.
 +        if (CoopMonsterCulled(i) == 1) {
 +            continue;
 +        }
-@@ -945,81 +975,1
+@@ -945,81 +976,1
 - c5be91453cb932f4
 - 6c74a037265ebdac
 - 402fadf4b386c09e
@@ -133,7 +134,7 @@ to efb3085ea4255cbe3d657be610d8cfafcdc6c917
 - 28d86778615f6af4
 - d10b36aa74a59bcf
 +// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
-@@ -1064,572 +1014,1
+@@ -1064,572 +1015,1
 - 147837c4acf495ee
 - 5add2e81737ceedf
 - ae83dc3f29071c47
@@ -707,7 +708,7 @@ to efb3085ea4255cbe3d657be610d8cfafcdc6c917
 - b2eaf62621c4b4a6
 - d10b36aa74a59bcf
 +// Jep (co-op): defined in src/coop/coop_combat_damage.cpp, which replaces this function.
-@@ -1765,42 +1144,1
+@@ -1765,42 +1145,1
 - b0481a014885654c
 - 6c74a037265ebdac
 - cf05fe19cd93c8f1
@@ -751,7 +752,11 @@ to efb3085ea4255cbe3d657be610d8cfafcdc6c917
 - 28d86778615f6af4
 - d10b36aa74a59bcf
 +// Jep (co-op): defined in src/coop/coop_target.cpp, which replaces this function.
-@@ -2050,0 +1389,11
+@@ -2004,1 +1343,2
+- e48ea7b552282daa
++                if (CoopMonsterIdles(current_monster)) { // coop-downtarget: no standing player within its reach, its think waits
++                } else if (monster[current_monster].stop_timer > 0) {
+@@ -2050,0 +1391,11
 +                    // coop: deathwall: a monster that has died and is falling, its knockback spent, drops straight down. The
 +                    // knockback's direction stays in movement, and the wall check below looks ten units along it: against the
 +                    // wall the killing hit threw it at, it stopped every tick and hung in the air until its death script gave
