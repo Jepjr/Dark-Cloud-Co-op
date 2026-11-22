@@ -10,6 +10,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -970,6 +971,18 @@ bool PrepCurrent(const std::shared_ptr<TakePrep> &prep) {
     return prep && prep->done.load(std::memory_order_acquire) && prep->generation == g_watch_resets.load();
 }
 
+// coop-prepguard (the developer's playtest, 18:51: c0000005 in the touch below, on the preparation's thread): the game thread goes on beside
+// a preparation, loads among it (a join's take is prepared under the card while the area still loads; the joiner's apply ahead of
+// its landing's load), and a load's ArenaClearAll takes every block's pages away for a moment (Windows: decommitted, then
+// committed again) as an outgrown block's remap does (unmapped, then mapped at its slot again). A read of a page in that moment
+// faults. Each chunk's reads hold the arenas' map guard shared (ArenaMapGuard: the clear and the remap hold it exclusively), so
+// a read waits for the pages to be back, and the clear for the chunk being read (1 MB, well under a millisecond).
+// DC_SNAPSHOT_MUTATE=prep_unguarded (twin): no guard, as before.
+std::shared_lock<std::shared_mutex> PrepHold() {
+    static const bool guarded = !Mutated("prep_unguarded");
+    return guarded ? std::shared_lock<std::shared_mutex>(ArenaMapGuard()) : std::shared_lock<std::shared_mutex>();
+}
+
 void PrepRun(const std::shared_ptr<TakePrep> &prep, std::int64_t delay_ms) {
     if (delay_ms > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
@@ -994,6 +1007,7 @@ void PrepRun(const std::shared_ptr<TakePrep> &prep, std::int64_t delay_ms) {
             unsigned char sum = 0;
             for (std::size_t c = next.fetch_add(1); c < chunks.size(); c = next.fetch_add(1)) {
                 const TakePrep::Arena &arena = prep->arenas[chunks[c].first];
+                const auto             held = PrepHold();
                 for (std::size_t i = chunks[c].second; i < std::min(arena.nonzero.size(), chunks[c].second + 256); i++) {
                     sum = (unsigned char) (sum + *(volatile const unsigned char *) (arena.start + i * kPage));
                 }
@@ -1005,6 +1019,7 @@ void PrepRun(const std::shared_ptr<TakePrep> &prep, std::int64_t delay_ms) {
     prep->touch_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     {
         std::lock_guard<std::mutex> lock(g_watch_reset_lock);
+        const auto                  held = PrepHold();
         for (TakePrep::Arena &arena : prep->arenas) {
             arena.watched = ArenaWatch(arena.start, arena.size, nullptr, 0, true);
         }
@@ -1018,6 +1033,7 @@ void PrepRun(const std::shared_ptr<TakePrep> &prep, std::int64_t delay_ms) {
             if (!arena.watched) {
                 continue;
             }
+            const auto held = PrepHold();
             for (std::size_t i = chunks[c].second; i < std::min(arena.nonzero.size(), chunks[c].second + 256); i++) {
                 arena.nonzero[i] = PageZero(arena.start + i * kPage, std::min(kPage, arena.size - i * kPage)) ? 0 : 1;
             }
@@ -1045,6 +1061,62 @@ std::shared_ptr<TakePrep> PrepStart(std::size_t room_size, std::int64_t delay_ms
 
 std::shared_ptr<TakePrep> g_apply_prep; // coop-firsttick: SnapshotApplyPrepare's, for the next apply
 } // namespace
+
+// coop-prepguard test hook (DC_SNAPSHOT_TEST_PREP_RACE=N): for N frames from the copy's 301st, preparations of every live arena back to
+// back on threads of their own (as a join's beside a load), while the game thread carves and loads as it does (a load's
+// ArenaClearAll among it) and outgrows a block of the hook's own (pinned, as every arena is) once a frame up to 240 MB of its
+// 256 MB slot, then zeroes it once a frame (ArenaClear: a load's ArenaClearAll does the same to each block): then "snapshot: test:
+// prep race: P preparations read the arenas over N frames beside R remaps and C clears of a block". A read in a moment
+// a block's pages are away is the crash (c0000005), the copy gone before the line.
+void SnapshotTestPrepRaceAfterFrame() {
+    static const std::int64_t frames_for = TestEnvInt("DC_SNAPSHOT_TEST_PREP_RACE", 0);
+    static std::int64_t       frame = 0, waited = 0;
+    static unsigned char      owner = 0; // (in the image: its block is pinned)
+    static std::mutex         list_lock;
+    static std::vector<Region> list;
+    static std::atomic<bool>  stop{false};
+    static std::atomic<int>   preps{0};
+    static std::thread        readers;
+    static int                remaps = 0, clears = 0;
+    constexpr std::size_t     kStep = std::size_t{4} << 20;
+    if (frames_for <= 0 || frame > frames_for || ++waited <= 300) { // (from the 301st frame: past the test's saved state's load)
+        return;
+    }
+    frame++;
+    if (frame == 1) {
+        ArenaBlock(&owner, kStep);
+        readers = std::thread([] {
+            while (!stop.load()) {
+                auto prep = std::make_shared<TakePrep>();
+                {
+                    std::lock_guard<std::mutex> lock(list_lock);
+                    for (const Region &region : list) {
+                        prep->arenas.push_back({region.start, region.size});
+                    }
+                }
+                PrepRun(prep, 0);
+                preps++;
+            }
+        });
+    }
+    if (frame < 60) {
+        ArenaBlock(&owner, static_cast<std::size_t>(frame + 1) * kStep); // (outgrown: unmapped, then mapped at its slot again)
+        remaps++;
+    } else {
+        ArenaClear(&owner); // (Windows: its pages decommitted, then committed again)
+        clears++;
+    }
+    {
+        std::lock_guard<std::mutex> lock(list_lock);
+        list = Arenas(); // (the game thread's own list of blocks, as PrepStart reads it)
+    }
+    if (frame > frames_for) {
+        stop.store(true);
+        readers.join();
+        std::fprintf(stderr, "snapshot: test: prep race: %d preparations read the arenas over %lld frames beside %d remaps and %d clears of a block\n",
+                     preps.load(), static_cast<long long>(frames_for), remaps, clears);
+    }
+}
 
 static SnapshotApplyStats g_apply_stats;
 

@@ -2,7 +2,7 @@
 target tools/kazarov/src/cpp/platform/arena.cpp
 base tools/kazarov/src/cpp/platform/arena.cpp
 from 2990abc8443e88b3ecc0be6b3720fc85420c84ca
-to 02a47d88d5a52335d684190bd5428c2f7bce4217
+to 70525fbff7ae8c6e3e976405daa5db6aa57c894d
 @@ -4,0 +5,1
 +#include <unordered_map>
 @@ -14,0 +16,1
@@ -54,7 +54,7 @@ to 02a47d88d5a52335d684190bd5428c2f7bce4217
 +        std::fprintf(stderr, "arena: the block of owner image+0x%llx (%zu bytes) could not be pinned\n",
 +                     static_cast<unsigned long long>(at - g_pin_image), bytes);
 +    }
-@@ -59,3 +105,12
+@@ -59,3 +105,13
 - e07b392fe52c485f
 - 624ca08891bece23
 - df93396458ef9f0a
@@ -63,6 +63,7 @@ to 02a47d88d5a52335d684190bd5428c2f7bce4217
 +        const auto old = reinterpret_cast<std::uintptr_t>(block.memory.map);
 +        const auto at = reinterpret_cast<std::uintptr_t>(owner);
 +        const int probe = block.probe;
++        std::unique_lock<std::shared_mutex> away(ArenaMapGuard()); // (its pages gone until the new block is mapped)
 +        if (g_pin_image != 0 && at >= g_pin_image && probe >= 0 && old == PinnedAddress(at - g_pin_image, probe)) {
 +            ArenaMemoryUnmap(block.memory);
 +        } else {
@@ -70,7 +71,7 @@ to 02a47d88d5a52335d684190bd5428c2f7bce4217
 ~60 624ca08891bece23|            |
 +        }
 +        block = MapBlock(owner, bytes, lead, probe); // (its slot again: a pinned owner keeps its address)
-@@ -69,0 +125,16
+@@ -69,0 +126,30
 +void ArenaPinLayout(std::uintptr_t image) { g_pin_image = image; }
 +
 +std::size_t ArenaUnpinned() { return g_unpinned; }
@@ -87,3 +88,19 @@ to 02a47d88d5a52335d684190bd5428c2f7bce4217
 +    }
 +}
 +
++std::shared_mutex &ArenaMapGuard() {
++    static std::shared_mutex guard;
++    return guard;
++}
++
++void ArenaClear(const void *owner) {
++    std::unique_lock<std::shared_mutex> away(ArenaMapGuard());
+=42 85403552f6edb450
++        if (block.owner == owner) {
+~59 e07b392fe52c485f|            |
++        }
++    }
++}
++
+@@ -70,0 +157,1
++    std::unique_lock<std::shared_mutex> away(ArenaMapGuard()); // (each block's pages decommitted, then committed again)

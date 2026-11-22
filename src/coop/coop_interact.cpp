@@ -2814,7 +2814,7 @@ bool Interact() {
         !(state->event->chara_no != -1 && state->chara_done == g_partner.loaded_chara)) {
         // coop-p2prompt: the exit gate asks her on her own screen first, and a slot whose Cross only shows a message (the
         // gate's lock: "It's locked") shows it on her screen; neither starts the game-wide script (coop_useprompt.cpp).
-        if (std::strncmp(state->event->name, "out", 3) == 0 && OpenGatePrompt(2, state)) {
+        if (CoopWorldsFloorGate(state->event->name, state->event->script_no) && OpenGatePrompt(2, state)) { // coop-bossexit
             return true;
         }
 

@@ -2,8 +2,10 @@
 target tools/kazarov/include/platform/arena.hpp
 base tools/kazarov/include/platform/arena.hpp
 from a78be3f4f4c1a47cac3df6f5df34d3aaef95323e
-to 3c980901c2aff6db6a8d817941e94110ad1f4bea
-@@ -19,0 +20,18
+to e22935f5779eafd2233765ab81d063185c8b59ba
+@@ -4,0 +5,1
++#include <shared_mutex>
+@@ -19,0 +21,18
 +// Pinned layout (snapshots between two copies of one executable): from now on each owner's block is mapped at an
 +// address fixed by the owner's offset from `image` (a 256 MiB slot picked by a hash of it) (the executable's load address), so two copies loaded at the same
 +// image address put every arena at the same address whatever order they carved them in. A block whose address is
@@ -22,3 +24,11 @@ to 3c980901c2aff6db6a8d817941e94110ad1f4bea
 +// Every live block: its owner, its first usable byte (the lead included) and its usable size.
 +void ArenaForEach(void (*visit)(const void *owner, unsigned char *start, std::size_t size, void *context), void *context);
 +
+@@ -21,0 +41,7
++// Zeroes one owner's block, as ArenaClearAll zeroes each.
++void ArenaClear(const void *owner);
++
++// Held exclusively while a block's pages are away (ArenaClearAll's zeroing decommits and commits them again on Windows; an
++// outgrown block is unmapped before its new one is mapped): a thread that reads arena pages beside the game's (a snapshot's
++// preparation) holds it shared while it reads, so it never reads a page in that moment.
++std::shared_mutex &ArenaMapGuard();

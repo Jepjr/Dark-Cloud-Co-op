@@ -77,6 +77,9 @@ SnapshotTakeStats SnapshotLastTake();
 void SnapshotTakePrepare();
 // coop-firsttick: the taker's arenas prepared for its next apply (SnapshotApplyBytes leaves an arena page that is zero already).
 void SnapshotApplyPrepare();
+// coop-prepguard test hook (DC_SNAPSHOT_TEST_PREP_RACE=N frames), after each frame: preparations read the arenas while the game
+// thread remaps and zeroes a block (snapshot_state.cpp).
+void SnapshotTestPrepRaceAfterFrame();
 struct SnapshotApplyStats {
     bool        prepared = false;  // a preparation done in time
     std::size_t left_zero = 0;     // the bytes of zero pages left as they were

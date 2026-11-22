@@ -69,6 +69,7 @@
 #include "coop/netplay.hpp"
 #include "coop/netplay_socket.hpp"
 #include "coop/netplay_test.hpp"
+#include "coop/snapshot_state.hpp" // coop-prepguard: its test hook
 #include "coop/coop_storage.hpp" // coop-small2: the party storage's asks apart
 #include "coop/coop_whereis.hpp"  // coop-whereis
 #include "coop/coop_message.hpp" // coop-notices: the others' finds apart
@@ -4008,6 +4009,7 @@ void CoopWorldsAfterFrame() {
     DoorFadeShots(); // coop-doorfade
     ShotsAfterSplit();
     GroundTrace();
+    SnapshotTestPrepRaceAfterFrame(); // coop-prepguard test hook
 }
 
 static void TestApartPresses(); // coop-saveload (below)
@@ -8904,7 +8906,7 @@ bool CoopWorldsHoldFloorChange(int script_no) {
 
     if (NowEventMan != nullptr && script_no >= 0) {
         for (const CDungeonEventData &data : NowEventMan->event) {
-            if (data.event != nullptr && data.enabled && data.event->script_no == script_no && std::strncmp(data.event->name, "out", 3) == 0) {
+            if (data.event != nullptr && data.enabled && data.event->script_no == script_no && CoopWorldsFloorGate(data.event->name, script_no)) {
                 gate = true;
             }
         }
@@ -9691,14 +9693,31 @@ InputPadState VotePad(int port) {
     return NetplayPad(port, linked) ? linked : InputGetPad(port);
 }
 
-// The floor's exit gate (its event named "out") whose script this is.
+} // namespace
+
+// coop-bossexit (issue #263, v0.2.1: "After defeating the boss ... it takes me back to the floor selection screen", together and in
+// single player): a floor's exit gate is an event named "out" whose script is retail's gate program 160 (dun/script/d0N/event.stb:
+// the escape window, _SET_FLOOR_LEVEL, _MAP_JUMP(2); every floor's "out_N" in the seven dungeons' .cfg runs it). Two boss rooms
+// also name their way on "out_2" with a script of their own: Wise Owl Forest's (d02boss.cfg, program 520: _MAP_JUMP(15), on from
+// the forest once Master Utan's win, game flag 34, is set) and Sun and Moon Temple's (d04boss.cfg, program 402: _MAP_JUMP(35)).
+// The gate picker took those as floor gates and sent the player to the floor menu; they now run their own script, as retail.
+// DC_WORLDS_MUTATE=boss_exit_picker (twin): any "out" event is a floor gate, as before.
+bool CoopWorldsFloorGate(const char *name, int script_no) {
+    constexpr int kFloorGateScript = 160;
+
+    return name != nullptr && std::strncmp(name, "out", 3) == 0 && (script_no == kFloorGateScript || Mutated("boss_exit_picker"));
+}
+
+namespace {
+
+// The floor's exit gate (its event named "out", running the gate program: CoopWorldsFloorGate) whose script this is.
 CDungeonEventData *GateEvent(int script_no) {
     if (NowEventMan == nullptr || script_no < 0) {
         return nullptr;
     }
 
     for (CDungeonEventData &data : NowEventMan->event) {
-        if (data.event != nullptr && data.enabled && data.event->script_no == script_no && std::strncmp(data.event->name, "out", 3) == 0) {
+        if (data.event != nullptr && data.enabled && data.event->script_no == script_no && CoopWorldsFloorGate(data.event->name, script_no)) {
             return &data;
         }
     }

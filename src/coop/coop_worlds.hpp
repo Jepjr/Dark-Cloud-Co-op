@@ -371,6 +371,9 @@ void CoopWorldsEntrancePad(int *buttons);
 // coop-gateflow: player's Cross at a floor's exit gate (her own prompt's): to the dungeon's floor
 // menu, no question (together the pair splits there and the other is asked to go along). False: the gate as before.
 bool CoopWorldsGatePicker(int player, CDungeonEventData *gate);
+// coop-bossexit (issue #263): whether a dungeon event (its name, its script) is a floor's exit gate, retail's "out_N" running the
+// gate program 160 (the escape window, the next floor or the town); a boss room's "out_2" that leads on is not one.
+bool CoopWorldsFloorGate(const char *name, int script_no);
 // coop-gatepopup3: port 0's buttons as the game reads them (MenuFilterPort, before any hold), and what an apart call's keys read.
 void          CoopWorldsGamePad0(int *buttons);
 std::uint16_t CoopWorldsCallPadButtons();
