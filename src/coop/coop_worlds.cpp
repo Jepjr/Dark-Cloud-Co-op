@@ -1,4 +1,5 @@
 #include <nlohmann/json.hpp> // coop-pt1111e: the quests' progress slots (first: a game header's macro breaks it after)
+#include "coop/coop_opener.hpp" // coop-atlaleave: AnyPresenting
 #include "coop/game_ns.hpp"
 #include "coop/coop_worlds.hpp"
 #include "coop/coop_ready.hpp" // coop-readyscreen: the one ready check
@@ -3674,6 +3675,15 @@ void getAtraToSaveData(int atra, int atra_no, CSaveData *save, int dungeon, int 
     if (live) {
         slotsync::Settle(dungeon);
     }
+    // coop-atlaparts (GitHub #265): what the take gave its town (a part: the plot obtained; a chip: in the town's list), for the log.
+    int held = 0;
+
+    if (atra >= 0 && atra < 0x28 && save->GetEditPartsInfo(dungeon, atra) != nullptr) {
+        held = save->GetEditPartsInfo(dungeon, atra)->obtained != 0;
+    } else if (atra >= 0x28 && save->GetElemData(dungeon) != nullptr) {
+        held = (int) std::count(save->GetElemData(dungeon), save->GetElemData(dungeon) + 128, (s16) (atra - 0x28));
+    }
+    std::fprintf(stderr, "worlds: atla %d (entry %d) taken in dungeon %d floor %d: its town holds it %d\n", atra, atra_no, dungeon, floor, held);
     QueueProgress(kWhatAtla, atra, atra_no, dungeon, floor);
 }
 } // namespace dc::game
@@ -7993,7 +8003,14 @@ bool CallFree() {
         return DEnterMenu.state == DUN_ENTER_SELECT && !coop::FullMenuOpenFor(Player());
     }
     if (mode == GAME_MODE_DUNGEON) {
-        return CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY && BtEventMode == 0 && !coop::FullMenuOpenFor(Player());
+        // coop-atlaleave: a chest's or an Atla's presentation is its opener's cutscene, but the world stays at play under it (opt7),
+        // so this read the opener free: a call came up over her own Atla, its cursor on GO, and her Cross for the Atla's message
+        // answered it; her copy followed onto the caller's floor with her presentation still running (a crash on the new floor,
+        // coop_opener's PresentFloorEnded). Apart this copy's world is its player's alone, so any presentation in it is theirs.
+        // DC_WORLDS_MUTATE=call_presenting_free (twin): free, as before.
+        const bool presenting = g_state.apart && coop::AnyPresenting() && !Mutated("call_presenting_free");
+
+        return CoopPlainPlay() && BtGameModeFlag == BT_GAME_MODE_PLAY && BtEventMode == 0 && !coop::FullMenuOpenFor(Player()) && !presenting;
     }
 
     // coop-gatepopup2 (Jep's 2026-10-28 playtest: the cave's call was drawn over P2's talk with the mayor, his name tag over its
@@ -8108,6 +8125,33 @@ void CallTick() {
         indoor_called = true;
         std::fprintf(stderr, "worlds: test: a call injected on this copy (player %d) walking inside %s\n", Player(), EdInteriorName);
         CallReceived(3 - Player(), 0, 1, 0);
+    }
+
+    // coop-atlaleave test hook DC_WORLDS_TEST_CALL_PRESENTING=1: this copy, apart on a floor, once gets a call as from the other
+    // player (to this dungeon's next floor, from this one) as its own player's presentation starts (an Atla's or a chest's).
+    if (static const bool test_presenting = TestEnvOn("DC_WORLDS_TEST_CALL_PRESENTING"); test_presenting) {
+        static bool presenting_called = false;
+
+        if (!presenting_called && c.from == 0 && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && coop::AnyPresenting()) {
+            presenting_called = true;
+            std::fprintf(stderr, "worlds: test: a call injected on this copy (player %d) as its player's presentation runs on floor %d\n", Player(),
+                         (int) UserStatus->cur_floor + 1);
+            CallReceived(Player() == 1 ? 2 : 1, selectMapNo, UserStatus->cur_floor + 1, UserStatus->cur_floor); // (as from a peer)
+        }
+    }
+    // coop-atlaleave test hook DC_WORLDS_TEST_FLOOR_PRESENTING=N: this copy, apart on a floor, once goes on to the dungeon's next
+    // floor N ticks into its own player's presentation (as a yes to a call followed straight on: the floor left mid-presentation).
+    if (static const int test_leave = TestEnvInt("DC_WORLDS_TEST_FLOOR_PRESENTING", 0); test_leave > 0) {
+        static int  presenting_ticks = 0;
+        static bool presenting_left = false;
+
+        if (!presenting_left && g_state.apart && mode == GAME_MODE_DUNGEON && UserStatus != nullptr && coop::AnyPresenting() && ++presenting_ticks >= test_leave) {
+            presenting_left = true;
+            std::fprintf(stderr, "worlds: test: this copy (player %d) leaves floor %d for floor %d %d ticks into its player's presentation\n", Player(),
+                         (int) UserStatus->cur_floor + 1, (int) UserStatus->cur_floor + 2, presenting_ticks);
+            std::fflush(stderr);
+            NetplayGoToFloor(selectMapNo, UserStatus->cur_floor + 1);
+        }
     }
 
     // The called copy after its yes: black where it is until the caller's copy is on the floor, then straight onto it.

@@ -44,6 +44,7 @@ extern float        now_bgm_fade_vol;
 #include "coop/coop_core.hpp"
 #include "coop/coop_fullmenu.hpp"
 #include "coop/coop_town.hpp" // coop-soundpt: CoopTownListener
+#include "coop/coop_worlds.hpp" // coop-onesound: CoopWorldsApart
 #include "coop/netplay.hpp"
 
 // snd.cpp's state that picks a sound's table row (GetSeInfo).
@@ -79,6 +80,11 @@ extern CCharacter *Chara; // editloop.cpp: the town's player
 
 namespace coop {
 bool PresentEngine(); // coop_opener.hpp (not included: its PlayerPresenting(int) would meet this file's own)
+// coop-onesound (below): whether this copy leaves the shared sounds to player 1's window on this PC, and its ambient port volume.
+bool SharedSoundsElsewhere();
+int  AmbientPortVolume(int volume);
+bool SharedLoopSe(int se_no);
+bool SharedFlatSe(int se_no);
 }
 
 namespace coop {
@@ -341,7 +347,7 @@ void MusicExcg(float distance, float *field, float *battle) {
 void ReleaseMusic(bool reset) {
     if (g_music.held) {
         SoundCoopMusicScale(MIDI_PORT_BGM, 1.0f);
-        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, -1);
+        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, AmbientPortVolume(-1)); // (coop-onesound)
         SoundCoopStopBattle();
         g_music.held = false;
         if (Logging()) {
@@ -401,7 +407,7 @@ void BattleMix(float player_distance, int preserve_bgm, float retail_field, floa
 
     const int battle_default = SoundCoopSequenceVolume(MIDI_PORT_AMBIENT, kBattleSequence);
     if (battle > 0.0f && battle_default >= 0 && SoundCoopStartBattle(kBattleSequence)) {
-        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, static_cast<int>(battle * battle_default));
+        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, AmbientPortVolume(static_cast<int>(battle * battle_default))); // (coop-onesound)
     } else {
         SoundCoopStopBattle();
         SoundCoopMusicVolume(MIDI_PORT_AMBIENT, 0);
@@ -884,7 +890,71 @@ int VoiceJobChara() {
     return g_voice.chara;
 }
 
+// ---------------------------------------------------------------------------------------------
+// coop-onesound (Jep's v0.2.3 playtest, 2026-11-22, two windows on one PC: "I hear audio from torches maybe on both characters
+// fairly loudly"): every window on a PC plays into the same speakers, so the world's shared sounds played once per window. Divine
+// Beast Cave's background loop (SE 53, which retail sets from the torch nearest the camera: one is always near, 46-58 of 127 on
+// both copies) came twice, as did the music and every other background loop. Now a window player 1's copy started on this PC
+// (Local's player 2, a lobby's Multi screen seat or handed window: NetplayLocalSpawn gives each DC_NETPLAY_LOCAL_CLAIM or
+// DC_NETPLAY_LOCAL_PAD), while linked to it and in its world (not apart), leaves the shared sounds to the lowest player on the PC
+// (player 1's copy, the one that started it): the music ports (the music, the ambient/battle port, the third sequence port), the
+// background loops (the base table's ambient block, se 50-66: the floors' loops, the town's water, fire and wind sources) and
+// thunder (67-74). Its loops still run, at volume 0, so the moment player 1's copy goes (the link down: it closed or dropped) or
+// the pair goes apart, this window plays them again from the next frame. Each player's own sounds (steps, swings, hits, voice,
+// menus) and the monsters' stay on every window, as before; copies on other PCs are as before.
+// DC_COOP_AUDIO_TEST_SAME_PC=1 (the tests'): this copy counts as such a window. DC_COOP_AUDIO_MUTATE=onesound_all (twin): every
+// window plays everything, as before. DC_COOP_AUDIO_LOG: a "coop-onesound:" line a second with what this copy played and held.
+bool SamePcWindow() {
+    static const bool started = TestEnvInt("DC_NETPLAY_LOCAL_CLAIM", -1) >= 0 || TestEnvInt("DC_NETPLAY_LOCAL_PAD", -1) >= 0 ||
+                                TestEnvOn("DC_COOP_AUDIO_TEST_SAME_PC");
+    return started;
+}
+
+bool SharedSoundsElsewhere() {
+    return SamePcWindow() && NetplayLocalPlayer() > 1 && NetplayLinkUp() && !CoopWorldsApart() && !AudioMutated("onesound_all");
+}
+
+bool SharedLoopSe(int se_no) {
+    return se_no >= 50 && se_no <= 66;
+}
+
+bool SharedFlatSe(int se_no) {
+    return se_no >= SE_THUNDER_RUMBLE && se_no <= SE_THUNDER_CLAP;
+}
+
+// The ambient port's volume co-op asks for (BattleMix, ReleaseMusic): 0 while the shared sounds are another window's.
+int AmbientPortVolume(int volume) {
+    return SharedSoundsElsewhere() ? 0 : volume;
+}
+
+// What this copy did with its shared and own sounds since its last line (DC_COOP_AUDIO_LOG).
+struct OneSound {
+    int loops = 0;     // background loop volumes the game set
+    int loops_top = 0; // the loudest of them
+    int loop_se = -1;  // and its sound
+    int held = 0;      // of them, played at 0 here
+    int flat_held = 0; // thunder not played here
+    int own = 0;       // other sounds played
+} g_one;
+
 } // namespace coop
+
+// snd.cpp's SndSetSeVol (coop-onesound): the volume a background loop plays at on this copy.
+int CoopSharedSeVolume(int se_no, int vol) {
+    if (!coop::SharedLoopSe(se_no)) {
+        return vol;
+    }
+    coop::g_one.loops++;
+    if (vol >= coop::g_one.loops_top) {
+        coop::g_one.loops_top = vol;
+        coop::g_one.loop_se = se_no;
+    }
+    if (coop::SharedSoundsElsewhere()) {
+        coop::g_one.held++;
+        return 0;
+    }
+    return vol;
+}
 
 void CoopAudioStep() {
     using namespace coop;
@@ -893,6 +963,36 @@ void CoopAudioStep() {
         ReleaseMusic(true);
     }
     StepVoice();
+
+    // coop-onesound: the music ports, held at 0 on a window whose shared sounds are player 1's copy's, the game's again after.
+    static bool shared_held = false;
+    const bool  hold = SharedSoundsElsewhere();
+    if (hold) {
+        SoundCoopMusicVolume(MIDI_PORT_BGM, 0);
+        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, 0);
+        SoundCoopMusicVolume(MIDI_PORT_UNK_2, 0);
+    } else if (shared_held) {
+        SoundCoopMusicVolume(MIDI_PORT_BGM, -1);
+        SoundCoopMusicVolume(MIDI_PORT_AMBIENT, -1); // (BattleMix asks for its own again at its next step)
+        SoundCoopMusicVolume(MIDI_PORT_UNK_2, -1);
+    }
+    if (hold != shared_held) {
+        shared_held = hold;
+        std::printf("coop-onesound: this copy (player %d) %s at link tick %lld\n", NetplayLocalPlayer(),
+                    hold ? "is a window on player 1's PC, linked in one world: its music and background loops play from player 1's copy"
+                         : "plays its own music and background loops again (player 1's copy gone, the pair apart, or not on one PC)",
+                    (long long) NetplayLinkTick());
+        std::fflush(stdout);
+    }
+    if (static int one_wait = 0; Logging() && --one_wait <= 0) {
+        one_wait = 60;
+        std::printf("coop-onesound: player %d tick %lld: shared %s; loops %d (loudest se %d at %d), held at 0 %d; thunder held %d; "
+                    "music ports played %d %d %d; other sounds played %d\n",
+                    NetplayLocalPlayer(), (long long) NetplayLinkTick(), hold ? "elsewhere" : "here", g_one.loops, g_one.loop_se, g_one.loops_top,
+                    g_one.held, g_one.flat_held, SoundCoopPlayedVolume(MIDI_PORT_BGM), SoundCoopPlayedVolume(MIDI_PORT_AMBIENT),
+                    SoundCoopPlayedVolume(MIDI_PORT_UNK_2), g_one.own);
+        g_one = OneSound{};
+    }
 
     static bool said = false;
     if (Logging() && !said) {
@@ -936,6 +1036,18 @@ void SndSePlay(int se_no, int vol, int voice) {
 
     if (info == nullptr || coop::OthersSound(se_no)) { // coop-menuse
         return;
+    }
+    // coop-onesound: on a window whose shared sounds are player 1's copy's, a background loop starts at 0 (it runs, so it is heard
+    // here the moment that copy goes; its volume is SndSetSeVol's) and thunder is not played here.
+    if (coop::SharedSoundsElsewhere() && (coop::SharedLoopSe(se_no) || coop::SharedFlatSe(se_no))) {
+        if (coop::SharedFlatSe(se_no)) {
+            coop::g_one.flat_held++;
+            return;
+        }
+        CSnd.SE_Play(coop::PortOf(info), info->bank, info->prog, 0, voice); // (at 0 even for a row with no volume of its own)
+        return;
+    } else if (!coop::SharedLoopSe(se_no)) {
+        coop::g_one.own++;
     }
 
     // coop-soundpt: a sound with a place of its own (SoundFrom: her step's, a hit where it lands) comes from there, unless it is

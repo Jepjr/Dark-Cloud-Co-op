@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#include <deque> // coop-pacefix: the fake FIFO queue (a test seam)
 #include <SDL3/SDL.h> // coop-indoorfps: the window's screen rate
 #include "coop/coop.hpp"
 #include "coop/netplay.hpp"
@@ -491,7 +492,16 @@ std::int64_t CoopPresentPaceDue(std::int64_t now_ns) {
     // short (kPaceEarly): a frame that comes before its vblank waits for it, and that wait is the next anchor.
     // coop-indoorfps: never longer than the screen's own vblank period, when known (above)
     const double screen = g_pace.no_cap ? 0.0 : g_display_period.load(std::memory_order_relaxed);
-    const double period = screen > 0.0 ? std::min(g_pace.period, screen) : g_pace.period;
+    // coop-pacefix (Jep's v0.2.3 playtest, 11-22: "FPS 31.2  TICK 33.8/60" mid-combo, two windows on a 143 Hz and a 60 Hz screen): the
+    // screen's own period whenever its rate is known, never one under it. The learnt period was only capped at the screen's, so a period
+    // learnt or cut short stayed in use: his player 1 paced at 3.4-3.5 ms on a 6.99 ms vblank from its first second (a fast pair of
+    // waiting presents taken as the vblank), his player 2 cut down to 9-12 ms on a 16.67 ms one. Frames then came about twice a vblank,
+    // FIFO presents waited inside the render thread's turn, and the game thread waits for that turn (its lease, MGEndFrame) every tick:
+    // 1-2.7 ms a tick on average, up to 7-24 ms (100 once) against PC-02's 0.004, and a combo's extra drawing pushed ticks past 16.7 ms
+    // (33.8 a second, the lockstep dragging both copies). The learnt period paces a screen whose rate is unknown, as before.
+    // DC_PERF_MUTATE=pace_under_screen (twin): the learnt period capped at the screen's, as before.
+    static const bool under = TestEnvIs("DC_PERF_MUTATE", "pace_under_screen");
+    const double      period = screen > 0.0 ? (under ? std::min(g_pace.period, screen) : screen) : g_pace.period;
     const std::int64_t step = MsNs(period * (1.0 - kPaceEarly));
     if (g_pace.next == 0) {
         g_pace.next = g_pace.anchor + step + MsNs(kPaceAfterMs); // (the frame that waited shows at the vblank after its own)
@@ -561,6 +571,10 @@ double CoopPresentPacePeriod(int *cuts) {
     *cuts = g_pace_cuts.load(std::memory_order_relaxed);
     const double learnt = g_pace_period.load(std::memory_order_relaxed);
     const double screen = g_pace.no_cap ? 0.0 : g_display_period.load(std::memory_order_relaxed);
+    static const bool under = TestEnvIs("DC_PERF_MUTATE", "pace_under_screen");
+    if (learnt > 0.0 && screen > 0.0 && !under) {
+        return screen; // coop-pacefix: the pace in use (CoopPresentPaceDue)
+    }
     return learnt > 0.0 && screen > 0.0 ? std::min(learnt, screen) : learnt;
 }
 
@@ -594,11 +608,35 @@ bool CoopTestFakeVsyncPresent() {
     static const int hz = TestEnvInt("DC_QA_FAKE_VSYNC_HZ", 0);
     static const Clock::time_point origin = Clock::now();
     static Clock::time_point       shown_at; // the vblank that shows the frame queued last
+    // coop-pacefix test seams: DC_QA_FAKE_DRAW_US=X: each display frame takes X microseconds more to draw (a heavier screen's GPU, as a bigger
+    // window's); DC_QA_FAKE_VSYNC_QUEUE=N: the swapchain holds N frames, so a present returns at once until N are waiting for their
+    // vblanks and only then waits for the oldest to show (Windows' flip-model FIFO; 1, the default: each waits, as before).
+    static const int draw_us = TestEnvInt("DC_QA_FAKE_DRAW_US", 0);
+    static const int depth = std::max(1, TestEnvInt("DC_QA_FAKE_VSYNC_QUEUE", 1));
+    static std::deque<Clock::time_point> queued; // the vblanks the frames still queued show at
     if (hz <= 0) {
         return false;
     }
+    if (draw_us > 0) { // (spun, as drawing works: a sleep this short can oversleep by a timer quantum)
+        const Clock::time_point until = Clock::now() + std::chrono::microseconds(draw_us);
+        while (Clock::now() < until) {
+        }
+    }
     const Clock::duration period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / hz));
     Clock::time_point     now = Clock::now();
+    if (depth > 1) {
+        while (!queued.empty() && queued.front() <= now) {
+            queued.pop_front();
+        }
+        if ((int) queued.size() >= depth) {
+            std::this_thread::sleep_until(queued.front()); // (the queue full: the oldest frame's vblank frees an image)
+            now = queued.front();
+            queued.pop_front();
+        }
+        const Clock::time_point next = origin + ((now - origin) / period + 1) * period;
+        queued.push_back(queued.empty() ? next : std::max(next, queued.back() + period));
+        return true;
+    }
     if (shown_at > now) {
         std::this_thread::sleep_until(shown_at); // (a frame still queued: wait for its vblank, as a FIFO present does)
         now = shown_at;

@@ -15557,6 +15557,7 @@ void NetplayResyncLandedOnFloor() {
 void NetplayModeEnded() {
     g_resync_at_menu = false; // coop-resyncmenu: only the mode a resync leaves into
     ZoneModeEnded(); // coop-stable1: the zone line, before NextMapNo is followed
+    coop::PresentFloorEnded(); // coop-atlaleave: no presentation outlives its floor
     g_floor_started = false; // coop-snapshot: whatever floor this mode had is left behind
     g_floor_build_key = -1; // coop-localfix: and its build (NetplayFloorBuilt)
 

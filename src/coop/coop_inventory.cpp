@@ -7,6 +7,7 @@
 #include "coop/coop_actor.hpp" // coop-eventslots: kMaxPlayers
 #include "coop/coop_audio.hpp" // coop-menuse
 #include "coop/coop_worlds.hpp" // coop-dungeonp2
+#include "coop/coop_opener.hpp" // coop-atlaparts: AtlaRepairAfterLoad
 
 #include <algorithm>
 #include <cstdio>
@@ -3242,6 +3243,7 @@ bool CoopInventorySave(const std::filesystem::path &save_directory) {
 }
 
 void CoopInventoryLoad(const std::filesystem::path &save_directory) {
+    coop::AtlaRepairAfterLoad(SaveData != nullptr ? (CUserStatus *) SaveData->GetDngStatus() : nullptr); // coop-atlaparts (#265)
     InventoryNewGame();
     FishPoolsReset(); // coop-fishpools: the slot's file gives the records (none: the save's are player 1's, FishPoolsBegin)
     ProfileBagsRead(save_directory);

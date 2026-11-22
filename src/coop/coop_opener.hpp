@@ -7,6 +7,7 @@
 namespace dc::game {
 class CCameraFollow;
 class CMotionModel;
+class CUserStatus; // coop-atlaparts
 } // namespace dc::game
 
 // coop-opt7 (Jep 11-09; debug\notes\opt7-design.md): a chest's or an Atla's presentation is its opener's own. Two halves:
@@ -58,6 +59,13 @@ int  PresentEngineRefusal();
 // world's getAtraToSaveData having emptied its slot. Else read, retail's. DC_COOP_DEBUG: the name's message said
 // ("coop-opener: player N's engine names Atla <id> (message <no>)"). DC_COOP_MUTATE=atlaname_reread (twin): read, as before.
 int  PresentEngineAtla(int map_no, int read);
+// coop-atlaparts (GitHub #265): a ball still on the floor (NowDngMap->atra[entry]) whose random entry another floor's ball has
+// spent since this floor was built (apart, two floors of one dungeon) takes the entry of its half still owed. Every take calls it
+// before reading the ball's Atla (retail's step 0, the world's StartAtla, her TakeAtla).
+void AtlaBallLive(int dungeon, int entry);
+// coop-atlaparts (GitHub #265): at a slot's load, each Atla a save lost to the bug above gets its slot back on a floor of its half,
+// to be found again. A healthy save is left as it is.
+void AtlaRepairAfterLoad(CUserStatus *status);
 // The Atla's stance the world gave its opener (PlayerAtlaStance, run once at the press on every copy): true when the opener
 // stands in it (a member who is not Toan), with the effect's turn.
 bool PresentEngineStance(float *turn);
@@ -135,5 +143,7 @@ int PresentTestStateDue();
 std::uint32_t PresentHash();
 void          PresentInstall();
 void          PresentResetForSession();
+// coop-atlaleave: a floor's mode end: every presentation on it ends with it, the engine stops (none left to step on the next floor).
+void          PresentFloorEnded();
 
 } // namespace coop

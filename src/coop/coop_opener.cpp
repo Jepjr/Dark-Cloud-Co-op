@@ -14,6 +14,7 @@
 
 #include <libvu0.h>
 
+#include <algorithm> // coop-atlaparts: std::count, std::find
 #include <cmath>
 #include <cstdio>
 #include <cstdlib> // coop-tripwires2: std::abort
@@ -31,7 +32,9 @@
 #include "dataread.hpp"
 #include "dngmessageman.hpp"
 #include "dngstatusdata.hpp"
+#include "dungeonparts.hpp" // coop-atlaparts: BtAtraListMake (a test hook)
 #include "dun/gameloop.hpp"
+#include "main.hpp" // coop-atlaleave: mode, GAME_MODE_DUNGEON
 #include "framevu1.hpp"    // coop-camflash
 #include "motionmodel.hpp" // coop-camflash
 #include "dungeonmap.hpp"
@@ -599,6 +602,7 @@ static bool StartAtla(int player, int active) {
     const int       index = NowDngMap->events[active].index;
     Present        &p = g_present[player - 1];
     sceVu0FVECTOR   stood;
+    AtlaBallLive(selectMapNo, index); // coop-atlaparts (#265)
     sceVu0FVECTOR   ball;
 
     p = Present{};
@@ -899,6 +903,176 @@ CCameraFollow *PresentEngineCamera() {
     return g_opener_engine.player > 0 && !g_opener_engine.done ? g_opener_engine.camera : nullptr;
 }
 
+// coop-atlaparts (GitHub #265: Norune's floors all showed their Atla taken, yet parts and villagers never came). A floor's
+// random Atla are drawn as it is built (BtAtraFloorCyoice) from the dungeon's list (atra_registry: each entry's part and how
+// many balls still hold it), on a copy of the list: the draw itself takes nothing. Retail builds one floor at a time, so a ball
+// never holds an entry another floor's ball has taken since. Apart, two players are on two floors of one dungeon at once, each
+// copy drew its floor from the list as it stood, and an entry with one ball left could be drawn on both. The first taker got
+// its part (GetAtraData: its count to 0 and its id to -1, on both copies by the progress); the second read id -1, so
+// AtraPartsGet/AtraChipGet gave nothing, while GetAtraData still marked that floor's slot taken and counted the spent entry
+// down past 0. The entry the second ball should have drawn kept its count with no slot left on any floor to draw it: that part
+// could never be had. Here, at the take: a ball still on the floor whose random entry is spent takes the first entry of its half
+// (the list's -1 front, -2 back) that still has a ball to give: that is the one left over. On every copy alike (the list is the
+// same on copies taking it on one tick). DC_COOP_MUTATE=atla_spent_read (twin): the spent entry read, as before.
+void AtlaBallLive(int dungeon, int entry) {
+    if (NowDngMap == nullptr || UserStatus == nullptr || dungeon < 0 || dungeon >= 6 || entry < 0 || entry >= 8) {
+        return;
+    }
+
+    ATRA_BOLL &ball = NowDngMap->atra[entry];
+
+    if (ball.used == 0 || ball.atra_no < 0 || ball.atra_no >= 100) {
+        return;
+    }
+
+    ATRA_SAVE      *list = UserStatus->atra_registry[dungeon];
+    const ATRA_SAVE drawn = list[ball.atra_no];
+
+    if ((drawn.id != -1 && drawn.refcount > 0) || (drawn.floor != -1 && drawn.floor != -2)) {
+        return; // its part is still to be had, or a fixed Atla (its own floor's alone, never drawn twice)
+    }
+
+    int live = -1;
+
+    for (int i = 0; i < 100 && live < 0; i++) {
+        if (list[i].id != -1 && list[i].refcount > 0 && list[i].floor == drawn.floor) {
+            live = i;
+        }
+    }
+
+    const bool twin = Mutated("atla_spent_read");
+
+    std::fprintf(stderr, "coop-atlaparts: ball %d's entry %d is spent (id %d, count %d): %s entry %d (atla %d)\n", entry, ball.atra_no, (int) drawn.id,
+                 (int) drawn.refcount, twin ? "read as it is (atla_spent_read), not" : "takes", live, live >= 0 ? (int) list[live].id : -1);
+    if (live >= 0 && !twin) {
+        ball.atra_no = live;
+    }
+}
+
+// coop-atlaparts (GitHub #265): a save the bug above already hurt. Each lost take left a floor's random slot marked taken (-3)
+// with no part given, and an entry of the list still owed (count > 0) with no open slot (-2) left in its half to be drawn into:
+// in a healthy list, the counts its half still owes equal its open slots (BtAtraListMake lays one slot per count; each take
+// spends one of each). At a slot's load, each half owing more than its open slots gets an open slot back for each one, laid as
+// BtAtraListMake lays one (a floor of that half with room that already holds Atla, so one retail lays them on (chkAtraFloor);
+// the one holding fewest, the first of a tie), so the
+// floor menu shows that Atla to find again and the next visit draws it. A healthy save is left byte for byte. Logged once a load.
+// Retail's CenterFloorTbl and MaxFloorTbl (dungeonparts.cpp, internal there). DC_COOP_MUTATE=atla_repair_off (twin): not repaired.
+// Test hook DC_COOP_TEST_ATLA_LOST=N: first, N open slots of the first dungeon laid out are marked taken, as N lost takes left them.
+void AtlaRepairAfterLoad(CUserStatus *status) {
+    static const int  kCenter[6] = {8, 9, 9, 9, 8, 13};
+    static const int  kMax[6] = {15, 17, 18, 18, 15, 25};
+    static const char *const kNames[6] = {"the Divine Beast Cave", "Wise Owl Forest", "the Shipwreck", "the Sun and Moon Temple", "the Moon Sea", "the Gallery of Time"};
+    static const int  lose = TestEnvInt("DC_COOP_TEST_ATLA_LOST", 0);
+
+    if (status == nullptr) {
+        return;
+    }
+    CDngStatusData *dng = (CDngStatusData *) status;
+
+    // Test hook DC_COOP_TEST_ATLA_LAYOUT=D: dungeon D's list laid out first if the save has none yet, as its first entry lays it
+    // (BtAtraListMake, through UserStatus), so the check below runs on a real list.
+    if (static const int layout = TestEnvInt("DC_COOP_TEST_ATLA_LAYOUT", -1); layout >= 0 && layout < 6) {
+        bool laid = false;
+
+        for (const ATRA_SAVE &e : status->atra_registry[layout]) {
+            laid = laid || e.floor == -1 || e.floor == -2;
+        }
+        if (!laid) {
+            CUserStatus *was = UserStatus;
+
+            UserStatus = status;
+            BtAtraListMake(layout);
+            UserStatus = was;
+            std::fprintf(stderr, "coop-atlaparts: test: dungeon %d's Atla list laid out on the loaded save\n", layout);
+        }
+    }
+
+    for (int d = 0, marked = 0; d < 6 && lose > 0 && marked == 0; d++) {
+        for (int f = 0; f < 40; f++) {
+            for (int s = 0; s < 8 && marked < lose; s++) {
+                if (status->atra_grid[d][f][s] == -2) {
+                    status->atra_grid[d][f][s] = -3;
+                    marked++;
+                    std::fprintf(stderr, "coop-atlaparts: test: dungeon %d floor %d slot %d marked taken with nothing given (a lost take)\n", d, f + 1, s);
+                }
+            }
+        }
+    }
+    // The lists' print (every floor's slots and every entry, all six dungeons), before and after: the same on a healthy save.
+    const auto print = [status] {
+        std::uint32_t        h = 0x811c9dc5u;
+        const unsigned char *a = (const unsigned char *) status->atra_grid;
+        const unsigned char *b = (const unsigned char *) status->atra_registry;
+
+        for (std::size_t i = 0; i < sizeof status->atra_grid; i++) {
+            h = (h ^ a[i]) * 0x01000193u;
+        }
+        for (std::size_t i = 0; i < sizeof status->atra_registry; i++) {
+            h = (h ^ b[i]) * 0x01000193u;
+        }
+        return h;
+    };
+    const std::uint32_t before = print();
+    int                 total = 0;
+
+    for (int d = 0; d < 6; d++) {
+        int repaired = 0;
+
+        for (int half = -1; half >= -2; half--) {
+            int owed = 0;
+            int open = 0;
+
+            for (const ATRA_SAVE &e : status->atra_registry[d]) {
+                owed += e.id != -1 && e.refcount > 0 && e.floor == half ? e.refcount : 0;
+            }
+            for (int f = 0; f < 40; f++) {
+                if ((f > kCenter[d] - 1 ? -2 : -1) == half) {
+                    open += (int) std::count(status->atra_grid[d][f], status->atra_grid[d][f] + 8, -2);
+                }
+            }
+            if (owed > open) {
+                std::fprintf(stderr, "coop-atlaparts: %s's %s owes %d Atla with %d open slots%s\n", kNames[d], half == -1 ? "front half" : "back half", owed, open,
+                             Mutated("atla_repair_off") ? ": left as it is (atla_repair_off)" : "");
+            }
+            for (int lost = owed - open; lost > 0 && !Mutated("atla_repair_off"); lost--) {
+                // BtAtraListMake's floors for the half: the front [0, center - 1), the back [center, max - 1).
+                const int first = half == -1 ? 0 : kCenter[d];
+                const int end = half == -1 ? kCenter[d] - 1 : kMax[d] - 1;
+                int       best = -1;
+
+                for (int f = first; f < end; f++) {
+                    if (dng->GetMaxAtraNum(d, f) > 0 && dng->GetMaxAtraNum(d, f) < 8 && (best < 0 || dng->GetMaxAtraNum(d, f) < dng->GetMaxAtraNum(d, best))) {
+                        best = f;
+                    }
+                }
+                if (best >= 0) {
+                    dng->SetGetAtra(d, best, -2);
+                } else { // no floor of the half has room: one taken slot of it opens again
+                    int *taken = nullptr;
+
+                    for (int f = first; f < end && taken == nullptr; f++) {
+                        int *at = std::find(status->atra_grid[d][f], status->atra_grid[d][f] + 8, -3);
+
+                        taken = at != status->atra_grid[d][f] + 8 ? at : nullptr;
+                        best = taken != nullptr ? f : best;
+                    }
+                    if (taken == nullptr) {
+                        break;
+                    }
+                    *taken = -2;
+                }
+                repaired++;
+                std::fprintf(stderr, "coop-atlaparts: %s floor %d gets back an Atla to find\n", kNames[d], best + 1);
+            }
+        }
+        if (repaired > 0) {
+            std::fprintf(stderr, "atla: repaired %d lost Atla on %s\n", repaired, kNames[d]);
+        }
+        total += repaired;
+    }
+    std::fprintf(stderr, "coop-atlaparts: load check: Atla lists %08x before, %08x after, %d repaired\n", before, print(), total);
+}
+
 int PresentLitPlayer() {
     if (atraGetStatus == 0) {
         return 0;
@@ -1039,6 +1213,28 @@ std::uint32_t PresentHash() {
         bits |= (std::uint32_t) (g_present[i].kind & 3) << (2 * i);
     }
     return bits;
+}
+
+// coop-atlaleave (the v0.2.2 windowed #265 repro's crash: copy B, AV in MotionProc under motionDrive on the first frame of a
+// rebuilt floor): a presentation belongs to its floor (its box or ball, its effect loaded in BtCashBuffer). Her copy left the floor
+// with her Atla's presentation still running: nothing ended it, the floor's init cleared the world's atraGetStatus but the engine
+// keeps its own (EngineScreenSwap), so motionDrive swapped it back in on the new floor and stepped shortAtraEffect, whose motion
+// data the new floor's loads had written over. Every mode end on a floor (NetplayModeEnded, while the floor is still there): each
+// presentation on it ends as its end command would (EndWorld: the opener free again, step_disable off), and the engine stops.
+// Alike on copies leaving one floor together; apart the floor is this copy's alone. DC_COOP_MUTATE=present_floor_kept (twin): kept,
+// as before.
+void PresentFloorEnded() {
+    if (mode != GAME_MODE_DUNGEON || NowDngMap == nullptr || Mutated("present_floor_kept")) {
+        return;
+    }
+    for (int player = 1; player <= kMaxPlayers; player++) {
+        if (g_present[player - 1].kind != kPresentNone) {
+            std::fprintf(stderr, "coop-opener: player %d's %s still presenting as the floor ends: ended with it\n", player,
+                         g_present[player - 1].kind == kPresentAtla ? "Atla" : "chest");
+            EndWorld(player, NetplayLinkTick());
+        }
+    }
+    EngineClear("the floor ended");
 }
 
 void PresentResetForSession() {

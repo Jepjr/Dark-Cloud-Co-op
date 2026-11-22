@@ -85,6 +85,7 @@
 #include "dataread.hpp"      // coop-chestworld: read_buffer
 #include "mainitemmodel.hpp" // coop-chestworld: activeItem
 #include "main.hpp"
+#include "savedata.hpp" // coop-atlaparts: SaveData
 #include "mathutil.hpp"
 #include "monstorunit.hpp"
 #include "randomitem.hpp"
@@ -516,6 +517,27 @@ bool Place() {
 
         g_test.box = NowDngMap->events[g_test.event].index;
         sceVu0CopyVector(g_test.spot, NowDngMap->events[g_test.event].pos);
+        // coop-atlaparts (GitHub #265) DC_COOP_DUNTEST_ATLA_SPENT=1: the ball's random entry is taken on the dungeon's other floors
+        // till it has no ball left, as the other player's copy, apart on another floor that drew the same entry, takes it there and
+        // its progress applies here (getAtraToSaveData's body): this floor's ball still holds the spent entry, as it was drawn.
+        if (TestEnvOn("DC_COOP_DUNTEST_ATLA_SPENT")) {
+            const int  drawn = NowDngMap->atra[g_test.box].atra_no;
+            ATRA_SAVE &entry = UserStatus->atra_registry[selectMapNo][drawn];
+            const int  id = entry.id;
+            int        taken = 0;
+
+            for (int floor = 0; floor < 40 && (entry.floor == -1 || entry.floor == -2) && entry.refcount > 0; floor++) {
+                int slots[8];
+
+                ((CDngStatusData *) UserStatus)->SetCopyAtraList(selectMapNo, floor, slots);
+                if (floor != UserStatus->cur_floor && std::find(slots, slots + 8, -2) != slots + 8) {
+                    getAtraToSaveData(id, drawn, SaveData, selectMapNo, floor);
+                    taken++;
+                }
+            }
+            std::fprintf(stderr, "duntest: atla spent: ball %d's entry %d (atla %d, half %d) taken %d times on other floors: count %d, id %d\n", g_test.box,
+                         drawn, id, (int) entry.floor, taken, (int) entry.refcount, (int) entry.id);
+        }
         // coop-atlafly: DC_COOP_DUNTEST_ATLA_SIDE=<degrees>: the user 11 from the ball's middle at that bearing (0 its +z), as the
         // rc1 playtest's opener stood, so the effect is turned to her (on the ball itself it is never turned)
         if (const int side = TestEnvInt("DC_COOP_DUNTEST_ATLA_SIDE", -1000); side > -1000) {

@@ -1343,6 +1343,7 @@ void AtlaStanceAt(const float *ball) {
 // apart also queues for the host) and its name is shown. No task starts, so the player plays on and each copy
 // keeps its own camera.
 void TakeAtla(int active, int entry_no) {
+    AtlaBallLive(selectMapNo, entry_no); // coop-atlaparts (#265)
     ATRA_BOLL &ball = NowDngMap->atra[entry_no];
     int        atra_id = UserStatus->atra_registry[selectMapNo][ball.atra_no].id;
 
